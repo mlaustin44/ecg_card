@@ -33,7 +33,10 @@
 
 /* Rail-up and init sequence; leaves the display ON (showing black). */
 void ssd1306_power_on(void);
-/* Safe power-down sequence (see header). Waits for a running flush. */
+/* Safe power-down sequence (see header). Waits up to 50 ms for a running
+ * flush; if the SPI is still busy then (hardware fault) the display-off
+ * commands are skipped, but the pin-safe sequence (DC, CS, RESET low, bus
+ * detached, then OLED_EN low) always completes. */
 void ssd1306_power_off(void);
 
 /* True once SSD1306_SETTLE_MS have elapsed since power_on() (non-blocking). */

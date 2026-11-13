@@ -14,19 +14,21 @@ static void common_checks(void)
     CHECK(scen.max_step_acq_us <= 20000);
     CHECK_EQ(scen.body_en_outside_session, 0);
     CHECK_EQ(scen.measure_req_on_usb, 0);
+    CHECK_EQ(scen.vref_outside_ppg, 0);
+    CHECK_EQ(sim_facts()->mcp_vref_int_standby, 0);
 }
 
 TEST(vmid_fault)
 {
     scen_boot(false);
-    sim_ecg_set_vmid_error_mv(25);
+    sim_ecg_set_vmid_error_mv(60);
     scen_run_ms(300);
     scen_tap(2);
     scen_tap(1);
     scen_run_ms(800);
     CHECK_EQ(scen_screen(), UI_SCREEN_ECG);
     CHECK_EQ(scen_live_state(), UI_MEAS_FAULT);
-    CHECK(scen_m()->fault_text && strstr(scen_m()->fault_text, "VMID 167") != NULL);
+    CHECK(scen_m()->fault_text && strstr(scen_m()->fault_text, "VMID 171") != NULL);
     CHECK(scen_analog_all_off());
     CHECK(!sim_rail(SIM_RAIL_BODY_EN));
     scen_shot("vmid_fault");

@@ -9,6 +9,10 @@ void dsp_pat_init(dsp_pat_t *p)
     p->rejected = 0;
 }
 
+/* Both timelines are true microseconds modulo 2^32 (index * 2000 and
+ * frame * 10000 wrap after 71.6 min, but consistently), and every use is a
+ * difference of two nearby times taken as int32_t, so the pairing and the PAT
+ * value are exact at any session length. */
 uint32_t dsp_pat_r_time_us(uint32_t index, uint8_t frac_q8)
 {
     return index * 2000u + (((uint32_t)frac_q8 * 125u + 8u) >> 4)
@@ -21,11 +25,21 @@ uint32_t dsp_pat_foot_time_us(uint32_t frame, uint8_t frac_q8)
          + (uint32_t)(PPG_T_ON_SAMPLE_US - DSP_PPG_ANALOG_DELAY_US);
 }
 
+/* Sub-frame part of a foot time relative to the ECG stream origin, us:
+ * frac + on-sample instant - analog delay - DSP_ECG_STREAM_T0_US. */
+#define FOOT_REL_US (PPG_T_ON_SAMPLE_US - DSP_PPG_ANALOG_DELAY_US - DSP_ECG_STREAM_T0_US)
+_Static_assert(FOOT_REL_US > 0 && FOOT_REL_US < 100000, "foot offset range");
+_Static_assert(PPG_FRAME_US == 5u * 2000u, "one PPG frame = 5 ECG stream samples");
+
 uint32_t dsp_pat_foot_ecg_index(uint32_t frame, uint8_t frac_q8)
 {
-    /* t = m * 2000 + DSP_ECG_STREAM_T0_US  =>  m = (t - T0) / 2000 */
-    uint32_t t = dsp_pat_foot_time_us(frame, frac_q8) - (uint32_t)(int32_t)DSP_ECG_STREAM_T0_US;
-    return (t + 1000u) / 2000u; /* per pulse */
+    /* t - T0 = frame * 10000 + r, and 10 ms is exactly 5 stream samples, so
+     * m = round((t - T0) / 2000) = frame * 5 + round(r / 2000) without forming
+     * frame * 10000 (which wraps after 71.6 min; the old (t + 1000) / 2000 on
+     * the wrapped value jumped back by 2^32 / 2000 samples). frame * 5 wraps
+     * with the stream index itself (after 99 days). */
+    uint32_t r = (((uint32_t)frac_q8 * 625u + 8u) >> 4) + (uint32_t)FOOT_REL_US;
+    return frame * 5u + (r + 1000u) / 2000u; /* per pulse */
 }
 
 /* R-peak k back from the newest (0 = newest). */

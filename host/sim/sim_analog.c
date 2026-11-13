@@ -39,12 +39,18 @@ static struct {
     unsigned running;
     uint64_t t_start, ecg_n, ppg_k;
     int ppg_phase;
-    uint16_t ecg_ring[SIM_ECG_RING_SAMPLES];
-    size_t ecg_head, ecg_count;
-    uint32_t ecg_overruns;
+    /* Rings indexed by timeline position (hal.h): slot = index % size. The
+     * capacity actually usable depends on the ring model. */
+    uint16_t ecg_ring[SIM_BSP_ECG_RING_SAMPLES];
+    bool ecg_valid[SIM_BSP_ECG_RING_SAMPLES];  /* false: conversion missed */
+    uint64_t ecg_rd;                           /* next index to hand out */
+    uint32_t ecg_delivered, ecg_seen_end;
     hal_ppg_frame_t ppg_ring[SIM_PPG_RING_FRAMES];
-    size_t ppg_head, ppg_count;
-    uint32_t ppg_overruns;
+    bool ppg_valid[SIM_PPG_RING_FRAMES];
+    uint64_t ppg_done, ppg_rd;                 /* frames completed / next to hand out */
+    uint32_t ppg_delivered, ppg_seen_end;
+    sim_ring_model_t ring_model;               /* kept across sim_reboot */
+    uint32_t miss_ecg, miss_ppg;               /* kept across sim_reboot */
     bool ppg_analog;
     uint16_t dac12;
     uint16_t tia_dark, hi_dark;
@@ -209,13 +215,29 @@ void an_reset(void)
     A.inj_rld_mv = 8.0;
 }
 
+static void rings_reset(void)
+{
+    A.ecg_n = A.ecg_rd = 0;
+    A.ecg_delivered = A.ecg_seen_end = 0;
+    A.ppg_k = A.ppg_done = A.ppg_rd = 0;
+    A.ppg_delivered = A.ppg_seen_end = 0;
+    memset(A.ecg_valid, 0, sizeof A.ecg_valid);
+    memset(A.ppg_valid, 0, sizeof A.ppg_valid);
+}
+
 void an_mcu_reset(void)
 {
     A.running = 0;
-    A.ecg_head = A.ecg_count = A.ppg_head = A.ppg_count = 0;
-    A.ecg_overruns = A.ppg_overruns = 0;
+    rings_reset();
     A.ppg_analog = false;
     A.dac12 = 0;
+}
+
+void sim_acq_set_ring_model(sim_ring_model_t m) { A.ring_model = m; }
+void sim_acq_set_missed(uint32_t ecg_every, uint32_t ppg_every)
+{
+    A.miss_ecg = ecg_every;
+    A.miss_ppg = ppg_every;
 }
 
 void an_sync(void) { model_to(sim_now_us()); }
@@ -269,15 +291,12 @@ uint64_t an_next_event_us(void)
 static void ecg_sample(uint64_t t)
 {
     uint16_t code = to_code(ecg_out_v_at(t), A.adc_noise);
-    if (A.ecg_count == SIM_ECG_RING_SAMPLES) {
-        A.ecg_head = (A.ecg_head + 1) % SIM_ECG_RING_SAMPLES;
-        A.ecg_count--;
-        A.ecg_overruns++;
-    }
-    A.ecg_ring[(A.ecg_head + A.ecg_count) % SIM_ECG_RING_SAMPLES] = code;
-    A.ecg_count++;
+    size_t slot = (size_t)(A.ecg_n % SIM_BSP_ECG_RING_SAMPLES);
+    A.ecg_ring[slot] = code;
+    /* a missed conversion: the index advances, no data */
+    A.ecg_valid[slot] = !(A.miss_ecg && (A.ecg_n + 1) % A.miss_ecg == 0);
     A.ecg_n++;
-    ((sim_facts_t *)sim_facts())->ecg_samples++;
+    (sim_facts_raw())->ecg_samples++;
 }
 
 static void ppg_event(uint64_t t)
@@ -301,14 +320,11 @@ static void ppg_event(uint64_t t)
         double tia = tia_v_at(t, sim_led_now_ma());
         hal_ppg_frame_t f = {A.tia_dark, A.hi_dark, to_code(tia, A.adc_noise),
                              to_code(hi_v_from(tia), A.adc_noise)};
-        if (A.ppg_count == SIM_PPG_RING_FRAMES) {
-            A.ppg_head = (A.ppg_head + 1) % SIM_PPG_RING_FRAMES;
-            A.ppg_count--;
-            A.ppg_overruns++;
-        }
-        A.ppg_ring[(A.ppg_head + A.ppg_count) % SIM_PPG_RING_FRAMES] = f;
-        A.ppg_count++;
-        ((sim_facts_t *)sim_facts())->ppg_frames++;
+        size_t slot = (size_t)(A.ppg_k % SIM_PPG_RING_FRAMES);
+        A.ppg_ring[slot] = f;
+        A.ppg_valid[slot] = !(A.miss_ppg && (A.ppg_k + 1) % A.miss_ppg == 0);
+        A.ppg_done = A.ppg_k + 1;
+        (sim_facts_raw())->ppg_frames++;
         A.ppg_phase = 3;
         break;
     }
@@ -352,11 +368,10 @@ void hal_acq_start(unsigned streams)
             sim_viol(SIM_V_PPG_START, "PPG started without hal_ppg_analog(true)");
         if (!sim_pin(PIN_VLED_EN)) sim_viol(SIM_V_PPG_START, "PPG started with VLED_EN low");
         else if (sim_now_us() - sim_vled_rise_us() < (uint64_t)PPG_VLED_START_MS * 1000)
-            ((sim_facts_t *)sim_facts())->ppg_vled_early_starts++;
+            (sim_facts_raw())->ppg_vled_early_starts++;
     }
-    A.ecg_head = A.ecg_count = A.ppg_head = A.ppg_count = 0;
+    rings_reset();
     A.t_start = sim_now_us();
-    A.ecg_n = A.ppg_k = 0;
     A.ppg_phase = 0;
     A.running = streams;
     sim_service(); /* sample 0 is taken at t = 0 */
@@ -371,27 +386,74 @@ void hal_acq_stop(void)
 
 unsigned hal_acq_running(void) { return A.running; }
 
-size_t hal_ecg_read(uint16_t *dst, size_t max)
+/* Both ring models hand out contiguous runs with their timeline index:
+ *   DEFAULT: SIM_ECG_RING_SAMPLES / SIM_PPG_RING_FRAMES deep;
+ *   BSP:     the fw/bsp ECG ring: 512 deep, 16 kept away from the write
+ *            position, a read never crosses a 512-sample lap boundary.
+ * Overwritten or missed data shows as a jump of the index. */
+size_t hal_ecg_read(uint16_t *dst, size_t max, uint32_t *first_index)
 {
     sim_service();
-    size_t n = A.ecg_count < max ? A.ecg_count : max;
-    for (size_t i = 0; i < n; i++) dst[i] = A.ecg_ring[(A.ecg_head + i) % SIM_ECG_RING_SAMPLES];
-    A.ecg_head = (A.ecg_head + n) % SIM_ECG_RING_SAMPLES;
-    A.ecg_count -= n;
+    if (!dst || !first_index) {
+        sim_viol(SIM_V_API, "hal_ecg_read with NULL %s", dst ? "first_index" : "dst");
+        return 0;
+    }
+    bool bsp = A.ring_model == SIM_RING_BSP;
+    uint64_t keep = bsp ? SIM_BSP_ECG_RING_SAMPLES - 16u : SIM_ECG_RING_SAMPLES;
+    if (A.ecg_n - A.ecg_rd > keep) A.ecg_rd = A.ecg_n - keep;
+    size_t n = 0;
+    uint64_t start = A.ecg_rd;
+    while (n < max && A.ecg_rd < A.ecg_n) {
+        if (bsp && n > 0 && A.ecg_rd % SIM_BSP_ECG_RING_SAMPLES == 0) break;
+        size_t slot = (size_t)(A.ecg_rd % SIM_BSP_ECG_RING_SAMPLES);
+        if (!A.ecg_valid[slot]) {
+            if (n) break;
+            A.ecg_rd++;
+            continue;
+        }
+        if (n == 0) start = A.ecg_rd;
+        dst[n++] = A.ecg_ring[slot];
+        A.ecg_rd++;
+    }
+    if (n) {
+        *first_index = (uint32_t)start;
+        A.ecg_delivered += (uint32_t)n;
+        A.ecg_seen_end = (uint32_t)(start + n);
+    }
     return n;
 }
-uint32_t hal_ecg_overruns(void) { return A.ecg_overruns; }
+uint32_t hal_ecg_overruns(void) { return A.ecg_seen_end - A.ecg_delivered; }
 
-size_t hal_ppg_read(hal_ppg_frame_t *dst, size_t max)
+size_t hal_ppg_read(hal_ppg_frame_t *dst, size_t max, uint32_t *first_index)
 {
     sim_service();
-    size_t n = A.ppg_count < max ? A.ppg_count : max;
-    for (size_t i = 0; i < n; i++) dst[i] = A.ppg_ring[(A.ppg_head + i) % SIM_PPG_RING_FRAMES];
-    A.ppg_head = (A.ppg_head + n) % SIM_PPG_RING_FRAMES;
-    A.ppg_count -= n;
+    if (!dst || !first_index) {
+        sim_viol(SIM_V_API, "hal_ppg_read with NULL %s", dst ? "first_index" : "dst");
+        return 0;
+    }
+    if (A.ppg_done - A.ppg_rd > SIM_PPG_RING_FRAMES) A.ppg_rd = A.ppg_done - SIM_PPG_RING_FRAMES;
+    size_t n = 0;
+    uint64_t start = A.ppg_rd;
+    while (n < max && A.ppg_rd < A.ppg_done) {
+        size_t slot = (size_t)(A.ppg_rd % SIM_PPG_RING_FRAMES);
+        if (!A.ppg_valid[slot]) {
+            if (n) break;
+            A.ppg_rd++;
+            continue;
+        }
+        if (n == 0) start = A.ppg_rd;
+        dst[n++] = A.ppg_ring[slot];
+        A.ppg_rd++;
+    }
+    if (n) {
+        *first_index = (uint32_t)start;
+        A.ppg_delivered += (uint32_t)n;
+        A.ppg_seen_end = (uint32_t)(start + n);
+    }
     return n;
 }
-uint32_t hal_ppg_overruns(void) { return A.ppg_overruns; }
+uint32_t hal_ppg_overruns(void) { return A.ppg_seen_end - A.ppg_delivered; }
+uint32_t hal_acq_resyncs(void) { return 0; }
 
 void hal_ppg_analog(bool on)
 {
@@ -407,7 +469,7 @@ void hal_ppg_set_offset(uint16_t code)
     sim_service();
     if (code > 4095) code = 4095;
     if (code == A.dac12) return;
-    sim_facts_t *f = (sim_facts_t *)sim_facts();
+    sim_facts_t *f = sim_facts_raw();
     f->ppg_offset_changes++;
     if ((A.running & HAL_ACQ_PPG) && (A.ppg_phase == 1 || A.ppg_phase == 2))
         f->ppg_offset_in_sample_window++;

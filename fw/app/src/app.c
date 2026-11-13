@@ -41,6 +41,10 @@
 #define MIN_VALID_BEATS       5u     /* ... and >= 5 beats / pulses */
 #define BATT_POLL_MS          10000u
 #define BATT_FAILS_INVALID    3u
+#define BATT_RETRY_MS         100u   /* gauge not ready yet: read again soon */
+#define BATT_SETTLE_MS        2000u  /* ... for this long after waking it */
+#define BATT_CONFIRM_MS       1000u  /* a critical reading is re-read this much later */
+#define BATT_CRIT_READS       2u     /* consecutive critical readings before shutdown */
 #define STANDBY_BATT_WAKE_S   600u   /* timed wake in standby */
 #define STATE_EVENT_MS        5000u
 #define OVERLAY_USB_MS        2500u
@@ -81,6 +85,7 @@ static struct {
     ui_mode_t mode;
     uint32_t nocontact_ms;  /* since when there is no contact */
     bool ever_running;
+    bool start_logged;      /* VMID self-check result logged for this session */
     const char *fault_text;
     ui_summary_t summary;
     bool have_session;
@@ -89,6 +94,8 @@ static struct {
 
     /* battery */
     bool gauge_ok;
+    uint32_t gauge_wake_ms;  /* cw2015_init() succeeded (gauge woken) */
+    uint8_t batt_crit_n;     /* consecutive critical readings */
     uint8_t batt_fails;
     uint8_t soc_gauge;
     uint32_t batt_next_ms;
@@ -132,6 +139,13 @@ static bool mode_has_ecg(ui_mode_t m) { return m != UI_MODE_PPG; }
 static bool mode_has_ppg(ui_mode_t m) { return m != UI_MODE_ECG; }
 
 static void redraw(void) { S.force_draw = true; }
+
+/* ms -> whole seconds, saturating at the uint16 UI fields (18.2 h). */
+static uint16_t secs_u16(uint32_t ms)
+{
+    uint32_t s = ms / 1000u;
+    return (uint16_t)(s > UINT16_MAX ? UINT16_MAX : s);
+}
 
 static void show_overlay(ui_overlay_t ov, uint32_t ms, then_t then, const char *text, bool modal)
 {
@@ -224,8 +238,21 @@ static const acq_sink_t k_sink = {
 /* battery                                                                   */
 /* ======================================================================== */
 
+static bool reading_critical(uint16_t mv, uint8_t pct)
+{
+    return pct < BATT_CUTOFF_PCT || mv < BATT_CUTOFF_MV;
+}
+
+/* Gauge readings. Right after cw2015_init() woke the gauge, VCELL / SOC read
+ * 0 until its first conversion (cw2015_read() -> HAL_ERR_PARAM): such a
+ * reading is not used, it is retried every BATT_RETRY_MS (non-blocking) for
+ * up to BATT_SETTLE_MS. After that a reading with VCELL != 0 is used (SOC >
+ * 100 then falls back to the voltage estimate in batt_pct_combine()); one with
+ * VCELL = 0 leaves the battery unknown. A critical reading is re-read after
+ * BATT_CONFIRM_MS; the shutdown needs BATT_CRIT_READS in a row. */
 static void battery_read(void)
 {
+    uint32_t now = hal_millis();
     if (!S.gauge_ok) {
         S.gauge_ok = cw2015_init() == HAL_OK;
         S.dbg.gauge_ok = S.gauge_ok;
@@ -233,20 +260,43 @@ static void battery_read(void)
             S.dbg.batt_valid = false;
             return;
         }
+        S.gauge_wake_ms = now;
     }
     uint16_t mv = 0;
     uint8_t soc = 0;
     hal_status_t st = cw2015_read(&mv, &soc);
-    if (st == HAL_OK || st == HAL_ERR_PARAM) {
+    if (st == HAL_ERR_PARAM) {
+        S.batt_fails = 0; /* the bus is fine */
+        if (now - S.gauge_wake_ms < BATT_SETTLE_MS) {
+            S.batt_next_ms = now + BATT_RETRY_MS; /* not ready yet */
+            return;
+        }
+        if (mv == 0) {
+            S.dbg.batt_valid = false;
+            S.batt_crit_n = 0;
+            return;
+        }
+        st = HAL_OK; /* VCELL valid, SOC implausible: voltage estimate */
+    }
+    if (st == HAL_OK) {
         S.batt_fails = 0;
         S.soc_gauge = soc;
         S.dbg.batt_mv = mv;
         S.dbg.batt_pct = batt_pct_combine(mv, soc);
         S.dbg.batt_valid = true;
+        if (reading_critical(S.dbg.batt_mv, S.dbg.batt_pct)) {
+            if (S.batt_crit_n < 255u)
+                S.batt_crit_n++;
+            if (S.batt_crit_n < BATT_CRIT_READS)
+                S.batt_next_ms = now + BATT_CONFIRM_MS; /* confirm soon */
+        } else {
+            S.batt_crit_n = 0;
+        }
     } else {
         S.dbg.i2c_errors++;
         if (++S.batt_fails >= BATT_FAILS_INVALID) {
             S.dbg.batt_valid = false;
+            S.batt_crit_n = 0;
             S.gauge_ok = false;
             S.dbg.gauge_ok = false;
         }
@@ -255,8 +305,8 @@ static void battery_read(void)
 
 static bool batt_critical(void)
 {
-    return S.dbg.batt_valid && !usb_present() &&
-           (S.dbg.batt_pct < BATT_CUTOFF_PCT || S.dbg.batt_mv < BATT_CUTOFF_MV);
+    return S.dbg.batt_valid && !usb_present() && S.batt_crit_n >= BATT_CRIT_READS &&
+           reading_critical(S.dbg.batt_mv, S.dbg.batt_pct);
 }
 
 static bool batt_low(void)
@@ -274,7 +324,7 @@ static void make_summary(end_t why)
     ui_summary_t *s = &S.summary;
     memset(s, 0, sizeof *s);
     s->mode = S.mode;
-    s->duration_s = (uint16_t)(a->running_ms / 1000u);
+    s->duration_s = secs_u16(a->running_ms);
     if (S.mode == UI_MODE_PPG) {
         s->beats = a->pulses;
     } else {
@@ -314,6 +364,10 @@ static void log_session_end(end_t why)
     log_u(a->pat_avg_ms);
     log_s(" lost=");
     log_u(a->ecg_lost + a->ppg_lost);
+    if (a->ecg_resyncs || a->ppg_resyncs || hal_acq_resyncs()) {
+        log_s(" resync=");
+        log_u((uint32_t)a->ecg_resyncs + a->ppg_resyncs + hal_acq_resyncs());
+    }
     log_end();
 }
 
@@ -352,6 +406,7 @@ static void start_session(ui_mode_t mode)
 {
     S.mode = mode;
     S.ever_running = false;
+    S.start_logged = false;
     S.fault_text = NULL;
     S.nocontact_ms = S.now;
     if (mode_has_ecg(mode) && usb_now()) {
@@ -408,7 +463,9 @@ static const char *fault_text_of(const acq_status_t *st)
         char *p = s_fault_buf, *e = s_fault_buf + sizeof s_fault_buf - 1;
         p = fmt_s(p, e, "VMID ");
         p = fmt_u(p, e, st->vmid_mv);
-        p = fmt_s(p, e, " mV, needs 1650+-");
+        p = fmt_s(p, e, " mV, needs ");
+        p = fmt_u(p, e, VDDA_MV / 2u);
+        p = fmt_s(p, e, "+-");
         p = fmt_u(p, e, ECG_VMID_TOL_MV);
         p = fmt_s(p, e, ". Check +3V3A, U7B");
         return s_fault_buf;
@@ -439,6 +496,21 @@ static void session_update(void)
         acq_stop();
         redraw();
         return;
+    }
+    if (st->phase == ACQ_ON && !S.start_logged) {
+        /* VMID self-check value on RTT at every start (ECG_VMID_TOL_MV is
+         * checked in acq.c; a bring-up board can be judged from the log) */
+        S.start_logged = true;
+        if (mode_has_ecg(S.mode)) {
+            log_begin("session");
+            log_s(" vmid=");
+            log_u(st->vmid_mv);
+            log_s(" mV mid=");
+            log_u(st->mid_code);
+            log_s(" tol=+-");
+            log_u(ECG_VMID_TOL_MV);
+            log_end();
+        }
     }
     if (st->contact)
         return;
@@ -759,27 +831,39 @@ static void wake_up(uint32_t cause)
     send_state();
 }
 
+#define WAKE_EVENTS (HAL_EV_BUTTON | HAL_EV_USB_PLUGGED | HAL_EV_USB_REMOVED)
+
 static void standby_step(void)
 {
     uint32_t rtc = hal_rtc_seconds();
     uint32_t rem = (int32_t)(S.standby_rtc_due - rtc) > 0 ? S.standby_rtc_due - rtc : 1u;
     uint32_t cause = hal_standby(rem);
     hal_wdt_kick();
-    if (cause & (HAL_EV_BUTTON | HAL_EV_USB_PLUGGED | HAL_EV_USB_REMOVED)) {
-        wake_up(cause);
+    if (cause & WAKE_EVENTS) {
+        wake_up(cause); /* the bits stay latched: app_step() handles them */
         return;
     }
-    if (cause & HAL_EV_CW_ALRT) {
+    if (cause & HAL_EV_CW_ALRT)
         (void)cw2015_clear_alert();
-        (void)hal_events_take();
-    }
     if ((int32_t)(hal_rtc_seconds() - S.standby_rtc_due) >= 0) {
         /* periodic battery check only: display stays off, back to sleep */
         S.dbg.timed_wakes++;
         S.standby_rtc_due = hal_rtc_seconds() + STANDBY_BATT_WAKE_S;
         battery_read();
-        (void)hal_events_take();
     }
+    /* Take every bit still latched. hal_standby() returns at once while any
+     * wake-capable bit is pending, so one nobody handles here (RADIO_IRQ in
+     * this build, a CW_ALRT that came back) would otherwise make the loop
+     * spin. A button / USB edge that arrived meanwhile is a real wake. */
+    uint32_t rest = hal_events_take();
+    if (rest & WAKE_EVENTS) {
+        wake_up(rest);
+        if (rest & (HAL_EV_USB_PLUGGED | HAL_EV_USB_REMOVED))
+            on_usb(rest); /* what app_step() would have done with the bits */
+        return;
+    }
+    if (rest & HAL_EV_CW_ALRT)
+        (void)cw2015_clear_alert();
 }
 
 /* ======================================================================== */
@@ -827,7 +911,7 @@ static void build_model(void)
         l->beat_seq = st->beat_seq;
         l->gain_hi = st->gain_hi;
         l->notch_hz = st->notch_hz;
-        l->elapsed_s = (uint16_t)(st->running_ms / 1000u);
+        l->elapsed_s = secs_u16(st->running_ms);
         l->settle_pct = st->settle_pct;
     }
     M.summary = S.summary;
@@ -980,11 +1064,12 @@ void app_init(void)
                                                                       : "corrupt: defaults");
 
     S.gauge_ok = cw2015_init() == HAL_OK;
+    S.gauge_wake_ms = hal_millis();
     S.dbg.gauge_ok = S.gauge_ok;
     if (!S.gauge_ok)
         log_line("batt", "CW2015 not answering: battery unknown");
-    battery_read();
     S.batt_next_ms = S.now + BATT_POLL_MS;
+    battery_read(); /* may schedule a retry / confirmation sooner */
 
     charger_init();
     charger_tick(S.now);

@@ -205,6 +205,42 @@ TEST(stuck_from_boot)
     CHECK_EQ(one(), BTN_EV_BTN2_SHORT);
 }
 
+/* Review finding 10c: a button stuck after boot kept "down" forever, which
+ * refreshed the app's inactivity timer forever. */
+TEST(stuck_after_boot)
+{
+    setup();
+    run(100);
+    setpin(1, true);
+    run(2500);
+    CHECK_EQ(one(), BTN_EV_BTN2_LONG);
+    CHECK(buttons_any_down());
+    CHECK(!buttons_fault());
+    run(BTN_HELD_MAX_MS - 2500 - 100);
+    CHECK(buttons_any_down()); /* a long deliberate hold is still a hold */
+    run(200);
+    CHECK(!buttons_any_down());
+    CHECK(buttons_fault());
+    CHECK_EQ(buttons_hold_ms(BTN_2), 0);
+    CHECK_EQ(buttons_get_event(), BTN_EV_NONE);
+    /* other button unaffected */
+    click(0, 100);
+    CHECK_EQ(one(), BTN_EV_BTN1_SHORT);
+    /* release clears it, no event; then it works normally */
+    setpin(1, false);
+    run(100);
+    CHECK(!buttons_fault());
+    CHECK_EQ(buttons_get_event(), BTN_EV_NONE);
+    click(1, 100);
+    CHECK_EQ(one(), BTN_EV_BTN2_SHORT);
+    /* the same for a wake press that never ends */
+    setpin(0, true);
+    buttons_ignore_until_release();
+    run(BTN_HELD_MAX_MS + 100);
+    CHECK(!buttons_any_down());
+    CHECK(buttons_fault());
+}
+
 TEST(boot_press_released_before_5s)
 {
     mock_reset();
@@ -270,6 +306,7 @@ int main(void)
     RUN(both_released_early_gives_nothing);
     RUN(second_press_after_long);
     RUN(stuck_from_boot);
+    RUN(stuck_after_boot);
     RUN(boot_press_released_before_5s);
     RUN(wake_press_suppressed);
     RUN(queue_overflow_drops_newest);

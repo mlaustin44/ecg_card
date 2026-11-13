@@ -27,7 +27,9 @@ uint8_t cw2015_version(void); /* as read by the last init() */
 bool cw2015_version_ok(void); /* version == 0x73 */
 
 /* VCELL -> millivolts (14-bit, 305 uV/LSB), SOC -> whole percent (0..100).
- * Returns HAL_ERR_PARAM if the gauge reports SOC > 100 (mv is still set). */
+ * Returns HAL_ERR_PARAM if the reading is not (yet) a measurement: VCELL = 0
+ * or SOC > 100, as the gauge reports for a while after it is woken (mv and
+ * soc are still set). The caller retries; see app.c battery_read(). */
 hal_status_t cw2015_read(uint16_t *mv, uint8_t *soc_pct);
 /* Clear RRT_ALERT (bit 15 of RRT_ALRT, reg 0x06). */
 hal_status_t cw2015_clear_alert(void);

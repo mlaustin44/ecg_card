@@ -35,6 +35,13 @@ static const dsp_bq_coef_t c_lp = DSP_PPG_LP_INIT;
 #define MIN_SEARCH   15u   /* frames searched back for the foot minimum (150 ms) */
 #define NO_PULSE_DECAY 300u
 #define HP_GUARD     16    /* HP input scaling (4 fractional bits) */
+/* Threshold floor, display-slope units (4 fractional bits per 2 frames):
+ * about 1/35 of a 150-code pulse's maximum slope, far below any perfusion
+ * the AGC targets. Like the QRS detector's THR_*_FLOOR it keeps the
+ * threshold from reaching 0 (a learning window on a flat signal, or the
+ * halving after a long gap); when the halving reaches the floor the
+ * detector re-learns instead (see detect()). */
+#define THR_FLOOR    8
 
 int32_t dsp_ppg_fine(const dsp_ppg_frame_t *f, uint16_t dac12, bool *coarse_mode)
 {
@@ -190,6 +197,30 @@ static bool foot(dsp_ppg_t *p, uint32_t u0, uint32_t prev_up, bool have_prev, ui
     return true;
 }
 
+static int32_t thr_of(int32_t slope_avg)
+{
+    int32_t thr = (slope_avg * 2) / 5;
+    return thr > THR_FLOOR ? thr : THR_FLOOR;
+}
+
+/* No pulse for so long that the threshold has decayed to the floor: the
+ * finger moved, the light level or the perfusion changed, or the signal was
+ * flat while learning. Start over as after dsp_ppg_reset(), keeping the
+ * filters: learn the slope scale again, forget the rise reference (a weaker
+ * pulse would otherwise fail the 1/4-rise test forever) and the interval
+ * history (a much slower rate would otherwise fail the 1.6 x median test
+ * forever; the old rate is stale anyway). */
+static void relearn(dsp_ppg_t *p)
+{
+    p->flags = (uint8_t)((p->flags & ~(F_IN_UP | F_HAVE_AC | F_HAVE_FT)) | F_LEARNING);
+    p->learn_max = 0;
+    p->slope_avg = 0;
+    p->thr = THR_FLOOR;
+    p->amp_avg = 0;
+    p->ibi_n = p->ibi_i = 0;
+    p->no_pulse = 0;
+}
+
 /* Detection runs on the display band (0.5-8 Hz: smoother, no wander); the
  * foot is then timed on the linear-phase LP signal s. yd = display filter
  * output (4 fractional bits) at frame t. */
@@ -210,14 +241,14 @@ static bool detect(dsp_ppg_t *p, uint32_t t, int32_t yd, dsp_ppg_pulse_t *pl)
             p->learn_max = d;
         if (p->no_pulse >= LEARN_FRAMES) {
             p->slope_avg = p->learn_max;
-            p->thr = (p->slope_avg * 2) / 5;
+            p->thr = thr_of(p->slope_avg);
             p->flags &= (uint8_t)~F_LEARNING;
             p->no_pulse = 0;
         }
         return false;
     }
     if (!(p->flags & F_IN_UP)) {
-        if (p->thr > 0 && d > p->thr &&
+        if (d > p->thr &&
             (!(p->flags & F_HAVE_UP) || tc - p->last_up_t >= REFRACT)) {
             p->flags |= F_IN_UP;
             p->up_max = d;
@@ -247,7 +278,7 @@ static bool detect(dsp_ppg_t *p, uint32_t t, int32_t yd, dsp_ppg_pulse_t *pl)
         found = foot(p, u, prev, have_prev, t, pl);
         if (found) {
             p->slope_avg = p->slope_avg - p->slope_avg / 4 + p->up_max / 4;
-            p->thr = (p->slope_avg * 2) / 5;
+            p->thr = thr_of(p->slope_avg);
             p->no_pulse = 0;
         } else {
             /* no AC, and no interval across a rejected pulse */
@@ -255,10 +286,14 @@ static bool detect(dsp_ppg_t *p, uint32_t t, int32_t yd, dsp_ppg_pulse_t *pl)
         }
         p->smax = st;
     }
-    if (p->no_pulse >= NO_PULSE_DECAY) {
+    if (p->no_pulse >= NO_PULSE_DECAY && !(p->flags & F_IN_UP)) {
         p->slope_avg /= 2;
-        p->thr = (p->slope_avg * 2) / 5;
-        p->no_pulse = NO_PULSE_DECAY - 100u;
+        if ((p->slope_avg * 2) / 5 < THR_FLOOR) {
+            relearn(p);
+        } else {
+            p->thr = (p->slope_avg * 2) / 5;
+            p->no_pulse = NO_PULSE_DECAY - 100u;
+        }
     }
     return found;
 }

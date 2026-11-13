@@ -45,18 +45,30 @@
  * next conversion, 250 us later, once per 128 ms. A sample that lands while
  * DMAEN is off is detected (MEMRESIFG0 still set) and counted as lost.
  * The ISR also counts laps; the reader derives the total number of samples
- * written as laps * 512 + (DMADA - ring) / 2 (see ecg_written()).
+ * written as laps * 512 + (512 - DMASZ), cross-checked against DMADA (see
+ * ecg_written() and bsp_ring.h, which holds all of the index arithmetic as
+ * pure, host-tested functions).
+ * Timeline (hal.h): a conversion lost at ISR time never reaches the ring, so
+ * the ISR publishes the cumulative loss per lap ("skew") and a sample's
+ * timeline index is its DMA count plus the skew of its lap. A read never
+ * crosses a lap boundary, returns contiguous samples and their first index;
+ * a reader that fell behind (> 496 samples) loses the oldest samples, which
+ * shows as a jump of the index.
  *
  * ---- PPG frames (resynchronised every frame) -------------------------------
  * ADC1: one non-repeating 2-entry sequence per TIMA0 event (MEM0 = TIA_OUT,
  * MEM1 = PPG_HI, x4 averaging). The MEM1 interrupt reads both results, re-arms
  * ENC and classifies the pair by the TIMA0 counter value at that moment:
  * between the on and dark compare values -> dark, otherwise -> on. Classification
- * never depends on alternation, so a missed trigger costs one frame (counted
- * as an overrun) and the next frame is correct. */
+ * never depends on alternation, so a missed trigger costs one frame (its
+ * index is skipped) and the next frame is correct. Each stored frame carries
+ * its frame index. Limitation: a frame whose two triggers are BOTH missed
+ * (ADC1 ISR blocked for > 10 ms, i.e. interrupts masked that long, which
+ * hal.h does not allow during acquisition) is not detected. */
 #include <string.h>
 
 #include "bsp_internal.h"
+#include "bsp_ring.h"
 
 /* ---- Channels ------------------------------------------------------------ */
 #define ECG_ADC_CHAN   DL_ADC12_INPUT_CHAN_12 /* PA14 = A0_12 */
@@ -103,20 +115,40 @@ _Static_assert((ECG_RING_N - ECG_SAFETY) * 1000u / ECG_RAW_HZ >= 64u, ">= 64 ms"
 
 static uint16_t s_ecg_ring[ECG_RING_N] __attribute__((aligned(4)));
 static volatile uint32_t s_ecg_laps;
-static volatile uint32_t s_ecg_overruns;
-static uint32_t s_ecg_rd;     /* samples consumed or dropped (main only) */
-static uint32_t s_ecg_last_w; /* last total seen by the reader */
+/* Index state (bsp_ring.h). The ISR writes skew/lap_skew, the reader the
+ * rest; the reader only touches it with IRQs locked. */
+static bsp_ring_t s_er;
 
 static hal_ppg_frame_t s_ppg_ring[PPG_RING_N];
-static volatile uint32_t s_ppg_wr;
+static uint32_t s_ppg_ring_idx[PPG_RING_N]; /* frame index of each slot */
+static volatile uint32_t s_ppg_wr;          /* frames stored (ISR) */
+static volatile uint32_t s_ppg_frame;       /* index of the frame being collected (ISR) */
 static uint32_t s_ppg_rd;
-static volatile uint32_t s_ppg_overruns;
+static uint32_t s_ppg_delivered, s_ppg_seen_end, s_ppg_resyncs;
 static bool s_ppg_have_dark;
 static uint16_t s_ppg_dark_tia, s_ppg_dark_hi;
 
 static volatile unsigned s_running;
 static uint16_t s_dac12_code = 2048u;
 static bool s_analog_on;
+
+/* OPA0 chopping, a compile-time bring-up option (fw/bsp/CMakeLists.txt,
+ * cache variable BSP_OPA0_CHOP). Default 1 = standard chopping as the brief
+ * specifies; TRM SLAU846 21.2.6: standard chopping "requires an external
+ * filter" (1 kOhm / 10 nF at gain 1x), which the board lacks, so compare TIA
+ * noise and ripple with 0 (off) at bring-up. ADC-assisted chopping (2) is not
+ * offered: the TRM does not establish that ADC1 channel 8 (the PA22 pin)
+ * drives OPA0's chop state. */
+#ifndef BSP_OPA0_CHOP
+#define BSP_OPA0_CHOP 1
+#endif
+#if BSP_OPA0_CHOP == 0
+#define OPA0_CHOP_MODE DL_OPA_CHOPPING_MODE_DISABLE
+#elif BSP_OPA0_CHOP == 1
+#define OPA0_CHOP_MODE DL_OPA_CHOPPING_MODE_STANDARD
+#else
+#error "BSP_OPA0_CHOP must be 0 (off) or 1 (standard); ADC-assisted chopping is not verified"
+#endif
 
 /* ======================================================================== */
 /* Timers                                                                   */
@@ -138,7 +170,9 @@ static void timer_base(GPTIMER_Regs *t, uint32_t period, bool triggered)
     };
     DL_Timer_setClockConfig(t, &clk);
     DL_Timer_enableClock(t);
-    DL_Timer_setCoreHaltBehavior(t, DL_TIMER_CORE_HALT_IMMEDIATE);
+    /* Keep counting through a debugger halt: a frozen TIMA0 could leave
+     * LED_BLANK low (LEDs on at DC) and would break the shared timeline. */
+    DL_Timer_setCoreHaltBehavior(t, DL_TIMER_CORE_HALT_FREE_RUN);
     DL_Timer_setLoadValue(t, period - 1u);
     DL_Timer_setCounterMode(t, DL_TIMER_COUNT_MODE_DOWN);
     DL_Timer_setCounterRepeatMode(t, DL_TIMER_REPEAT_MODE_ENABLED);
@@ -324,16 +358,25 @@ void ADC0_IRQHandler(void)
         if (iidx == (uint32_t) DL_ADC12_IIDX_DMA_DONE) {
             /* The DMA ring just wrapped (DMADA is back at s_ecg_ring) and the
              * ADC cleared DMAEN. A result that arrived since then is still
-             * in MEMRES0 (flag set) and will never be moved: count it lost.
-             * Reading MEMRES0 clears MEMRESIFG0. Then re-arm DMAEN. */
+             * in MEMRES0 (flag set) and will never be moved: it is lost, just
+             * before the new lap's first sample. Reading MEMRES0 clears
+             * MEMRESIFG0. Then re-arm DMAEN. */
+            uint32_t lost = 0u;
             if (DL_ADC12_getRawInterruptStatus(ADC0, DL_ADC12_INTERRUPT_MEM0_RESULT_LOADED)) {
                 (void) DL_ADC12_getMemResult(ADC0, DL_ADC12_MEM_IDX_0);
-                s_ecg_overruns++;
+                lost = 1u;
             }
+            bsp_ring_skew_lap_end(&s_er, s_ecg_laps, lost);
             DL_ADC12_enableDMA(ADC0);
             s_ecg_laps++;
         } else if (iidx == (uint32_t) DL_ADC12_IIDX_OVERFLOW) {
-            s_ecg_overruns++; /* MEMRES0 overwritten before it was moved */
+            /* MEMRES0 overwritten before it was moved. OVIFG has a higher
+             * IIDX priority than DMADONE: with the lap end still pending the
+             * loss belongs to the next lap (DMAEN was off), else to this one. */
+            if (DL_ADC12_getRawInterruptStatus(ADC0, DL_ADC12_INTERRUPT_DMA_DONE))
+                s_er.skew++;
+            else
+                bsp_ring_skew_now(&s_er, s_ecg_laps, 1u);
         }
     }
 }
@@ -355,7 +398,7 @@ void ADC1_IRQHandler(void)
      * and the on trigger, so it identifies the phase of this result. */
     bool dark = (ctr <= PPG_CC_DARK) && (ctr > PPG_CC_ON);
     if (dark) {
-        if (s_ppg_have_dark) s_ppg_overruns++; /* previous frame lost its on */
+        if (s_ppg_have_dark) s_ppg_frame++; /* previous frame lost its on */
         s_ppg_dark_tia = tia;
         s_ppg_dark_hi = hi;
         s_ppg_have_dark = true;
@@ -366,10 +409,12 @@ void ADC1_IRQHandler(void)
         f->hi_dark = s_ppg_dark_hi;
         f->tia_on = tia;
         f->hi_on = hi;
+        s_ppg_ring_idx[w % PPG_RING_N] = s_ppg_frame;
+        s_ppg_frame++;
         s_ppg_wr = w + 1u;
         s_ppg_have_dark = false;
     } else {
-        s_ppg_overruns++; /* on without dark: this frame is lost */
+        s_ppg_frame++; /* on without dark: this frame is lost */
     }
 }
 
@@ -384,12 +429,13 @@ void hal_acq_start(unsigned streams)
     if (s_running != 0u || streams == 0u) return;
 
     s_ecg_laps = 0u;
-    s_ecg_overruns = 0u;
-    s_ecg_rd = 0u;
-    s_ecg_last_w = 0u;
+    bsp_ring_reset(&s_er);
     s_ppg_wr = 0u;
+    s_ppg_frame = 0u;
     s_ppg_rd = 0u;
-    s_ppg_overruns = 0u;
+    s_ppg_delivered = 0u;
+    s_ppg_seen_end = 0u;
+    s_ppg_resyncs = 0u;
     s_ppg_have_dark = false;
 
     tima0_config((streams & HAL_ACQ_PPG) != 0u);
@@ -427,86 +473,118 @@ unsigned hal_acq_running(void)
     return s_running;
 }
 
-/* Total ECG samples written by the DMA since start, modulo 2^32.
+/* Total ECG samples written by the DMA since start (DMA count), modulo 2^32.
  * Called with IRQs locked, so s_ecg_laps cannot change underneath; the only
  * race is a lap end whose DMA_DONE has not been serviced yet, detected via
- * the raw DMADONE flag (read twice around DMADA until stable) plus a
- * monotonicity check against the previous result. */
+ * the raw DMADONE flag (read twice around the position until stable) plus a
+ * monotonicity check against the previous result (bsp_ring_written()).
+ * Position: N - DMASZ (the TRM documents DMASZ as decremented per transfer),
+ * cross-checked against DMADA (bsp_ring_dma_pos(); DMADA is used instead
+ * only if DMASZ is seen stuck at its programmed value). */
 static uint32_t ecg_written(void)
 {
     const uint32_t base = (uint32_t) &s_ecg_ring[0];
-    uint32_t p1, p2, da, idx, w;
+    uint32_t p1, p2, sz, da;
     unsigned tries = 0;
 
     do {
         p1 = DL_ADC12_getRawInterruptStatus(ADC0, DL_ADC12_INTERRUPT_DMA_DONE);
+        sz = DL_DMA_getTransferSize(DMA, BSP_DMA_CH_ECG);
         da = DL_DMA_getDestAddr(DMA, BSP_DMA_CH_ECG);
         p2 = DL_ADC12_getRawInterruptStatus(ADC0, DL_ADC12_INTERRUPT_DMA_DONE);
     } while (p1 != p2 && ++tries < 4u);
 
-    idx = (da - base) / 2u;
-    if (idx >= ECG_RING_N) idx = 0u; /* defensive: reload in progress */
-    w = (s_ecg_laps + (p2 != 0u ? 1u : 0u)) * ECG_RING_N + idx;
-    if ((int32_t) (w - s_ecg_last_w) < 0) w += ECG_RING_N; /* uncounted lap */
-    s_ecg_last_w = w;
-    return w;
+    uint32_t da_idx = da >= base ? (da - base) / 2u : ECG_RING_N;
+    uint32_t pos = bsp_ring_dma_pos(&s_er, ECG_RING_N, sz, da_idx);
+    return bsp_ring_written(&s_er, s_ecg_laps, p2 != 0u, pos, ECG_RING_N);
 }
 
-size_t hal_ecg_read(uint16_t *dst, size_t max)
+size_t hal_ecg_read(uint16_t *dst, size_t max, uint32_t *first_index)
 {
-    uint32_t pm, w, avail, k, i, drop;
+    uint32_t pm, w, first, i;
+    bsp_ring_take_t t;
 
-    if (dst == NULL || max == 0u) return 0u;
+    if (dst == NULL || first_index == NULL || max == 0u) return 0u;
     pm = hal_irq_lock();
     w = ecg_written();
-    avail = w - s_ecg_rd;
-    if (avail > ECG_RING_N - ECG_SAFETY) {
-        /* Reader fell behind: drop the oldest so we never read a slot the
-         * DMA is about to overwrite. */
-        drop = avail - (ECG_RING_N - ECG_SAFETY);
-        s_ecg_rd += drop;
-        s_ecg_overruns += drop;
-        avail -= drop;
-    }
+    t = bsp_ring_take(&s_er, w, ECG_RING_N, ECG_SAFETY,
+                      max > ECG_RING_N ? ECG_RING_N : (uint32_t) max);
+    first = bsp_ring_index(&s_er, t.start, ECG_RING_N);
+    bsp_ring_delivered(&s_er, first, t.count);
     hal_irq_unlock(pm);
 
-    k = avail < max ? avail : (uint32_t) max;
-    for (i = 0; i < k; i++)
-        dst[i] = s_ecg_ring[(s_ecg_rd + i) & (ECG_RING_N - 1u)];
-    s_ecg_rd += k;
-    return k;
+    /* Outside the lock: the DMA is at least ECG_SAFETY samples (4 ms) away
+     * from what is copied. */
+    for (i = 0; i < t.count; i++)
+        dst[i] = s_ecg_ring[(t.start + i) & (ECG_RING_N - 1u)];
+    if (t.count != 0u) *first_index = first;
+    return t.count;
 }
 
 uint32_t hal_ecg_overruns(void)
 {
-    return s_ecg_overruns;
+    uint32_t pm = hal_irq_lock();
+    uint32_t v = bsp_ring_overruns(&s_er);
+    hal_irq_unlock(pm);
+    return v;
 }
 
-size_t hal_ppg_read(hal_ppg_frame_t *dst, size_t max)
+size_t hal_ppg_read(hal_ppg_frame_t *dst, size_t max, uint32_t *first_index)
 {
     size_t n = 0;
-    if (dst == NULL) return 0u;
+    uint32_t first = 0u;
+    if (dst == NULL || first_index == NULL) return 0u;
     while (n < max) {
         uint32_t pm = hal_irq_lock();
         uint32_t w = s_ppg_wr;
-        if (w - s_ppg_rd > PPG_RING_N) { /* oldest frames overwritten */
-            s_ppg_overruns += (w - s_ppg_rd) - PPG_RING_N;
-            s_ppg_rd = w - PPG_RING_N;
+        int32_t pending = (int32_t) (w - s_ppg_rd);
+        if (pending < 0) { /* cannot happen: never wrap, restart at w */
+            s_ppg_rd = w;
+            s_ppg_resyncs++;
+            pending = 0;
         }
+        if ((uint32_t) pending > PPG_RING_N) /* oldest frames overwritten */
+            s_ppg_rd = w - PPG_RING_N;
         if (w == s_ppg_rd) {
             hal_irq_unlock(pm);
             break;
         }
-        dst[n++] = s_ppg_ring[s_ppg_rd % PPG_RING_N];
+        uint32_t slot = s_ppg_rd % PPG_RING_N;
+        uint32_t idx = s_ppg_ring_idx[slot];
+        if (n != 0u && idx != first + (uint32_t) n) {
+            hal_irq_unlock(pm); /* not contiguous: the next call starts here */
+            break;
+        }
+        if (n == 0u) first = idx;
+        dst[n++] = s_ppg_ring[slot];
         s_ppg_rd++;
+        s_ppg_delivered++;
+        if ((int32_t) (idx + 1u - s_ppg_seen_end) > 0) s_ppg_seen_end = idx + 1u;
         hal_irq_unlock(pm);
     }
+    if (n != 0u) *first_index = first;
     return n;
 }
 
 uint32_t hal_ppg_overruns(void)
 {
-    return s_ppg_overruns;
+    uint32_t pm = hal_irq_lock();
+    uint32_t v = s_ppg_seen_end - s_ppg_delivered;
+    hal_irq_unlock(pm);
+    return v;
+}
+
+uint32_t hal_acq_resyncs(void)
+{
+    uint32_t pm = hal_irq_lock();
+    uint32_t v = s_er.resyncs + s_ppg_resyncs;
+    hal_irq_unlock(pm);
+    return v;
+}
+
+uint32_t bsp_ecg_pos_mismatches(void)
+{
+    return s_er.pos_mismatch;
 }
 
 /* ======================================================================== */
@@ -542,14 +620,15 @@ void hal_ppg_analog(bool on)
             .inputSelect = DL_COMP_DAC_INPUT_DACCODE0,
         };
         /* OPA0: general purpose, IN0- (PA27) inverting, DAC8 non-inverting,
-         * output to PA22, chopping on, high GBW. No internal gain network. */
+         * output to PA22, chopping per BSP_OPA0_CHOP, high GBW. No internal
+         * gain network. */
         static const DL_OPA_Config opa0 = {
             .pselChannel = DL_OPA_PSEL_DAC8_OUT,
             .nselChannel = DL_OPA_NSEL_IN0_NEG,
             .mselChannel = DL_OPA_MSEL_OPEN,
             .gain = DL_OPA_GAIN_N0_P1,
             .outputPinState = DL_OPA_OUTPUT_PIN_ENABLED,
-            .choppingMode = DL_OPA_CHOPPING_MODE_STANDARD,
+            .choppingMode = OPA0_CHOP_MODE,
         };
         /* DAC12: VDDA reference, 12-bit straight binary, buffered output. */
         static const DL_DAC12_Config dac = {

@@ -197,6 +197,11 @@ typedef struct {
     uint32_t standby_entries, system_resets, wdt_kicks, wdt_resets;
     uint64_t standby_total_us;
     uint32_t ecg_samples, ppg_frames;     /* produced since sim_reset */
+    /* MCP4728 internal reference (sim_mcp_int_ref_on()): hal_standby() entries
+     * with it on, and total time it ran while VLED_EN was low (no PPG
+     * session). Both must stay 0 unless the I2C bus is broken. */
+    uint32_t mcp_vref_int_standby;
+    uint64_t mcp_vref_int_idle_us;
 } sim_facts_t;
 const sim_facts_t *sim_facts(void);
 
@@ -205,6 +210,10 @@ const sim_facts_t *sim_facts(void);
 /* The next n hal_i2c_xfer() calls fail with `status` and have no effect on the
  * devices (NACK takes ~30 us, TIMEOUT/BUS take 10 ms like the real timeout). */
 void sim_i2c_fail_next(unsigned n, hal_status_t status);
+/* The next n transfers DO reach the device (their effect lands) but then
+ * report `status` (e.g. a timeout on the final STOP): a write the MCU
+ * believes failed although the device acted on it. */
+void sim_i2c_fail_after_next(unsigned n, hal_status_t status);
 /* Stuck bus: every transfer fails with HAL_ERR_BUS (10 ms) until hal_i2c_recover(). */
 void sim_i2c_stick_bus(bool stuck);
 bool sim_i2c_bus_stuck(void);
@@ -232,6 +241,9 @@ double sim_mcp_vout_mv(int ch);
 void sim_mcp_eeprom_get(int ch, unsigned *code, bool *vref_int, unsigned *pd, bool *gain2);
 void sim_mcp_eeprom_set(int ch, unsigned code, bool vref_int, unsigned pd, bool gain2); /* test setup */
 bool sim_mcp_busy(void);                  /* EEPROM write in progress (~50 ms) */
+/* Internal 2.048 V reference running: some channel's DAC register selects it,
+ * powered down or not (DS22187E 4.10; ~45 uA vs 40 nA with all on VDD). */
+bool sim_mcp_int_ref_on(void);
 void sim_mcp_power_cycle(void);           /* reload registers from EEPROM */
 /* Factory EEPROM (assumed): VDD reference, gain x1, normal mode, code 0x800. */
 /* LED current set by channel A: I = Vout * (10/164) / 8.2 ohm, in mA. */
@@ -248,6 +260,10 @@ unsigned sim_cw_athd(void);               /* CONFIG bits 7:3 */
 bool sim_cw_asleep(void);                 /* MODE sleep bits set */
 bool sim_cw_alert_flag(void);             /* RRT_ALRT bit 15 */
 uint8_t sim_cw_reg(unsigned addr);        /* raw register file (0..0x4F) */
+/* After a wake (MODE sleep -> 0x00) VCELL and SOC read 0 for this long, as
+ * the real gauge does until its first conversion. Default 200 ms (restored
+ * by sim_reset); 0 = valid at once. */
+void sim_cw_set_wake_zero_ms(unsigned ms);
 
 /* ======================= OLED (SSD1306) ================================== */
 
@@ -339,5 +355,24 @@ bool sim_stream_save(const char *path);
 /* Capacities of the sample rings (the real buffers hold "at least" 64 ms). */
 #define SIM_ECG_RING_SAMPLES 256u
 #define SIM_PPG_RING_FRAMES  32u
+#define SIM_BSP_ECG_RING_SAMPLES 512u /* SIM_RING_BSP: fw/bsp ECG ring */
+
+/* ======================= acquisition ring models ========================= */
+
+/* How the HAL sample rings behave (hal.h read contract either way: the
+ * reads report timeline indices, losses show as index jumps).
+ *   SIM_RING_DEFAULT: SIM_ECG_RING_SAMPLES / SIM_PPG_RING_FRAMES deep.
+ *   SIM_RING_BSP:     the fw/bsp ECG ring's failure pattern: 512 samples,
+ *                     16 kept away from the write position, so a reader that
+ *                     stalls longer than ~124 ms finds the oldest data
+ *                     overwritten only when it comes back (drops discovered
+ *                     at read time); a read never crosses a 512-sample lap.
+ * Kept across sim_reboot(); sim_reset() restores DEFAULT and no misses. */
+typedef enum { SIM_RING_DEFAULT = 0, SIM_RING_BSP } sim_ring_model_t;
+void sim_acq_set_ring_model(sim_ring_model_t model);
+/* Every n-th ECG sample / PPG frame is a missed conversion: its index
+ * advances, no data is stored (BSP: a result that landed while the ADC's
+ * DMAEN was off at a lap end; a missed ADC1 trigger). 0 = never. */
+void sim_acq_set_missed(uint32_t ecg_every, uint32_t ppg_every);
 
 #endif

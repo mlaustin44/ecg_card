@@ -179,6 +179,13 @@ TEST(cw2015_registers)
     CHECK(!sim_cw_asleep());
     sim_set_battery_mv(3800);
     uint8_t reg = 0x02, v[4];
+    /* right after the wake: VCELL and SOC read 0 for 200 ms (default) */
+    CHECK_EQ(hal_i2c_xfer(0x62, &reg, 1, v, 4), HAL_OK);
+    CHECK(v[0] == 0 && v[1] == 0 && v[2] == 0 && v[3] == 0);
+    hal_delay_ms(199);
+    CHECK_EQ(cw_rd(0x04), 0);
+    hal_delay_ms(1);
+    reg = 0x02;
     CHECK_EQ(hal_i2c_xfer(0x62, &reg, 1, v, 4), HAL_OK);
     unsigned vcell = (unsigned)(v[0] << 8 | v[1]);
     CHECK_EQ(vcell, 3800000 / 305); /* 12459, 305 uV/LSB */
@@ -196,6 +203,18 @@ TEST(cw2015_registers)
     cw_wr(0x00, 0x00);
     CHECK_EQ(cw_rd(0x00), 0x73);
     CHECK_EQ(sim_violation_count_of(SIM_V_I2C_PROTOCOL), 1);
+    /* configurable; an MCU reboot does not restart the (always-on) gauge */
+    fresh();
+    sim_cw_set_wake_zero_ms(0);
+    cw_wr(0x0A, 0x00);
+    CHECK(cw_rd(0x04) > 0);
+    fresh();
+    cw_wr(0x0A, 0x00);
+    hal_delay_ms(250);
+    sim_reboot();
+    hal_init();
+    cw_wr(0x0A, 0x00);
+    CHECK(cw_rd(0x04) > 0);
 }
 
 TEST(cw2015_profile_config_alert)

@@ -38,6 +38,10 @@
 #define ACQ_VLED_WAIT_MS   10u    /* VLED_EN -> LED current (>= PPG_VLED_START_MS) */
 #define ACQ_AGC_FRAMES     25u    /* one AGC decision per 250 ms */
 #define ACQ_DCC_FRAMES     100u   /* one DC-cancel update per second */
+/* PPG: pulse_bpm, pi_permille, pat_ms (and hr_bpm in PPG-only mode) read 0
+ * ("not available") once no pulse has been detected for this long, instead
+ * of freezing at the last value. 5 s = 2.5 beats at 30 bpm. */
+#define ACQ_PULSE_TIMEOUT_MS 5000u
 
 typedef struct {
     bool ecg, ppg;
@@ -72,7 +76,7 @@ typedef struct {
     uint32_t contact_ms;     /* hal_millis() of the last primary contact edge */
     bool finger;             /* PPG finger detected */
     uint16_t hr_bpm;         /* ECG median-of-5, or the pulse rate in PPG mode */
-    uint16_t pulse_bpm, pat_ms, pi_permille;
+    uint16_t pulse_bpm, pat_ms, pi_permille; /* 0 = n/a (also ACQ_PULSE_TIMEOUT_MS after the last pulse) */
     uint8_t quality;         /* 0..4 */
     uint8_t beat_seq;        /* +1 per ECG beat (ECG, BOTH) or pulse (PPG) */
     bool gain_hi;
@@ -93,7 +97,8 @@ typedef struct {
     uint16_t pat_n;
     uint32_t running_ms;
     int8_t gain_advice;      /* +1 up, -1 down, 0 keep (dsp_gain advisor) */
-    uint32_t ecg_lost, ppg_lost; /* samples / frames lost (HAL overruns) */
+    uint32_t ecg_lost, ppg_lost; /* samples / frames lost (timeline gaps, re-filled) */
+    uint16_t ecg_resyncs, ppg_resyncs; /* gaps too long to re-fill (> 2.5 s): index slipped */
     uint32_t i2c_errors;     /* LED DAC writes that failed */
     bool gain_hi;
     uint8_t notch_hz;

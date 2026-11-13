@@ -647,14 +647,30 @@ void hal_init(void)
 
     s_reset_cause = map_reset_cause(DL_SYSCTL_getResetCause());
 
+    /* Watchdog first, so a fault anywhere below (a clock that never comes
+     * up, a peripheral that never answers) resets instead of hanging.
+     * TRM SLAU846 41.2: the WWDT is disabled and cleared by every SYSRST
+     * (and every BOOTRST / POR above it), so this first WWDTCTL0 write
+     * enables it; a second one would be a violation, and hal_init() is
+     * idempotent. Window: both closed-window periods are 0 %, so a restart
+     * is valid at any time (no early-kick reset). Timing: the rest of
+     * hal_init() takes well under 0.5 s (the longest step is the bounded
+     * LFOSC-good poll in sysctl_init(), 1e6 iterations, normally a few
+     * passes), then app_init() (MCP4728 EEPROM
+     * programming ~50-100 ms, I2C timeouts of 10 ms per failed transfer,
+     * OLED power-up ~10 ms) until the first hal_wdt_kick() in app_step(),
+     * against a 2 s period. The WWDT counts LFCLK; LFOSC runs from reset. */
+    DL_WWDT_reset(WWDT0);
+    DL_WWDT_enablePower(WWDT0);
+    bsp_delay_cycles(32u); /* POWER_STARTUP_DELAY (SysConfig uses 16) */
+    wdt_init();
+
     DL_GPIO_reset(GPIOA);
     DL_GPIO_reset(GPIOB);
     DL_GPIO_enablePower(GPIOA);
     DL_GPIO_enablePower(GPIOB);
     DL_RTC_reset(RTC);
     DL_RTC_enablePower(RTC);
-    DL_WWDT_reset(WWDT0);
-    DL_WWDT_enablePower(WWDT0);
     bsp_delay_cycles(32u); /* POWER_STARTUP_DELAY (SysConfig uses 16) */
 
     gpio_init();
@@ -665,7 +681,7 @@ void hal_init(void)
     bsp_spi_init();
     bsp_acq_init();
     bsp_rtt_init();
-    wdt_init();
+    hal_wdt_kick(); /* the period starts over for app_init() */
 
     g_events = 0u;
     s_inited = true;

@@ -65,6 +65,9 @@ void bsp_spi_retime(void);   /* recompute SCK divider for current MCLK */
 void bsp_acq_init(void);     /* power-on configuration of the acquisition blocks */
 void bsp_rtt_init(void);
 void bsp_safe_state(void);   /* fault path: rails/switches off, LEDs blanked */
+/* ECG ring reads where DMASZ and DMADA disagreed (bring-up: shows whether
+ * DMADA reads back live in repeat-single mode; DMASZ is the one used). */
+uint32_t bsp_ecg_pos_mismatches(void);
 
 /* Bounded busy-wait helpers (no SysTick dependence). */
 void bsp_delay_cycles(uint32_t cycles);

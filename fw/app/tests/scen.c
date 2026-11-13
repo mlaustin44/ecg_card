@@ -21,6 +21,10 @@ static void check_step(void)
     if (!analog_needed && (sim_pin(PIN_ANA_EN) || sim_pin(PIN_VLED_EN) || sim_pin(PIN_MEASURE_REQ) ||
                            sim_pin(PIN_BUCK_PS_SYNC)))
         scen.analog_outside++;
+    /* A PPG session holds VLED_EN high from acq_start() to rails_off(). */
+    bool ppg_session = acq_active() && sim_pin(PIN_VLED_EN);
+    if (sim_mcp_int_ref_on() && !ppg_session)
+        scen.vref_outside_ppg++;
     double ma = sim_led_now_ma();
     if (ma > scen.max_led_ma)
         scen.max_led_ma = ma;

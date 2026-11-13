@@ -2,6 +2,7 @@
 
 #include <string.h>
 
+#include "acq_stats.h"
 #include "board.h"
 #include "ecg_dsp.h"
 #include "hal.h"
@@ -14,8 +15,11 @@
 #define ECG_MAX_CHUNKS  32u   /* per poll: 2048 samples = 512 ms of backlog */
 #define PPG_CHUNK       8u
 #define PPG_MAX_CHUNKS  8u
-#define FILL_MAX_ECG    4000u /* lost samples re-inserted per poll (1 s) */
-#define FILL_MAX_PPG    100u
+/* Lost samples / frames are re-inserted by timeline index (hal.h) up to
+ * 2.5 s per gap, longer than the watchdog lets the main loop stall; beyond
+ * that the index is resynchronised (counted in acq_summary_t.*_resyncs). */
+#define FILL_MAX_ECG    10000u
+#define FILL_MAX_PPG    250u
 #define GAIN_TICK_MS    100u
 #define QUALITY_MS      1000u
 #define SLOW_APPLY_MS   2u    /* a control write that took longer flags 2 frames */
@@ -23,7 +27,10 @@
 #define DCC_FAST_SPAN   200u  /* frames after start / finger with fast DCC */
 #define AGC_QUIET       5u    /* frames after a step before the next AGC decision */
 
-enum { S_NONE, S_VMID, S_FR, S_GO };
+enum { S_NONE, S_VMID, S_GO };
+
+_Static_assert((uint64_t)(DSP_PAT_MAX_US / ACQ_PAT_UNIT_US + 1) * UINT16_MAX < UINT32_MAX,
+               "PAT sum cannot overflow");
 
 static struct {
     const acq_sink_t *sink;
@@ -48,8 +55,9 @@ static struct {
     int16_t blk[ECG_BLOCK_N];
     uint8_t blk_n;
     uint32_t blk_start;
-    uint32_t ecg_ovr0;
+    uint32_t ecg_next;   /* HAL timeline index of the next raw sample expected */
     uint16_t last_raw;
+    bool have_raw;
     bool ecg_contact;
     uint32_t ecg_contact_ms;
     bool fr_on, fr_recheck;
@@ -73,22 +81,19 @@ static struct {
     uint8_t pblk_n, pblk_flags;
     uint16_t pblk_led;
     uint32_t pblk_start;
-    uint32_t ppg_ovr0;
+    uint32_t ppg_next;   /* HAL timeline index of the next frame expected */
     hal_ppg_frame_t last_frame;
     bool have_frame;
+    uint32_t pulse_k;            /* ppg_frames at the last pulse (or finger edge) */
 
     /* ---- session statistics (settled only) ---- */
-    uint32_t ibi_sum;
-    uint16_t ibi_n;
-    uint32_t pi_sum;
-    uint16_t pi_n;
-    uint32_t pat_sum_us;
-    uint16_t pat_n;
+    acq_mean_t ibi, pi, pat_mean; /* saturating (acq_stats.h) */
     uint16_t pulses;
 } A;
 
 /* Scratch buffers (static: keeps the main-loop stack shallow). */
 static uint16_t s_raw[ECG_CHUNK];
+static uint16_t s_fill[ECG_CHUNK];
 static int16_t s_dec[DSP_DECIM_MAX_OUT(ECG_CHUNK)];
 static int16_t s_uv[DSP_DECIM_MAX_OUT(ECG_CHUNK)];
 static hal_ppg_frame_t s_frames[PPG_CHUNK];
@@ -221,14 +226,22 @@ static void start_step(uint32_t now)
                 fail(ACQ_ERR_VMID);
                 return;
             }
-            /* step 4: gain and right-leg drive, FAST_RESTORE after the
-             * switch (it injects charge) */
-            if (!rails_ecg_frontend(A.cfg.gain_hi, A.cfg.rld) || !rails_fast_restore(true)) {
+            /* step 4: gain and right-leg drive; FAST_RESTORE stays low (the
+             * brief). The charge the switches inject is removed by the
+             * contact-detection pulse (step 7, ecg_on_contact()): until
+             * contact the output sits on a rail anyway. */
+            if (!rails_ecg_frontend(A.cfg.gain_hi, A.cfg.rld)) {
                 fail(ACQ_ERR_START);
                 return;
             }
-            A.step = S_FR;
+            /* step 5: connect the electrodes (refused on USB power) */
+            if (!rails_measure_req(true)) {
+                fail(ACQ_ERR_USB);
+                return;
+            }
+            A.step = S_GO;
             A.step_ms = now;
+            start_step(now);
         } else {
             if (dt < ACQ_VLED_WAIT_MS)
                 return;
@@ -236,17 +249,6 @@ static void start_step(uint32_t now)
             start_step(now);
         }
         return;
-    case S_FR:
-        if (dt < ECG_FAST_RESTORE_MS)
-            return;
-        rails_fast_restore(false);
-        /* step 5: connect the electrodes (refused on USB power) */
-        if (!rails_measure_req(true)) {
-            fail(ACQ_ERR_USB);
-            return;
-        }
-        A.step = S_GO;
-        /* fall through */
     case S_GO: {
         if (A.cfg.ppg) {
             /* PPG step 4: channel A on at the start current (LEDs still
@@ -266,8 +268,8 @@ static void start_step(uint32_t now)
         }
         A.start_ms = hal_millis();
         A.last_ms = A.start_ms;
-        A.ecg_ovr0 = hal_ecg_overruns();
-        A.ppg_ovr0 = hal_ppg_overruns();
+        A.ecg_next = 0;  /* hal.h: indices restart at hal_acq_start() */
+        A.ppg_next = 0;
         A.gain_ms = A.qual_ms = A.start_ms;
         A.fast_dcc_until = DCC_FAST_SPAN;
         A.st.phase = ACQ_ON;
@@ -362,6 +364,7 @@ static void ecg_process(const uint16_t *raw, size_t n, uint32_t now)
         }
     }
     A.last_raw = raw[n - 1];
+    A.have_raw = true;
 
     size_t m = dsp_decim_push(&A.decim, raw, n, s_dec);
     if (m == 0)
@@ -401,33 +404,53 @@ static void ecg_process(const uint16_t *raw, size_t n, uint32_t now)
     }
 }
 
+static void count_resync(uint16_t *c)
+{
+    if (*c < UINT16_MAX)
+        (*c)++;
+}
+
+/* Lost samples (slow reader, missed conversion) are re-inserted as copies of
+ * the last sample, at the index where they belong (hal.h read contract), so
+ * that every stream index stays on the acquisition timeline (R-peak times,
+ * PAT). */
+static void ecg_fill(uint32_t lost, uint16_t filler, uint32_t now)
+{
+    A.sum.ecg_lost += lost;
+    if (lost > FILL_MAX_ECG) {
+        count_resync(&A.sum.ecg_resyncs);
+        lost = FILL_MAX_ECG;
+    }
+    while (lost) {
+        size_t k = lost < ECG_CHUNK ? lost : ECG_CHUNK;
+        for (size_t i = 0; i < k; i++)
+            s_fill[i] = filler;
+        ecg_process(s_fill, k, now);
+        lost -= (uint32_t)k;
+    }
+}
+
 static void ecg_drain(uint32_t now)
 {
-    /* Lost samples (slow reader, missed conversion) are re-inserted as
-     * copies of the last sample so that every stream index stays on the
-     * acquisition timeline (R-peak times, PAT). */
-    uint32_t ovr = hal_ecg_overruns();
-    uint32_t lost = ovr - A.ecg_ovr0;
-    A.ecg_ovr0 = ovr;
-    if (lost) {
-        A.sum.ecg_lost += lost;
-        if (lost > FILL_MAX_ECG)
-            lost = FILL_MAX_ECG;
-        while (lost) {
-            size_t k = lost < ECG_CHUNK ? lost : ECG_CHUNK;
-            for (size_t i = 0; i < k; i++)
-                s_raw[i] = A.last_raw;
-            ecg_process(s_raw, k, now);
-            lost -= (uint32_t)k;
-        }
-    }
     for (unsigned c = 0; c < ECG_MAX_CHUNKS; c++) {
-        size_t n = hal_ecg_read(s_raw, ECG_CHUNK);
+        uint32_t first;
+        size_t n = hal_ecg_read(s_raw, ECG_CHUNK, &first);
         if (n == 0)
             break;
-        ecg_process(s_raw, n, now);
-        if (n < ECG_CHUNK)
-            break;
+        int32_t gap = (int32_t)(first - A.ecg_next);
+        if (gap > 0) {
+            ecg_fill((uint32_t)gap, A.have_raw ? A.last_raw : s_raw[0], now);
+            A.ecg_next = first;
+        } else if (gap < -(int32_t)FILL_MAX_ECG) {
+            count_resync(&A.sum.ecg_resyncs); /* wild index: follow it */
+            A.ecg_next = first;
+        }
+        /* overlap (only after a HAL ring resync): drop what was processed */
+        uint32_t skip = A.ecg_next - first;
+        if (skip >= n)
+            continue;
+        ecg_process(s_raw + skip, n - skip, now);
+        A.ecg_next = first + (uint32_t)n;
     }
 }
 
@@ -483,6 +506,7 @@ static void ecg_timers(uint32_t now)
 static void ppg_on_finger(bool present, uint32_t now)
 {
     A.st.finger = present;
+    A.pulse_k = A.st.ppg_frames;
     if (present) {
         dsp_ppg_reset(&A.ppg);
         A.fast_dcc_until = A.st.ppg_frames + DCC_FAST_SPAN;
@@ -507,6 +531,7 @@ static void ppg_pulse(const dsp_ppg_pulse_t *p)
 {
     uint16_t pat_ms = 0;
     bool settled = A.st.settled && A.st.finger;
+    A.pulse_k = A.st.ppg_frames;
     A.st.pulse_bpm = p->pulse_bpm;
     if (p->pi_permille)
         A.st.pi_permille = p->pi_permille;
@@ -516,10 +541,8 @@ static void ppg_pulse(const dsp_ppg_pulse_t *p)
         if (dsp_pat_pop(&A.pat, &pat_us, NULL)) {
             pat_ms = (uint16_t)((pat_us + 500u) / 1000u);
             A.st.pat_ms = pat_ms;
-            if (settled) {
-                A.pat_sum_us += pat_us;
-                A.pat_n++;
-            }
+            if (settled)
+                acq_pat_add(&A.pat_mean, pat_us);
         }
     } else {
         A.st.beat_seq++;
@@ -528,14 +551,10 @@ static void ppg_pulse(const dsp_ppg_pulse_t *p)
     if (settled) {
         if (A.pulses < UINT16_MAX)
             A.pulses++;
-        if (p->ibi_ms >= 300u && p->ibi_ms <= 2500u && A.ibi_n < UINT16_MAX) {
-            A.ibi_sum += p->ibi_ms;
-            A.ibi_n++;
-        }
-        if (p->pi_permille && A.pi_n < UINT16_MAX) {
-            A.pi_sum += p->pi_permille;
-            A.pi_n++;
-        }
+        if (p->ibi_ms >= 300u && p->ibi_ms <= 2500u)
+            acq_mean_add(&A.ibi, p->ibi_ms);
+        if (p->pi_permille)
+            acq_mean_add(&A.pi, p->pi_permille);
     }
     if (A.sink && A.sink->pulse)
         A.sink->pulse(dsp_pat_foot_ecg_index(p->frame, p->frac_q8), p->pulse_bpm, pat_ms,
@@ -594,23 +613,33 @@ static void ppg_frame(const hal_ppg_frame_t *f, uint8_t extra, uint32_t now)
 
 static void ppg_drain(uint32_t now)
 {
-    uint32_t ovr = hal_ppg_overruns();
-    uint32_t lost = ovr - A.ppg_ovr0;
-    A.ppg_ovr0 = ovr;
-    if (lost) {
-        A.sum.ppg_lost += lost;
-        if (lost > FILL_MAX_PPG)
-            lost = FILL_MAX_PPG;
-        /* keep the frame index on the timeline; the DSP bridges them */
-        for (uint32_t i = 0; i < lost && A.have_frame; i++)
-            ppg_frame(&A.last_frame, DSP_PPG_IN_DISTURBED, now);
-    }
     for (unsigned c = 0; c < PPG_MAX_CHUNKS; c++) {
-        size_t n = hal_ppg_read(s_frames, PPG_CHUNK);
-        for (size_t i = 0; i < n; i++)
-            ppg_frame(&s_frames[i], 0, now);
-        if (n < PPG_CHUNK)
+        uint32_t first;
+        size_t n = hal_ppg_read(s_frames, PPG_CHUNK, &first);
+        if (n == 0)
             break;
+        int32_t gap = (int32_t)(first - A.ppg_next);
+        if (gap > 0) {
+            /* keep the frame index on the timeline; the DSP bridges them */
+            uint32_t lost = (uint32_t)gap;
+            A.sum.ppg_lost += lost;
+            if (lost > FILL_MAX_PPG) {
+                count_resync(&A.sum.ppg_resyncs);
+                lost = FILL_MAX_PPG;
+            }
+            hal_ppg_frame_t filler = A.have_frame ? A.last_frame : s_frames[0];
+            for (uint32_t i = 0; i < lost; i++)
+                ppg_frame(&filler, DSP_PPG_IN_DISTURBED, now);
+            A.ppg_next = first;
+        } else if (gap < -(int32_t)FILL_MAX_PPG) {
+            count_resync(&A.sum.ppg_resyncs);
+            A.ppg_next = first;
+        }
+        uint32_t skip = A.ppg_next - first; /* overlap after a HAL resync */
+        for (size_t i = skip; i < n; i++)
+            ppg_frame(&s_frames[i], 0, now);
+        if (skip < n)
+            A.ppg_next = first + (uint32_t)n;
     }
 }
 
@@ -699,8 +728,23 @@ static void ppg_control(uint32_t now)
     }
 }
 
+/* No pulse for ACQ_PULSE_TIMEOUT_MS: the last rate, PI and PAT are stale.
+ * Report 0 ("not available", the UI shows "--") until the detector delivers
+ * again; in PPG-only mode the heart rate is the pulse rate. */
+static void ppg_stale(void)
+{
+    if (A.st.ppg_frames - A.pulse_k < ACQ_PULSE_TIMEOUT_MS / (PPG_FRAME_US / 1000u))
+        return;
+    A.st.pulse_bpm = 0;
+    A.st.pi_permille = 0;
+    A.st.pat_ms = 0;
+    if (ppg_primary())
+        A.st.hr_bpm = 0;
+}
+
 static void ppg_timers(uint32_t now)
 {
+    ppg_stale();
     if (!ppg_primary())
         return;
     if (A.st.finger && !A.st.settled) {
@@ -756,10 +800,10 @@ static void make_summary(void)
         s->gain_advice = 0;
     }
     s->pulses = A.pulses;
-    s->pulse_avg = A.ibi_n ? (uint16_t)((60000u * A.ibi_n + A.ibi_sum / 2u) / A.ibi_sum) : 0u;
-    s->pi_avg = A.pi_n ? (uint16_t)((A.pi_sum + A.pi_n / 2u) / A.pi_n) : 0u;
-    s->pat_n = A.pat_n;
-    s->pat_avg_ms = A.pat_n ? (uint16_t)((A.pat_sum_us / A.pat_n + 500u) / 1000u) : 0u;
+    s->pulse_avg = acq_mean_bpm(&A.ibi);
+    s->pi_avg = (uint16_t)acq_mean_get(&A.pi);
+    s->pat_n = A.pat_mean.n;
+    s->pat_avg_ms = acq_pat_mean_ms(&A.pat_mean);
     s->running_ms = A.st.running_ms;
     s->i2c_errors = rails_i2c_errors();
     s->gain_hi = A.st.gain_hi;

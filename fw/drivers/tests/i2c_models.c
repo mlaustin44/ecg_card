@@ -94,8 +94,18 @@ void mcp4728_model_attach(mcp4728_model_t *m)
 void mcp4728_model_set_good_eeprom(mcp4728_model_t *m)
 {
     for (int i = 0; i < 4; i++) {
-        m->ee[i] = (dac_reg_t){1, 1, 0, 0};
+        m->ee[i] = (dac_reg_t){0, 1, 0, 0};
     }
+}
+
+bool mcp4728_model_int_ref_on(const mcp4728_model_t *m)
+{
+    for (int i = 0; i < 4; i++) {
+        if (m->in[i].vref) {
+            return true;
+        }
+    }
+    return false;
 }
 
 /* ---- CW2015 ------------------------------------------------------------ */

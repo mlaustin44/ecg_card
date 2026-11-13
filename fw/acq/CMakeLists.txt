@@ -15,4 +15,6 @@ if(NOT ECG_TARGET)
 
   ecg_add_test(acq_rails SOURCES tests/test_rails.c LIBS ecg_acq ecg_sim)
   ecg_add_test(acq_engine SOURCES tests/test_acq.c LIBS ecg_acq ecg_testsrc ecg_sim)
+  ecg_add_test(acq_stats SOURCES tests/test_stats.c)
+  target_include_directories(acq_stats PRIVATE src)
 endif()

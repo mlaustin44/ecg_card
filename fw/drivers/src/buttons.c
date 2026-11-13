@@ -143,6 +143,11 @@ void buttons_tick(uint32_t now)
         if (x->boot_held && !x->stuck && (uint32_t)(now - s_boot_t) > BTN_STUCK_MS) {
             x->stuck = true;
         }
+        /* Held far longer than any deliberate press (stuck after boot,
+         * pressed in a pocket): stuck too, so it stops counting as input. */
+        if (!x->stuck && (uint32_t)(now - x->press_t) > BTN_HELD_MAX_MS) {
+            x->stuck = true;
+        }
         if (!x->ignore && !x->combo && !x->long_fired &&
             (uint32_t)(now - x->press_t) >= BTN_LONG_MS) {
             x->long_fired = true;

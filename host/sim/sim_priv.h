@@ -11,6 +11,7 @@ void sim_advance_us(uint64_t dt_us);   /* may fire scripted events */
 void sim_service(void);                /* fire everything due at "now" */
 void sim_input_set(board_pin_t pin, bool level); /* world-driven input edge */
 bool sim_acq_running_any(void);
+sim_facts_t *sim_facts_raw(void);      /* sim_facts() without bringing trackers up to date */
 void sim_core_set_led_blank(bool level);
 void sim_core_set_oled_attached(bool attached);
 bool sim_body_en(void);
@@ -37,6 +38,7 @@ unsigned an_running(void);
 /* ---- i2c / devices (sim_i2c.c) ---- */
 void i2c_reset(void);
 void mcp_a_state(bool *active, double *vout_mv);
+void mcp_vref_track(void);             /* after DAC register or VLED_EN changes */
 void cw_battery_changed(void);
 void cw_power_on(void);
 

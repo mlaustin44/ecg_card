@@ -68,7 +68,9 @@ hal_status_t cw2015_read(uint16_t *mv, uint8_t *soc_pct)
     uint32_t raw = (((uint32_t)b[0] << 8) | b[1]) & 0x3FFFu;
     *mv = (uint16_t)(raw * 305u / 1000u);
     *soc_pct = b[2];
-    return b[2] > 100u ? HAL_ERR_PARAM : HAL_OK;
+    /* Right after a wake (MODE = 0x00) the gauge reads VCELL = 0 and SOC = 0
+     * (or > 100) until its first conversion: not a measurement. */
+    return (raw == 0u || b[2] > 100u) ? HAL_ERR_PARAM : HAL_OK;
 }
 
 hal_status_t cw2015_clear_alert(void)

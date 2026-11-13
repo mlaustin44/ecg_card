@@ -33,7 +33,9 @@ typedef enum {
  *   - radio off-state: UART TX (PA10) GPIO low, RX (PA11) input pull-down;
  *   - unused pins output low, analog pins analog, PA18 input (never driven);
  *   - MCLK 32 MHz SYSOSC, SysTick 1 ms, RTC on LFOSC, I2C0 400 kHz;
- *   - watchdog started (about 2 s window). */
+ *   - watchdog started (about 2 s period, no closed window) as its very
+ *     first step, so a hang later in start-up resets the MCU; restarted
+ *     once more on return. */
 void hal_init(void);
 
 typedef enum {
@@ -118,7 +120,10 @@ void hal_i2c_recover(void);
  * drives DC, CS and RESET low). Required before OLED_EN goes low. */
 void hal_oled_bus_attach(bool attached);
 /* Blocking write; returns after the last bit has left the shifter. Must not
- * be called while an async write is busy. */
+ * be called while an async write is busy. Bounded: if the SPI (or a DMA
+ * transfer still running) does not finish within ~10 ms, a hardware fault,
+ * the transfer is aborted (DMA stopped, SPI1 re-initialised) and the call
+ * returns; bytes may then be missing. attach() waits the same way. */
 void hal_oled_write(const uint8_t *buf, size_t n);
 /* DMA write. buf must stay valid and unchanged until hal_oled_busy() is
  * false. Returns false if a transfer is already running. */
@@ -145,15 +150,31 @@ void hal_acq_start(unsigned streams);
 void hal_acq_stop(void);
 unsigned hal_acq_running(void);
 
-/* ECG: raw 12-bit ADC0 codes (hardware-averaged x4) at ECG_RAW_HZ, in order.
- * Returns the number of samples copied (0..max). The internal buffer holds
- * at least 64 ms; if the reader falls behind, the oldest data is lost.
- * hal_ecg_overruns() counts every sample lost for any reason (slow reader or
- * a missed conversion); the index of the next sample returned = samples read
- * + overruns counted since the start. The BSP restarts the count at
- * hal_acq_start(), the simulator counts from hal_init(): use the difference
- * from a value read right after hal_acq_start(). */
-size_t hal_ecg_read(uint16_t *dst, size_t max);
+/* Stream reads. Both report the absolute timeline position, so a caller can
+ * neither miscount nor misplace lost data:
+ *   - every sample (frame) since hal_acq_start() has a timeline index,
+ *     counting lost ones too (ECG sample n is taken at n * 250 us, PPG frame
+ *     k at k * 10 ms, see above), modulo 2^32;
+ *   - one call returns only samples (frames) that are contiguous on the
+ *     timeline, and stores the index of the first one in *first_index
+ *     (written only when the return value is > 0; first_index must not be
+ *     NULL, else 0 is returned);
+ *   - the next call starts at or after (first_index + returned count); a
+ *     difference is the number lost in between (reader too slow: the oldest
+ *     data is overwritten; a conversion that was missed). The caller fills
+ *     gaps by index. Only after a ring-index resync (hal_acq_resyncs()) may
+ *     indices repeat; callers drop such an overlap.
+ * The internal buffers hold at least 64 ms (ECG) / 320 ms (PPG).
+ *
+ * hal_*_overruns(): diagnostics only, identical rule in the BSP and the
+ * simulator: samples (frames) lost since hal_acq_start() that a read has
+ * already skipped, i.e. (first_index + count of the latest read) minus the
+ * total delivered since hal_acq_start(). A loss not yet passed by a read is
+ * not counted yet. */
+
+/* ECG: raw 12-bit ADC0 codes (hardware-averaged x4) at ECG_RAW_HZ. Returns
+ * the number of samples copied (0..max). */
+size_t hal_ecg_read(uint16_t *dst, size_t max, uint32_t *first_index);
 uint32_t hal_ecg_overruns(void);
 
 /* PPG: one frame per 10 ms, 12-bit ADC1 codes. */
@@ -163,8 +184,15 @@ typedef struct {
     uint16_t tia_on;   /* TIA_OUT, LEDs on */
     uint16_t hi_on;    /* PPG_HI, LEDs on */
 } hal_ppg_frame_t;
-size_t hal_ppg_read(hal_ppg_frame_t *dst, size_t max);
-uint32_t hal_ppg_overruns(void); /* lost frames; same rule as the ECG counter */
+size_t hal_ppg_read(hal_ppg_frame_t *dst, size_t max, uint32_t *first_index);
+uint32_t hal_ppg_overruns(void);
+
+/* Ring-index resynchronisations since hal_acq_start() (ECG + PPG): the
+ * hardware write position was found behind the reader, which can only
+ * happen if the position source is unreliable; the reader then restarts at
+ * the write position instead of wrapping. Should stay 0; diagnostics only
+ * (always 0 in the simulator). */
+uint32_t hal_acq_resyncs(void);
 
 /* PPG on-chip analog: COMP0 DAC8 photodiode bias, OPA0 (TIA), DAC12, OPA1.
  * The GPAMP is never enabled. The DAC12 offset is undefined after

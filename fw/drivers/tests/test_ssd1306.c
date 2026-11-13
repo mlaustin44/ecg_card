@@ -163,6 +163,37 @@ TEST(power_off_during_flush)
     CHECK(!ssd1306_busy());
 }
 
+/* Review finding 8: the SPI never completes (hardware fault). power_off()
+ * must still finish the pin-safe sequence in bounded time: no command sent
+ * into a busy bus, pins low and the bus detached before OLED_EN falls. */
+TEST(power_off_spi_stuck)
+{
+    static uint8_t fb[OLED_FB_BYTES];
+    fresh();
+    ssd1306_power_on();
+    mock_dma_ms = 1000000; /* never finishes */
+    CHECK(ssd1306_flush_start(fb));
+    mock_ev_n = 0;
+    uint32_t t0 = mock_now;
+    ssd1306_power_off();
+    CHECK(mock_now - t0 <= 60); /* the 50 ms wait, then on */
+    CHECK(!ssd1306_is_powered());
+    int i_en = mock_find_pin_ev(0, PIN_OLED_EN, 0);
+    CHECK(i_en >= 0);
+    int i_at = -1;
+    for (int i = 0; i < mock_ev_n; i++) {
+        CHECK(mock_ev[i].kind != MEV_SPI); /* nothing written into the busy bus */
+        if (mock_ev[i].kind == MEV_ATTACH && mock_ev[i].a == 0) i_at = i;
+    }
+    CHECK(i_at >= 0 && i_at < i_en);
+    CHECK(mock_find_pin_ev(0, PIN_OLED_DC, 0) < i_en);
+    CHECK(mock_find_pin_ev(0, PIN_OLED_RESET, 0) < i_en);
+    CHECK(!mock_pin[PIN_OLED_EN] && !mock_pin[PIN_OLED_DC] && !mock_pin[PIN_OLED_CS] &&
+          !mock_pin[PIN_OLED_RESET] && !mock_attached);
+    CHECK_EQ(mock_viol_en_fell_driven + mock_viol_high_unpowered, 0);
+    mock_dma_ms = 2;
+}
+
 TEST(flush_framing)
 {
     static uint8_t fb[OLED_FB_BYTES];
@@ -230,6 +261,7 @@ int main(void)
     RUN(power_on_sequence);
     RUN(power_off_sequence);
     RUN(power_off_during_flush);
+    RUN(power_off_spi_stuck);
     RUN(flush_framing);
     RUN(contrast_and_blank);
     return TEST_RESULT();

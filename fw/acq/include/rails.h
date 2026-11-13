@@ -65,7 +65,9 @@ bool rails_acq_start(unsigned streams);
  *   1. MEASURE_REQ low
  *   2. FAST_RESTORE, GAIN_HI, RLD_L_EN, RLD_R_EN low
  *   3. hal_acq_stop() (timers, ADCs; LED_BLANK high)
- *   4. MCP4728 channel A powered down (retried; all channels as fallback)
+ *   4. MCP4728 channel A powered down (retried; all channels as fallback);
+ *      always sent when the analog rail was on, whatever the last LED write
+ *      reported (a failed write may still have reached the DAC)
  *   5. VLED_EN low
  *   6. PPG analog off (OPAs, DACs)
  *   7. BUCK_PS_SYNC low, ANA_EN low

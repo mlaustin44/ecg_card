@@ -18,6 +18,8 @@ static struct {
     mcp_ch_t in[4], ee[4];
     uint64_t busy_until_us;
     bool a_fw_written; /* firmware has written channel A since power-up */
+    bool idle_ref;     /* internal reference on while VLED_EN low (being timed) */
+    uint64_t idle_since_us;
 } M;
 
 static struct {
@@ -29,11 +31,15 @@ static struct {
     bool alert_flag, prev_below;
     uint32_t profile_txns;
     uint8_t profile[64];
+    uint64_t wake_us;        /* last sleep -> awake transition */
+    unsigned wake_zero_ms;   /* VCELL/SOC read 0 this long after a wake */
 } C;
 
 static struct {
     unsigned fail_n;
     hal_status_t fail_status;
+    unsigned fail_after_n;
+    hal_status_t fail_after_status;
     bool stuck;
     bool absent_mcp, absent_cw; /* device not fitted / dead: NACKs its address */
     sim_i2c_txn_t log[1024];
@@ -49,6 +55,30 @@ void mcp_a_state(bool *active, double *vout_mv)
 {
     *active = M.in[0].pd == 0 && M.a_fw_written;
     *vout_mv = sim_mcp_vout_mv(0);
+}
+
+/* DS22187E 4.10: the internal reference runs while ANY channel's DAC register
+ * selects it, whether that channel is powered down or not. */
+bool sim_mcp_int_ref_on(void)
+{
+    for (int i = 0; i < 4; i++)
+        if (M.in[i].vref) return true;
+    return false;
+}
+
+/* Accumulates sim_facts()->mcp_vref_int_idle_us: time with the internal
+ * reference on while VLED_EN is low (no PPG session can be running). Called
+ * whenever the DAC registers or VLED_EN change, and before facts are read. */
+void mcp_vref_track(void)
+{
+    bool idle = sim_mcp_int_ref_on() && !sim_pin(PIN_VLED_EN);
+    uint64_t now = sim_now_us();
+    if (M.idle_ref) {
+        ((sim_facts_t *)sim_facts_raw())->mcp_vref_int_idle_us += now - M.idle_since_us;
+        M.idle_since_us = now;
+    }
+    if (idle && !M.idle_ref) M.idle_since_us = now;
+    M.idle_ref = idle;
 }
 
 unsigned sim_mcp_code(int ch) { return M.in[ch & 3].code; }
@@ -86,6 +116,7 @@ void sim_mcp_power_cycle(void)
     for (int i = 0; i < 4; i++) M.in[i] = M.ee[i];
     M.busy_until_us = 0;
     M.a_fw_written = false;
+    mcp_vref_track();
 }
 double sim_led_set_ma(void) { return sim_mcp_vout_mv(0) / 1000.0 * (10.0 / 164.0) / 8.2 * 1000.0; }
 double sim_led_now_ma(void)
@@ -97,7 +128,7 @@ double sim_led_now_ma(void)
 static void mcp_eeprom_write(int ch)
 {
     M.ee[ch] = M.in[ch];
-    ((sim_facts_t *)sim_facts())->mcp_eeprom_writes++;
+    (sim_facts_raw())->mcp_eeprom_writes++;
     M.busy_until_us = sim_now_us() + 50000;
 }
 
@@ -132,7 +163,7 @@ static void mcp_write(const uint8_t *w, size_t n)
             }
             bool eeprom = wsel >= 2;
             if (eeprom && sim_mcp_busy()) {
-                ((sim_facts_t *)sim_facts())->mcp_writes_ignored_busy++;
+                (sim_facts_raw())->mcp_writes_ignored_busy++;
                 sim_viol(SIM_V_I2C_PROTOCOL,
                          "MCP4728 EEPROM write command 0x%02X sent while BSY (ignored)", b);
                 return;
@@ -264,7 +295,10 @@ void cw_power_on(void)
     C.reg[0x00] = 0x73;
     C.reg[0x0A] = 0xC0;
     C.asleep = true;
+    C.wake_zero_ms = 200;
 }
+
+void sim_cw_set_wake_zero_ms(unsigned ms) { C.wake_zero_ms = ms; }
 
 unsigned sim_cw_profile_writes(void) { return C.profile_txns; }
 void sim_cw_profile(uint8_t out[64]) { memcpy(out, &C.reg[0x10], 64); }
@@ -276,6 +310,10 @@ uint8_t sim_cw_reg(unsigned a) { return a < 0x50 ? C.reg[a] : 0; }
 
 static uint8_t cw_reg_read(unsigned a)
 {
+    /* After a wake the gauge needs a first conversion: VCELL and SOC read 0
+     * meanwhile (what made a healthy battery look empty at boot). */
+    if (a >= 0x02 && a <= 0x05 && sim_now_us() - C.wake_us < (uint64_t)C.wake_zero_ms * 1000u)
+        return 0;
     switch (a) {
     case 0x02: return (uint8_t)(C.frozen_vcell >> 8);
     case 0x03: return (uint8_t)C.frozen_vcell;
@@ -293,7 +331,7 @@ static hal_status_t cw_write(const uint8_t *w, size_t n)
     if (w[0] >= 0x50) return HAL_ERR_NACK;
     C.ptr = w[0];
     bool touched_profile = false;
-    sim_facts_t *f = (sim_facts_t *)sim_facts();
+    sim_facts_t *f = sim_facts_raw();
     for (size_t i = 1; i < n; i++) {
         unsigned a = C.ptr;
         if (a >= 0x50) return HAL_ERR_NACK;
@@ -311,7 +349,10 @@ static hal_status_t cw_write(const uint8_t *w, size_t n)
             C.reg[a] = v;
             f->cw_mode_writes++;
             bool sleep = (v & 0xC0) == 0xC0;
-            if (C.asleep && !sleep) C.asleep = false;
+            if (C.asleep && !sleep) {
+                C.asleep = false;
+                C.wake_us = sim_now_us();
+            }
             else if (!C.asleep && sleep) C.asleep = true;
             if (!sleep) C.prev_below = false;
         } else if (a >= 0x10) {
@@ -351,6 +392,11 @@ void i2c_reset(void)
 }
 
 void sim_i2c_fail_next(unsigned n, hal_status_t st) { I.fail_n = n; I.fail_status = st; }
+void sim_i2c_fail_after_next(unsigned n, hal_status_t st)
+{
+    I.fail_after_n = n;
+    I.fail_after_status = st;
+}
 void sim_i2c_stick_bus(bool s) { I.stuck = s; }
 void sim_i2c_set_present(uint8_t addr, bool present)
 {
@@ -365,14 +411,14 @@ void sim_i2c_log_clear(void) { I.log_n = 0; }
 
 void hal_i2c_recover(void)
 {
-    ((sim_facts_t *)sim_facts())->i2c_recoveries++;
+    (sim_facts_raw())->i2c_recoveries++;
     I.stuck = false;
     sim_advance_us(100);
 }
 
 hal_status_t hal_i2c_xfer(uint8_t addr, const uint8_t *w, size_t wn, uint8_t *r, size_t rn)
 {
-    sim_facts_t *f = (sim_facts_t *)sim_facts();
+    sim_facts_t *f = sim_facts_raw();
     f->i2c_xfers++;
     sim_i2c_txn_t *lg = NULL;
     if (I.log_n < 1024) {
@@ -419,11 +465,18 @@ hal_status_t hal_i2c_xfer(uint8_t addr, const uint8_t *w, size_t wn, uint8_t *r,
     if (addr == I2C_ADDR_MCP4728) {
         if (wn) mcp_write(w, wn);
         if (rn) mcp_read(r, rn);
+        mcp_vref_track();
     } else {
         hal_status_t st = HAL_OK;
         if (wn) st = cw_write(w, wn);
         if (st != HAL_OK) DONE(st);
         if (rn) cw_read(r, rn);
+    }
+    if (I.fail_after_n) { /* the device saw it all; the MCU reports a failure */
+        I.fail_after_n--;
+        f->i2c_faults_injected++;
+        sim_advance_us(I.fail_after_status == HAL_ERR_NACK ? 30 : 10000);
+        DONE(I.fail_after_status);
     }
     DONE(HAL_OK);
 #undef DONE

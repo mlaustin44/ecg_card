@@ -136,6 +136,52 @@ TEST(stop_with_i2c_trouble)
     CHECK(rails_i2c_errors() >= 1);
 }
 
+/* Review finding 7: an LED write that reached the DAC but reported a
+ * timeout left channel A on (bookkeeping said "off"), and rails_off() then
+ * dropped ANA_EN with the DAC still driving GREEN_SET (ABORT mode: the
+ * simulator's SIM_V_ANA_FALL_DAC_ACTIVE check aborts the test). */
+TEST(stop_after_write_that_reported_failure)
+{
+    for (int was_on = 0; was_on < 2; was_on++) {
+        boot();
+        rails_analog_on();
+        CHECK(rails_ppg_analog_on(500));
+        CHECK(rails_vled(true));
+        hal_delay_ms(10);
+        if (was_on)
+            CHECK(rails_led_set(1000));
+        /* both the write and its one retry land, both report a timeout */
+        sim_i2c_fail_after_next(2, HAL_ERR_TIMEOUT);
+        CHECK(!rails_led_set(1500));
+        CHECK_EQ(sim_mcp_pd(0), 0); /* channel A IS on */
+        CHECK(sim_mcp_int_ref_on());
+        CHECK(rails_i2c_errors() >= 1);
+        rails_off();
+        CHECK(all_off());
+        CHECK(!sim_mcp_int_ref_on());
+        CHECK_EQ(sim_violation_count(), 0);
+    }
+    /* the power-down itself reports a failure but lands: retried, still off */
+    boot();
+    rails_analog_on();
+    CHECK(rails_ppg_analog_on(500));
+    CHECK(rails_vled(true));
+    hal_delay_ms(10);
+    CHECK(rails_led_set(800));
+    sim_i2c_fail_after_next(1, HAL_ERR_NACK);
+    rails_off();
+    CHECK(all_off());
+    CHECK(!sim_mcp_int_ref_on());
+    /* analog rail on for the diagnostics page only (LED never set): the stop
+     * still powers the DAC down, cheaply */
+    boot();
+    rails_analog_on();
+    uint32_t x0 = sim_facts()->i2c_xfers;
+    rails_off();
+    CHECK(sim_facts()->i2c_xfers - x0 == 1);
+    CHECK(all_off());
+}
+
 int main(void)
 {
     RUN(init_all_off);
@@ -143,5 +189,6 @@ int main(void)
     RUN(measure_req_refused_on_usb);
     RUN(ppg_sequence_and_limit);
     RUN(stop_with_i2c_trouble);
+    RUN(stop_after_write_that_reported_failure);
     return TEST_RESULT();
 }

@@ -40,7 +40,7 @@ static void run_frames(unsigned ms)
     for (unsigned i = 0; i < ms; i++) {
         hal_wdt_kick();
         hal_delay_ms(1);
-        nfr += hal_ppg_read(fr + nfr, 2000 - nfr);
+        nfr += ppg_read(fr + nfr, 2000 - nfr);
     }
 }
 
@@ -56,9 +56,9 @@ TEST(frame_timing_and_led_window)
     CHECK(!sim_led_blank());
     hal_delay_us(149);
     hal_ppg_frame_t f[4];
-    CHECK_EQ(hal_ppg_read(f, 4), 0); /* on sample at 9950 not taken yet */
+    CHECK_EQ(ppg_read(f, 4), 0); /* on sample at 9950 not taken yet */
     hal_delay_us(1);
-    CHECK_EQ(hal_ppg_read(f, 4), 1);
+    CHECK_EQ(ppg_read(f, 4), 1);
     hal_delay_us(48);
     CHECK(!sim_led_blank());
     hal_delay_us(1);
@@ -212,19 +212,35 @@ TEST(ring_overrun_and_shared_timeline)
     hal_acq_start(HAL_ACQ_PPG | HAL_ACQ_ECG);
     CHECK_EQ(hal_acq_running(), HAL_ACQ_PPG | HAL_ACQ_ECG);
     uint16_t e[64];
-    CHECK_EQ(hal_ecg_read(e, 64), 1); /* ECG sample 0 at the same instant as frame 0 start */
+    CHECK_EQ(ecg_read(e, 64), 1); /* ECG sample 0 at the same instant as frame 0 start */
     hal_delay_us(9949);
     hal_ppg_frame_t f[4];
-    CHECK_EQ(hal_ppg_read(f, 4), 0);
-    CHECK_EQ(hal_ecg_read(e, 64), 39); /* samples 1..39 at 250..9750 us */
+    CHECK_EQ(ppg_read(f, 4), 0);
+    CHECK_EQ(ecg_read(e, 64), 39); /* samples 1..39 at 250..9750 us */
     hal_delay_us(1);
-    CHECK_EQ(hal_ppg_read(f, 4), 1);
-    CHECK_EQ(hal_ecg_read(e, 64), 0);
+    CHECK_EQ(ppg_read(f, 4), 1);
+    CHECK_EQ(ecg_read(e, 64), 0);
     hal_delay_us(50);
-    CHECK_EQ(hal_ecg_read(e, 64), 1); /* sample 40 at 10000 us, next frame starts there */
+    CHECK_EQ(ecg_read(e, 64), 1); /* sample 40 at 10000 us, next frame starts there */
     hal_delay_ms(500);
+    CHECK_EQ(hal_ppg_overruns(), 0); /* counted once a read passes the loss */
+    uint32_t first;
+    CHECK_EQ(hal_ppg_read(f, 4, &first), 4);
+    CHECK_EQ(first, 51 - SIM_PPG_RING_FRAMES); /* frames 0..50 done, 1 read */
     CHECK_EQ(hal_ppg_overruns(), 50 - SIM_PPG_RING_FRAMES);
-    CHECK_EQ(hal_ppg_read(f, 4), 4);
+    /* a missed frame: the index skips it, a read stops before the gap */
+    sim_acq_set_missed(0, 3);
+    while (hal_ppg_read(f, 4, &first) != 0) {
+    }
+    hal_delay_ms(60);
+    uint32_t idx[8];
+    size_t got = 0, k;
+    while ((k = hal_ppg_read(f, 4, &first)) != 0) {
+        for (size_t i = 0; i < k && got < 8; i++) idx[got++] = first + (uint32_t)i;
+    }
+    CHECK(got >= 3);
+    for (size_t i = 0; i < got; i++) CHECK((idx[i] + 1) % 3 != 0);
+    sim_acq_set_missed(0, 0);
     CHECK_EQ(sim_violation_count_of(SIM_V_PPG_START), 0);
 }
 

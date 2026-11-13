@@ -53,4 +53,7 @@ else()
   if(EXISTS ${CMAKE_SOURCE_DIR}/host/sim/CMakeLists.txt)
     add_subdirectory(host/sim)    # defines ecg_sim (hal.h on the host)
   endif()
+  # The BSP's pure index arithmetic (no TI headers) is tested on the host.
+  ecg_add_test(bsp_ring SOURCES fw/bsp/tests/test_bsp_ring.c)
+  target_include_directories(bsp_ring PRIVATE ${CMAKE_SOURCE_DIR}/fw/bsp)
 endif()

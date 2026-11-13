@@ -20,6 +20,7 @@ typedef struct {
     uint32_t measure_req_on_usb;       /* MEASURE_REQ high with USB present */
     uint32_t analog_outside;           /* analog enables high with nothing that needs them */
     double max_led_ma;                 /* largest LED current seen lit */
+    uint32_t vref_outside_ppg;         /* MCP4728 internal reference on with no PPG session */
     uint32_t violations_seen;
 } scen_stats_t;
 

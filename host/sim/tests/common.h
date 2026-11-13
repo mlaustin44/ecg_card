@@ -33,4 +33,10 @@ static inline void ecg_rails_down(void)
     low(PIN_BUCK_PS_SYNC);
     low(PIN_ANA_EN);
 }
+
+/* Reads that ignore the timeline index (tests that only look at values).
+ * g_first holds the index of the last non-empty read. */
+static uint32_t g_first;
+static inline size_t ecg_read(uint16_t *dst, size_t max) { return hal_ecg_read(dst, max, &g_first); }
+static inline size_t ppg_read(hal_ppg_frame_t *dst, size_t max) { return hal_ppg_read(dst, max, &g_first); }
 #endif

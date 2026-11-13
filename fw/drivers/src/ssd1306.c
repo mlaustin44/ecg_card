@@ -96,9 +96,14 @@ void ssd1306_power_off(void)
     s_flushing = false;
     hal_pin_write(PIN_OLED_CS, true);
 
-    static const uint8_t off[] = {0xAE, 0x8D, 0x10};
-    cmd(off, sizeof off);
-    hal_delay_ms(100);
+    if (!hal_oled_busy()) {
+        static const uint8_t off[] = {0xAE, 0x8D, 0x10};
+        cmd(off, sizeof off);
+        hal_delay_ms(100);
+    }
+    /* else the SPI never finished (hardware fault): no command can be sent;
+     * the pin-safe sequence below must still run, so the rail never stays up
+     * and no pin drives an unpowered module. */
 
     hal_pin_write(PIN_OLED_DC, false);
     hal_pin_write(PIN_OLED_CS, false);

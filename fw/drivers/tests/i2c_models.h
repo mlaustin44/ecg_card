@@ -27,7 +27,10 @@ typedef struct {
 } mcp4728_model_t;
 
 void mcp4728_model_attach(mcp4728_model_t *m); /* sets power-on defaults of a blank part */
-void mcp4728_model_set_good_eeprom(mcp4728_model_t *m);
+void mcp4728_model_set_good_eeprom(mcp4728_model_t *m); /* VDD ref, PD 01, x1, code 0 */
+/* DS22187E 4.10: the internal reference runs while any channel's input
+ * register selects it, powered down or not. */
+bool mcp4728_model_int_ref_on(const mcp4728_model_t *m);
 
 typedef struct {
     uint8_t reg[0x60];

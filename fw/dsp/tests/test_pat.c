@@ -38,6 +38,59 @@ TEST(timeline)
     CHECK_EQ(ft, dsp_pat_foot_time_us(frame, 0));
 }
 
+/* Review finding 6: frame * 10000 wraps uint32 after 71.6 min, and the foot
+ * ECG index jumped back by 2^32 / 2000 samples there. Exact for any frame. */
+TEST(foot_index_long_sessions)
+{
+    static const uint32_t frames[] = {0u, 100u, 429000u, 429496u, 429497u, 430000u, 500000u,
+                                      1000000u, 8640000u /* 24 h */, 85899345u /* 2^32/50 */,
+                                      858993459u /* stream index near 2^32 */};
+    for (size_t i = 0; i < sizeof frames / sizeof frames[0]; i++) {
+        for (unsigned frac = 0; frac < 256; frac += 37) {
+            uint32_t f = frames[i];
+            double t = (double)f * 10000.0 + floor((frac * 625.0 + 8.0) / 16.0) + PPG_T_ON_SAMPLE_US -
+                       DSP_PPG_ANALOG_DELAY_US - DSP_ECG_STREAM_T0_US;
+            uint64_t want = (uint64_t)floor((t + 1000.0) / 2000.0);
+            CHECK_EQ(dsp_pat_foot_ecg_index(f, (uint8_t)frac), (uint32_t)want);
+        }
+    }
+    /* consecutive frames: +5 stream samples, no jump at 71.6 min */
+    for (uint32_t f = 429490u; f < 429510u; f++)
+        CHECK_EQ(dsp_pat_foot_ecg_index(f + 1u, 0) - dsp_pat_foot_ecg_index(f, 0), 5u);
+}
+
+/* Pairing across the 2^32 us wrap of both timelines (71.6 min) and far
+ * beyond (24 h): every PAT is recovered exactly. */
+TEST(pairing_long_sessions)
+{
+    static const double t0s[] = {4290.0, 4294.0, 4296.0, 86400.0, 3.0 * 86400.0};
+    for (size_t i = 0; i < sizeof t0s / sizeof t0s[0]; i++) {
+        dsp_pat_t p;
+        dsp_pat_init(&p);
+        int got = 0;
+        int64_t want[20];
+        for (int k = 0; k < 20; k++) {
+            double tr = t0s[i] + k * 0.8;
+            /* exact R / foot times on their grids */
+            uint32_t idx = (uint32_t)llround((tr * 1e6 + 10000 + DSP_ECG_ANALOG_DELAY_US) / 2000.0);
+            uint32_t frame = (uint32_t)llround(((tr + 0.230) * 1e6 - PPG_T_ON_SAMPLE_US + DSP_PPG_ANALOG_DELAY_US) /
+                                               10000.0);
+            double r_true = idx * 2000.0 - 10000 - DSP_ECG_ANALOG_DELAY_US;
+            double f_true = frame * 10000.0 + PPG_T_ON_SAMPLE_US - DSP_PPG_ANALOG_DELAY_US;
+            want[k] = llround(f_true - r_true);
+            dsp_pat_add_r(&p, idx, 0);
+            dsp_pat_add_foot(&p, frame, 0);
+            uint32_t pat;
+            while (dsp_pat_pop(&p, &pat, NULL)) {
+                CHECK_EQ((int64_t)pat, want[got]);
+                got++;
+            }
+        }
+        CHECK(got >= 18);
+        CHECK_EQ(p.rejected, 0);
+    }
+}
+
 static uint32_t idx_for(double t_s) /* R time -> stream index */
 {
     return (uint32_t)lround((t_s * 1e6 + 10000 + DSP_ECG_ANALOG_DELAY_US) / 2000.0);
@@ -180,6 +233,8 @@ TEST(end_to_end)
 int main(void)
 {
     RUN(timeline);
+    RUN(foot_index_long_sessions);
+    RUN(pairing_long_sessions);
     RUN(pairing_rules);
     RUN(end_to_end);
     return TEST_RESULT();

@@ -6,6 +6,7 @@
 #ifndef TESTSRC_H
 #define TESTSRC_H
 
+#include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
 
@@ -28,6 +29,8 @@ typedef struct {
 testsrc_cfg_t testsrc_defaults(void);
 /* Build the beat schedule and install both sources in the simulator. */
 void testsrc_install(const testsrc_cfg_t *c);
+/* false: the PPG source holds its DC level (finger on, no visible pulse). */
+void testsrc_ppg_pulsatile(bool on);
 const synth_beats_t *testsrc_beats(void);
 const synth_ppg_t *testsrc_ppg(void);
 

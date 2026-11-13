@@ -311,6 +311,92 @@ TEST(disturbed_counts_and_avg)
     CHECK(sizeof(dsp_ppg_t) <= 640);
 }
 
+/* ---- recovery after a gap without pulses ---------------------------------
+ * Plain synthetic pleth (72 bpm, 15 % rise then exponential decay) at a fixed
+ * DAC12 code; amp = pulse amplitude in hi_on codes, noise = uniform +-noise/2
+ * codes on hi_on and tia_on (deterministic LCG). Returns pulses reported and
+ * the time of the first one. */
+typedef struct {
+    dsp_ppg_t p;
+    long k;          /* frames since start (pulse phase reference) */
+    uint32_t rng;
+} gap_t;
+
+static int gap_run(gap_t *g, double secs, int amp, int noise, double *t_first)
+{
+    int pulses = 0;
+    *t_first = -1;
+    for (long i = 0; i < (long)(secs * 100); i++, g->k++) {
+        double ph = fmod((double)g->k / 100.0 * 1.2, 1.0);
+        double pu = ph < 0.15 ? ph / 0.15 : exp(-(ph - 0.15) * 4.0);
+        int n = 0;
+        if (noise) {
+            g->rng = g->rng * 1103515245u + 12345u;
+            n = (int)((g->rng >> 16) % (unsigned)(noise + 1)) - noise / 2;
+        }
+        int a = (int)(amp * pu);
+        dsp_ppg_frame_t f = { 500, 4095, (uint16_t)(2000 + a / 10 + n), (uint16_t)(2048 - a + n) };
+        dsp_ppg_out_t o;
+        dsp_ppg_pulse_t pl;
+        if (dsp_ppg_process(&g->p, &f, 1000, 0, &o, &pl)) {
+            if (pulses == 0)
+                *t_first = (double)i / 100.0;
+            pulses++;
+        }
+    }
+    return pulses;
+}
+
+/* Review finding: after ~10 s without an accepted pulse the threshold
+ * decayed to 0 and "thr > 0" blocked detection forever. 30 s of pulses, a
+ * gap (flat or noisy) of 5..40 s, then 60 s of pulses (also at a quarter of
+ * the amplitude): detection must resume within a few beats every time. */
+TEST(resumes_after_gap)
+{
+    static const double gaps[] = { 5, 10, 20, 40 };
+    for (int noisy = 0; noisy < 2; noisy++) {
+        for (size_t gi = 0; gi < sizeof gaps / sizeof gaps[0]; gi++) {
+            for (int weak = 0; weak < 2; weak++) {
+                gap_t *g = calloc(1, sizeof *g);
+                g->rng = 12345u + (uint32_t)gi;
+                dsp_ppg_init(&g->p);
+                double t0, t1, t2;
+                int noise = noisy ? 6 : 0;
+                int a = gap_run(g, 30, 150, noise, &t0);
+                int b = gap_run(g, gaps[gi], 0, noise, &t1);
+                int c = gap_run(g, 60, weak ? 40 : 150, noise, &t2);
+                printf("  gap %2.0f s %s %s: before %d, in gap %d, after %d (first after %.2f s)\n",
+                       gaps[gi], noisy ? "noisy" : "flat ", weak ? "weak  " : "strong", a, b, c, t2);
+                CHECK(a >= 30);
+                /* 60 s at 72 bpm = 72 beats; allow the re-learning window */
+                CHECK(c >= 66 && c <= 78);
+                CHECK(t2 >= 0 && t2 < 4.0); /* within ~4 beats */
+                free(g);
+            }
+        }
+    }
+}
+
+/* A learning window that only saw a flat signal (no finger yet / no
+ * perfusion) used to leave thr = 0 for good. */
+TEST(flat_then_pulses)
+{
+    for (int noisy = 0; noisy < 2; noisy++) {
+        for (int flat_s = 1; flat_s <= 13; flat_s += 3) {
+            gap_t *g = calloc(1, sizeof *g);
+            g->rng = 777u;
+            dsp_ppg_init(&g->p);
+            double t0, t1;
+            gap_run(g, flat_s, 0, noisy ? 6 : 0, &t0);
+            int c = gap_run(g, 30, 150, noisy ? 6 : 0, &t1);
+            CHECK(c >= 30);
+            CHECK(t1 >= 0 && t1 < 4.5);
+            /* the pulse rate is available again after 6 feet */
+            free(g);
+        }
+    }
+}
+
 int main(void)
 {
     RUN(reconstruction_formula);
@@ -318,5 +404,7 @@ int main(void)
     RUN(foot_timing);
     RUN(led_step_bridged);
     RUN(disturbed_counts_and_avg);
+    RUN(resumes_after_gap);
+    RUN(flat_then_pulses);
     return TEST_RESULT();
 }

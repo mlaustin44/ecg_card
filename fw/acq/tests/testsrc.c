@@ -12,6 +12,7 @@ static struct {
     bool have;
     synth_ecg_t ecg;
     synth_ppg_t ppg;
+    bool ppg_flat;
 } T;
 
 testsrc_cfg_t testsrc_defaults(void)
@@ -44,7 +45,8 @@ static int32_t ecg_fn(uint64_t t_us, void *ctx)
 static uint32_t ppg_fn(uint64_t t_us, void *ctx)
 {
     (void)ctx;
-    double ua = synth_ppg_signal_ua(&T.ppg, (double)t_us * 1e-6, 1.0);
+    double ua = T.ppg_flat ? T.c.refl_ua_per_ma
+                           : synth_ppg_signal_ua(&T.ppg, (double)t_us * 1e-6, 1.0);
     return ua > 0 ? (uint32_t)lrint(ua * 1e6) : 0u;
 }
 
@@ -53,6 +55,7 @@ void testsrc_install(const testsrc_cfg_t *c)
     if (T.have)
         synth_beats_free(&T.beats);
     T.c = *c;
+    T.ppg_flat = false;
     synth_beats_cfg_t bc;
     memset(&bc, 0, sizeof bc);
     bc.hr_bpm = c->hr_bpm;
@@ -84,6 +87,8 @@ void testsrc_install(const testsrc_cfg_t *c)
     sim_set_ecg_source(ecg_fn, NULL);
     sim_set_ppg_source(ppg_fn, NULL);
 }
+
+void testsrc_ppg_pulsatile(bool on) { T.ppg_flat = !on; }
 
 const synth_beats_t *testsrc_beats(void) { return &T.beats; }
 const synth_ppg_t *testsrc_ppg(void) { return &T.ppg; }

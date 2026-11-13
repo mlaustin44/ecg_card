@@ -6,6 +6,16 @@
 #define BSY_TIMEOUT_MS 100u
 #define READ_LEN       24u /* 4 x (3 bytes input register + 3 bytes EEPROM) */
 
+/* Reference selection. DS22187E 4.10 / Register 5-3 note: "the internal
+ * voltage reference circuit stays turned-on if it is selected as reference by
+ * at least one channel", powered down or not (IPD_INT 45 uA typ vs IPD_EXT
+ * 40 nA). The chip is on the always-on +3V3 rail, so every powered-down
+ * channel selects VDD (VREF=0); only the write that turns channel A ON selects
+ * the internal 2.048 V reference. */
+#define VREF_VDD 0u
+#define VREF_INT 1u
+#define PD_1K    1u /* PD1:PD0 = 01: 1 kOhm to ground */
+
 static bool s_led_on;
 static bool s_eeprom_written;
 
@@ -22,7 +32,7 @@ hal_status_t mcp4728_power_down_all(void)
 {
     uint8_t w[12];
     for (unsigned ch = 0; ch < 4; ch++) {
-        put_block(&w[ch * 3], ch, 1, 1, 0);
+        put_block(&w[ch * 3], ch, VREF_VDD, PD_1K, 0);
     }
     hal_status_t st = drv_i2c_xfer(ADDR, w, sizeof w, NULL, 0);
     if (st == HAL_OK) {
@@ -36,6 +46,9 @@ static hal_status_t read_back(uint8_t *rb)
     return drv_i2c_xfer(ADDR, NULL, 0, rb, READ_LEN);
 }
 
+/* Every channel's EEPROM copy must be {VREF=VDD, PD=01, gain x1, code 0}. A
+ * part programmed by an earlier build (channel A with the internal reference)
+ * fails this check and is re-programmed once. */
 static bool eeprom_ok(const uint8_t *rb)
 {
     for (unsigned ch = 0; ch < 4; ch++) {
@@ -44,7 +57,7 @@ static bool eeprom_ok(const uint8_t *rb)
         unsigned pd = (e[1] >> 5) & 3u;
         unsigned gx = (e[1] >> 4) & 1u;
         unsigned code = ((unsigned)(e[1] & 0x0Fu) << 8) | e[2];
-        if (pd != 1u || gx != 0u || code != 0u || (ch == 0 && vref != 1u)) {
+        if (vref != VREF_VDD || pd != PD_1K || gx != 0u || code != 0u) {
             return false;
         }
     }
@@ -55,7 +68,9 @@ hal_status_t mcp4728_init(void)
 {
     uint8_t rb[READ_LEN];
     s_eeprom_written = false;
-    s_led_on = false;
+    /* Pessimistic: a DAC channel may still be active after a warm MCU reset
+     * until the power-down below has been acknowledged. */
+    s_led_on = true;
     hal_status_t st = read_back(rb);
     if (st != HAL_OK) {
         return st;
@@ -66,7 +81,7 @@ hal_status_t mcp4728_init(void)
         uint8_t w[9];
         w[0] = 0x50;
         for (unsigned ch = 0; ch < 4; ch++) {
-            w[1 + ch * 2] = (uint8_t)((1u << 7) | (1u << 5)); /* int ref, PD=01, G=0, D=0 */
+            w[1 + ch * 2] = (uint8_t)((VREF_VDD << 7) | (PD_1K << 5)); /* G=0, D=0 */
             w[2 + ch * 2] = 0;
         }
         st = drv_i2c_xfer(ADDR, w, sizeof w, NULL, 0);
@@ -108,18 +123,18 @@ hal_status_t mcp4728_set_led_code(uint16_t code)
         code = MCP4728_MAX_CODE;
     }
     uint8_t w[3];
-    put_block(w, 0, 1, 0, code);
-    hal_status_t st = drv_i2c_xfer(ADDR, w, sizeof w, NULL, 0);
-    if (st == HAL_OK) {
-        s_led_on = true;
-    }
-    return st;
+    put_block(w, 0, VREF_INT, 0, code);
+    /* Pessimistic: a transfer that reports an error may still have reached
+     * the DAC (e.g. a timeout after the last data byte was acknowledged), so
+     * channel A counts as on until a power-down is acknowledged. */
+    s_led_on = true;
+    return drv_i2c_xfer(ADDR, w, sizeof w, NULL, 0);
 }
 
 hal_status_t mcp4728_led_off(void)
 {
     uint8_t w[3];
-    put_block(w, 0, 1, 1, 0);
+    put_block(w, 0, VREF_VDD, PD_1K, 0);
     hal_status_t st = drv_i2c_xfer(ADDR, w, sizeof w, NULL, 0);
     if (st == HAL_OK) {
         s_led_on = false;

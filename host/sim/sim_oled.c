@@ -232,7 +232,7 @@ static void command_byte(uint8_t b)
 /* One byte clocked in with the pin levels as they are now. */
 static void spi_byte(uint8_t b)
 {
-    sim_facts_t *f = (sim_facts_t *)sim_facts();
+    sim_facts_t *f = sim_facts_raw();
     if (!O.powered || O.in_reset || sim_pin(PIN_OLED_CS) || !sim_oled_bus_attached()) {
         O.info.ignored_bytes++;
         f->oled_ignored_bytes++;
@@ -308,7 +308,7 @@ bool hal_oled_write_async(const uint8_t *buf, size_t n)
     sim_service();
     oled_progress();
     if (O.dma_active) return false;
-    sim_facts_t *f = (sim_facts_t *)sim_facts();
+    sim_facts_t *f = sim_facts_raw();
     f->oled_async_writes++;
     check_spi_write();
     if (n == 0) return true;

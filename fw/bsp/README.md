@@ -7,6 +7,7 @@ script. Builds only when cross-compiling.
 |---|---|
 | `hal_core.c` | init, pins, GPIO ISR (CHG_PG safety path), clocks/SYSPLL, SysTick, RTC, WWDT, SLEEP/STANDBY |
 | `hal_acq.c` | ECG/PPG time base, ADC0+DMA ring, ADC1 frames, PPG analog, one-shot ADC (design notes at the top) |
+| `bsp_ring.h` | ECG ring index arithmetic as pure functions (no TI headers); host-tested by `fw/bsp/tests/test_bsp_ring.c` (`ctest -R bsp_ring`) |
 | `hal_bus.c` | I2C0 (polled, 10 ms timeout, recovery), SPI1 OLED (blocking + DMA) |
 | `hal_nv.c` | settings blob in the last flash sector |
 | `rtt.c` | SEGGER-RTT-compatible control block (own implementation) |
@@ -34,12 +35,12 @@ drops the unused rest.
 | DMA ch3 (BASIC) | buffer → SPI1 TXDATA (OLED frame) |
 | DMA ch1, ch2 (FULL), ch4–6 | free (UART0 RX/TX later) |
 | COMP0 | DAC8 only (VDDA, code 19) → OPA0 + |
-| OPA0 / OPA1 / DAC0 | TIA (IN0− PA27, out PA22, chop, GBW high) / 2nd stage (IN1− PA17, + = DAC12, out PA16, RRI) / offset DAC (VDDA) |
+| OPA0 / OPA1 / DAC0 | TIA (IN0− PA27, out PA22, chop per `BSP_OPA0_CHOP`, GBW high) / 2nd stage (IN1− PA17, + = DAC12, out PA16, RRI) / offset DAC (VDDA) |
 | GPAMP | forced off at init, never enabled |
 | I2C0 | PA0/PA1, 400 kHz from ULPCLK (TPR 7 @ 32 MHz, 9 @ 40 MHz) |
 | SPI1 | PB8 PICO, PB9 SCK, Motorola 3-wire mode 0, 8 MHz (SCR 1 @ 32, 4 @ 80 MHz) |
 | RTC | LFOSC, prescaler-1 periodic 1 Hz interrupt → seconds counter, timed STANDBY wake |
-| WWDT0 | LFCLK/2, 2^15 → 2.0 s, no closed window, runs in sleep, stops on debug halt |
+| WWDT0 | LFCLK/2, 2^15 → 2.0 s, no closed window, runs in sleep, stops on debug halt; started first thing in `hal_init()` |
 | SysTick | 1 ms (reloaded on clock switch) |
 
 Interrupt priorities (0 = highest): GROUP1/GPIO 0 (CHG_PG drives MEASURE_REQ low in the ISR),
@@ -59,12 +60,12 @@ back) and returns only on a real wake source or the timed deadline
 | Buffer | Bytes |
 |---|---|
 | ECG ring (512 × u16, 128 ms; ≥ 124 ms usable) | 1024 |
-| PPG frame ring (32 × 8 B, 320 ms) | 256 |
+| PPG frame ring (32 × 8 B, 320 ms) + frame indices (32 × 4 B) | 384 |
 | RTT up0 1 KB + up1 2 KB + down0 16 B + control block | 3184 |
 | `.ramfunc` (DriverLib flash command loop) | 56 |
-| state variables | ~150 |
+| state variables (incl. `bsp_ring_t`) | ~200 |
 | main stack (top of SRAM, linker `__stack_size`) | 2048 |
-| **total** | **≈ 6.7 KB** of 32 KB |
+| **total** | **≈ 6.9 KB** of 32 KB |
 
 ## Not verifiable without hardware (highest risk first)
 
@@ -78,15 +79,26 @@ back) and returns only on a real wake source or the timed deadline
    trigger per conversion).
 3. **ECG DMA ring**: ADC clears DMAEN at each DMA lap in repeat mode and the
    ISR re-arms it; DMA reads of MEMRES0 clear MEMRESIFG0 (otherwise every lap
-   / every sample counts as "lost" — visible as a steady `hal_ecg_overruns()`);
-   DMADA reads back the live write address.
+   / every sample counts as "lost" — visible as a steady `hal_ecg_overruns()`).
+   The write position is taken from DMASZ (the TRM documents it as
+   decremented per transfer) and cross-checked against DMADA, which the TRM
+   only describes as copied to a temporary register in the repeated modes
+   (if DMASZ turns out stuck while DMADA moves, DMADA is used automatically):
+   the smoke image logs `dma_pos_mismatch` (non-zero = one of them is not live) and
+   `resync` (`hal_acq_resyncs()`, must stay 0). More than two conversions lost
+   at one lap end (ISR > 500 µs late) cannot be counted (MEMRES0 + one OVIFG
+   flag) and would slip the timeline.
 4. **PA22 = ADC1 channel 8** (from the brief; the SDK only confirms PA22 =
    ADC0 ch7, PA16 = ADC1 ch1, PA14 = ADC0 ch12 via the E2E note). Wrong
    channel = garbage TIA readings: change `TIA_ADC_CHAN`.
 5. **ADC1 re-arm** of a non-repeating sequence by toggling ENC in the ISR.
 6. **OPA0 PSEL = DAC8 with NSEL = IN0− (PA27)**: each mux leg appears in a TI
    LP-G3507 example, the combination does not; DAC8 kept alive with all COMP0
-   inputs disconnected; TIA noise with chopping.
+   inputs disconnected; TIA noise with chopping. Chopping is the CMake cache
+   option `BSP_OPA0_CHOP` (1 = standard, the default per the brief; 0 = off):
+   the TRM says standard chopping needs an external RC filter the board does
+   not have, so compare both. ADC-assisted chopping is not offered (the TRM
+   does not tie ADC1 ch8 / PA22 to OPA0's chop control).
 7. **LED_BLANK**: CCPIV = high while TIMA0 is disabled (no low glitch when PA12
    is muxed to TIMA0_CCP3), LACT/CDACT polarity, 200 µs on-window at 9.8 ms.
 8. **80 MHz**: PLL lock + FCC check, ULPCLK/2, I2C TPR 9, SPI SCR 4, flash WS 2.

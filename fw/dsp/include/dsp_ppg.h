@@ -38,9 +38,13 @@
  *   disturbed frame are not reported.
  * Pulse detection: slope of the display-band signal (central difference)
  *   against an adaptive threshold (0.4 x running mean of accepted maximum
- *   slopes, learned over the first 2 s, halved every second after 3 s
- *   without a pulse), 280 ms refractory. A candidate is rejected if its rise
- *   (minimum to tangent point) is < 1/4 of the running mean rise.
+ *   slopes, learned over the first 2 s, halved every second after 3 s without
+ *   a pulse, never below a small floor), 280 ms refractory. A candidate is
+ *   rejected if its rise (minimum to tangent point) is < 1/4 of the running
+ *   mean rise. When the halving would take the threshold below the floor
+ *   (no pulse for ~4-8 s, or a learning window that saw a flat signal) the
+ *   detector re-learns (2 s) and forgets the rise reference and the interval
+ *   history, so it recovers from any gap, at any new amplitude or rate.
  * Foot (intersecting tangents): tangent at the maximum upslope (parabolic
  *   sub-sample location and slope) intersected with the horizontal through
  *   the minimum preceding it (parabolic minimum value, searched back to the

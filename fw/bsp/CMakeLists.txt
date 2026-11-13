@@ -36,6 +36,25 @@ target_link_libraries(ecg_bsp
   PUBLIC ecg_iface
   PRIVATE ecg_mspm0_sdk)
 target_link_libraries(ecg_bsp INTERFACE ${ECG_DRIVERLIB})
+
+# OPA0 (TIA) chopping, a bring-up comparison (see hal_acq.c hal_ppg_analog):
+#   0 = off
+#   1 = standard chopping (CFG.CHOP = 1). The brief asks for "chopping on";
+#       TRM SLAU846 21.2.6 says standard chopping "requires an external
+#       filter" (1 kOhm / 10 nF at gain 1x, 125 kHz), which this board does
+#       not have: measure TIA noise / ripple against 0 at bring-up.
+# ADC-assisted chopping (CFG.CHOP = 2, "chop with post average", output to an
+# ADC in averaging mode) is NOT offered: the TRM only says the ADC sends a chop
+# state signal "to the OPA peripheral" when hardware averaging is on and the
+# average count is even (ours: x4 on ADC1), but not which ADC instance pairs
+# with OPA0 nor whether the external-pin channel ADC1 ch8 (PA22) counts as
+# "the OPA selected as input"; that needs the device data sheet / SysConfig.
+set(BSP_OPA0_CHOP 1 CACHE STRING "OPA0 chopping: 0 off, 1 standard (bring-up comparison)")
+set_property(CACHE BSP_OPA0_CHOP PROPERTY STRINGS 0 1)
+if(NOT BSP_OPA0_CHOP MATCHES "^[01]$")
+  message(FATAL_ERROR "BSP_OPA0_CHOP must be 0 or 1 (got '${BSP_OPA0_CHOP}')")
+endif()
+target_compile_definitions(ecg_bsp PRIVATE BSP_OPA0_CHOP=${BSP_OPA0_CHOP})
 target_link_options(ecg_bsp INTERFACE
   -nostartfiles
   -T${ECG_BSP_LDS}

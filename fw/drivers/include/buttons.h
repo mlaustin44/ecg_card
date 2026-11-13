@@ -20,6 +20,10 @@
  * Stuck check: a button that is already down at buttons_init() is ignored
  * (like a wake press) and, if still held continuously BTN_STUCK_MS (5 s) after
  * init, reported by buttons_fault(). It stays ignored until released.
+ * A button held continuously for BTN_HELD_MAX_MS (10 s) at any time (stuck
+ * after boot, pressed in a pocket) becomes stuck the same way: no hold time,
+ * not "down" for buttons_any_down(), so it cannot keep the inactivity timers
+ * from running. Events it already produced (e.g. its long press) stand.
  */
 #ifndef BUTTONS_H
 #define BUTTONS_H
@@ -39,6 +43,7 @@ typedef enum {
 typedef enum { BTN_1 = 0, BTN_2 = 1 } btn_id_t;
 
 #define BTN_STUCK_MS 5000u
+#define BTN_HELD_MAX_MS 10000u
 
 /* Reads the pins now; buttons already down are ignored until released. */
 void buttons_init(uint32_t now_ms);
@@ -54,7 +59,7 @@ btn_event_t buttons_get_event(void);
 uint32_t buttons_hold_ms(btn_id_t b);
 /* Any debounced button down (ignored buttons count; stuck ones do not). */
 bool buttons_any_down(void);
-/* True while a stuck-from-boot button is held. */
+/* True while a stuck button is held (from boot, or held > BTN_HELD_MAX_MS). */
 bool buttons_fault(void);
 
 /* Call after waking from standby (or any time): every button that is down now

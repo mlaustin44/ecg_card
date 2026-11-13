@@ -16,7 +16,7 @@ static void setup(bool good_eeprom)
 static bool all_in_pd(void)
 {
     for (int i = 0; i < 4; i++) {
-        if (m.in[i].pd != 1 || m.in[i].val != 0) return false;
+        if (m.in[i].pd != 1 || m.in[i].val != 0 || m.in[i].vref != 0) return false;
     }
     return true;
 }
@@ -29,11 +29,12 @@ TEST(init_blank_writes_eeprom_once)
     CHECK(mcp4728_eeprom_was_written());
     CHECK_EQ(m.write_while_busy, 0);
     CHECK_EQ(m.unknown_cmds, 0);
-    CHECK(m.ee[0].vref == 1);
     for (int i = 0; i < 4; i++) {
-        CHECK(m.ee[i].pd == 1 && m.ee[i].gx == 0 && m.ee[i].val == 0);
+        /* VDD reference on every channel: internal reference off in standby */
+        CHECK(m.ee[i].vref == 0 && m.ee[i].pd == 1 && m.ee[i].gx == 0 && m.ee[i].val == 0);
     }
     CHECK(all_in_pd());
+    CHECK(!mcp4728_model_int_ref_on(&m));
     /* Second init: EEPROM now good, no new write. */
     CHECK_EQ(mcp4728_init(), HAL_OK);
     CHECK_EQ(m.eeprom_writes, 1);
@@ -44,12 +45,12 @@ TEST(init_sequential_write_bytes)
 {
     setup(false);
     mcp4728_init();
-    static const uint8_t seq[] = {0x50, 0xA0, 0x00, 0xA0, 0x00, 0xA0, 0x00, 0xA0, 0x00};
+    static const uint8_t seq[] = {0x50, 0x20, 0x00, 0x20, 0x00, 0x20, 0x00, 0x20, 0x00};
     CHECK_EQ(m.seq_wn, sizeof seq);
     CHECK(memcmp(m.seq_w, seq, sizeof seq) == 0);
     /* last_w is the final multi-write (12 bytes): all PD=01 blocks, A..D */
-    static const uint8_t pd[] = {0x40, 0xA0, 0x00, 0x42, 0xA0, 0x00,
-                                 0x44, 0xA0, 0x00, 0x46, 0xA0, 0x00};
+    static const uint8_t pd[] = {0x40, 0x20, 0x00, 0x42, 0x20, 0x00,
+                                 0x44, 0x20, 0x00, 0x46, 0x20, 0x00};
     CHECK_EQ(m.last_wn, sizeof pd);
     CHECK(memcmp(m.last_w, pd, sizeof pd) == 0);
 }
@@ -58,23 +59,43 @@ TEST(init_good_eeprom_no_write)
 {
     setup(true);
     m.in[0] = (dac_reg_t){1, 0, 0, 1000}; /* LED still on after a warm reset */
+    CHECK(mcp4728_model_int_ref_on(&m));
     CHECK_EQ(mcp4728_init(), HAL_OK);
     CHECK_EQ(m.eeprom_writes, 0);
     CHECK(all_in_pd()); /* but forced off */
     CHECK(!mcp4728_led_is_on());
+    CHECK(!mcp4728_model_int_ref_on(&m));
+}
+
+/* A part programmed by the earlier build (channel A EEPROM on the internal
+ * reference) keeps the reference running in standby: re-programmed once. */
+TEST(init_old_defaults_reprogrammed_once)
+{
+    setup(true);
+    m.ee[0] = (dac_reg_t){1, 1, 0, 0};
+    for (int i = 0; i < 4; i++) m.in[i] = m.ee[i]; /* as loaded at power-up */
+    CHECK(mcp4728_model_int_ref_on(&m));
+    CHECK_EQ(mcp4728_init(), HAL_OK);
+    CHECK_EQ(m.eeprom_writes, 1);
+    CHECK(mcp4728_eeprom_was_written());
+    for (int i = 0; i < 4; i++) CHECK(m.ee[i].vref == 0 && m.ee[i].pd == 1);
+    CHECK(!mcp4728_model_int_ref_on(&m));
+    CHECK_EQ(mcp4728_init(), HAL_OK);
+    CHECK_EQ(m.eeprom_writes, 1);
 }
 
 TEST(init_each_difference_triggers_write)
 {
-    for (int f = 0; f < 6; f++) {
+    for (int f = 0; f < 7; f++) {
         setup(true);
         switch (f) {
-        case 0: m.ee[0].vref = 0; break;
+        case 0: m.ee[0].vref = 1; break;
         case 1: m.ee[1].pd = 0; break;
         case 2: m.ee[2].gx = 1; break;
         case 3: m.ee[3].val = 5; break;
         case 4: m.ee[0].pd = 3; break;
         case 5: m.ee[3].pd = 2; break;
+        case 6: m.ee[2].vref = 1; break;
         }
         CHECK_EQ(mcp4728_init(), HAL_OK);
         CHECK_EQ(m.eeprom_writes, 1);
@@ -117,16 +138,33 @@ TEST(nack_and_retry)
     CHECK_EQ(mock_i2c_recover_count, 1);
 
     setup(true);
+    CHECK_EQ(mcp4728_init(), HAL_OK);
+    CHECK(!mcp4728_led_is_on());
     mock_i2c_inject(2, HAL_ERR_TIMEOUT); /* both fail */
     CHECK_EQ(mcp4728_set_led_code(10), HAL_ERR_TIMEOUT);
     CHECK_EQ(mock_i2c_recover_count, 1);
+    /* the write may have reached the DAC: pessimistically still on */
+    CHECK(mcp4728_led_is_on());
+    CHECK_EQ(mcp4728_led_off(), HAL_OK);
     CHECK(!mcp4728_led_is_on());
 
     setup(false);
     CHECK_EQ(mcp4728_init(), HAL_OK);
     mock_i2c_inject(1, HAL_ERR_NACK);
     CHECK_EQ(mcp4728_set_led_code(10), HAL_ERR_NACK);
+    CHECK(mcp4728_led_is_on());
+    mock_i2c_inject(1, HAL_ERR_NACK); /* a failed power-down keeps it "on" */
+    CHECK_EQ(mcp4728_led_off(), HAL_ERR_NACK);
+    CHECK(mcp4728_led_is_on());
+    CHECK_EQ(mcp4728_power_down_all(), HAL_OK);
     CHECK(!mcp4728_led_is_on());
+
+    /* a failed init leaves the state pessimistic too (warm reset: channel A
+     * may still be active) */
+    setup(true);
+    mock_i2c_inject(1, HAL_ERR_NACK);
+    CHECK_EQ(mcp4728_init(), HAL_ERR_NACK);
+    CHECK(mcp4728_led_is_on());
 }
 
 TEST(set_led_and_off_bytes)
@@ -140,6 +178,8 @@ TEST(set_led_and_off_bytes)
     CHECK(memcmp(m.last_w, on, 3) == 0);
     CHECK(m.in[0].pd == 0 && m.in[0].vref == 1 && m.in[0].gx == 0 && m.in[0].val == 0x123);
     CHECK(mcp4728_led_is_on());
+    CHECK(mcp4728_model_int_ref_on(&m)); /* only while channel A is on */
+    for (int i = 1; i < 4; i++) CHECK(m.in[i].vref == 0);
 
     CHECK_EQ(mcp4728_set_led_code(0xFFFF), HAL_OK); /* clamp */
     CHECK(m.in[0].val == 4095);
@@ -147,10 +187,11 @@ TEST(set_led_and_off_bytes)
     CHECK(memcmp(m.last_w, full, 3) == 0);
 
     CHECK_EQ(mcp4728_led_off(), HAL_OK);
-    static const uint8_t off[] = {0x40, 0xA0, 0x00};
+    static const uint8_t off[] = {0x40, 0x20, 0x00};
     CHECK(memcmp(m.last_w, off, 3) == 0);
     CHECK(!mcp4728_led_is_on());
     CHECK(m.in[0].pd == 1);
+    CHECK(!mcp4728_model_int_ref_on(&m));
     for (int i = 1; i < 4; i++) CHECK(m.in[i].pd == 1);
     CHECK_EQ(m.eeprom_writes, ee);
     CHECK_EQ(m.unknown_cmds, 0);
@@ -182,6 +223,7 @@ int main(void)
     RUN(init_blank_writes_eeprom_once);
     RUN(init_sequential_write_bytes);
     RUN(init_good_eeprom_no_write);
+    RUN(init_old_defaults_reprogrammed_once);
     RUN(init_each_difference_triggers_write);
     RUN(init_bsy_timeout_and_verify);
     RUN(init_waits_for_bsy);

@@ -69,6 +69,15 @@ TEST(read_conversion)
     CHECK_EQ(mv, 3660);
     cw2015_model_set_vcell(&m, 0x3FFF, 255);
     CHECK_EQ(cw2015_read(&mv, &soc), HAL_ERR_PARAM);
+    /* just woken: VCELL 0 / SOC 0 is not a measurement (it would read as an
+     * empty cell) */
+    cw2015_model_set_vcell(&m, 0, 0);
+    CHECK_EQ(cw2015_read(&mv, &soc), HAL_ERR_PARAM);
+    CHECK_EQ(mv, 0);
+    cw2015_model_set_vcell(&m, 0xC000, 0); /* only the ignored bits set */
+    CHECK_EQ(cw2015_read(&mv, &soc), HAL_ERR_PARAM);
+    cw2015_model_set_vcell(&m, 1, 0); /* any VCELL with SOC 0..100 is valid */
+    CHECK_EQ(cw2015_read(&mv, &soc), HAL_OK);
 }
 
 TEST(alert_and_sleep)

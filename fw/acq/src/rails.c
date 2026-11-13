@@ -19,16 +19,19 @@ static struct {
 } R;
 
 static void pin(board_pin_t p, bool high) { hal_pin_write(p, high); }
+static void stop_sequence(bool dac);
 
 void rails_init(void)
 {
-    R.analog = true; /* force every step of rails_off() to run */
+    R.analog = true; /* force every pin step of the stop sequence to run */
     R.ppg_analog = true;
     R.vled = true;
     R.led_code = 0;
     R.i2c_errors = 0;
     R.dac_stuck = false;
-    rails_off();
+    /* The DAC is left to mcp4728_init(), which the caller runs next (it
+     * powers every channel down anyway). */
+    stop_sequence(false);
 }
 
 void rails_analog_on(void)
@@ -135,6 +138,8 @@ bool rails_led_set(uint16_t code)
     if (code > cap)
         code = cap;
     if (mcp4728_set_led_code(code) != HAL_OK) {
+        /* the code may still have reached the DAC: rails_off() powers it
+         * down regardless (led_dac_off) */
         R.i2c_errors++;
         return false;
     }
@@ -155,9 +160,14 @@ bool rails_acq_start(unsigned streams)
     return true;
 }
 
-static void led_dac_off(void)
+/* Sent whenever the analog rail was on, whatever the bookkeeping says: a
+ * channel-A write that reported an error may still have reached the DAC
+ * (mcp4728_led_is_on() is pessimistic for that reason too), and powering
+ * down also returns the MCP4728 to its VDD reference (internal reference
+ * off, ~45 uA saved on the always-on rail). */
+static void led_dac_off(bool rail_was_on)
 {
-    if (!mcp4728_led_is_on() && R.led_code == 0u)
+    if (!rail_was_on && !mcp4728_led_is_on() && R.led_code == 0u)
         return;
     for (unsigned i = 0; i < LED_OFF_TRIES; i++) {
         if (mcp4728_led_off() == HAL_OK) {
@@ -179,7 +189,9 @@ static void led_dac_off(void)
     R.dac_stuck = true;
 }
 
-void rails_off(void)
+void rails_off(void) { stop_sequence(true); }
+
+static void stop_sequence(bool dac)
 {
     /* 1-2: everything that switches the body or the front end */
     pin(PIN_MEASURE_REQ, false);
@@ -191,7 +203,8 @@ void rails_off(void)
     if (hal_acq_running() != 0u)
         hal_acq_stop();
     /* 4: LED DAC channel A powered down */
-    led_dac_off();
+    if (dac)
+        led_dac_off(R.analog);
     /* 5: LED boost (LED_BLANK is high now) */
     if (R.vled) {
         pin(PIN_VLED_EN, false);

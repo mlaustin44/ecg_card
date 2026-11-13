@@ -21,7 +21,7 @@ static void collect(unsigned ms)
     for (unsigned i = 0; i < ms; i++) {
         hal_wdt_kick();
         hal_delay_ms(1);
-        nbuf += hal_ecg_read(buf + nbuf, MAXS - nbuf);
+        nbuf += ecg_read(buf + nbuf, MAXS - nbuf);
     }
 }
 static void run_ms(unsigned ms)
@@ -114,22 +114,22 @@ TEST(sample_timing_exactly_4khz)
     hal_clock_fast(true);
     hal_acq_start(HAL_ACQ_ECG);
     uint16_t tmp[300];
-    size_t n = hal_ecg_read(tmp, 300);
+    size_t n = ecg_read(tmp, 300);
     CHECK_EQ(n, 1); /* sample 0 at t = 0 */
     hal_delay_us(249);
-    CHECK_EQ(hal_ecg_read(tmp, 300), 0);
+    CHECK_EQ(ecg_read(tmp, 300), 0);
     hal_delay_us(1);
-    CHECK_EQ(hal_ecg_read(tmp, 300), 1);
+    CHECK_EQ(ecg_read(tmp, 300), 1);
     hal_delay_ms(10);
-    CHECK_EQ(hal_ecg_read(tmp, 300), 40);
+    CHECK_EQ(ecg_read(tmp, 300), 40);
     CHECK_EQ(sim_facts()->ecg_samples, 42);
     hal_acq_stop();
     hal_delay_ms(10);
-    CHECK_EQ(hal_ecg_read(tmp, 300), 0);
+    CHECK_EQ(ecg_read(tmp, 300), 0);
     CHECK_EQ(hal_acq_running(), 0);
     /* restart: indices restart, sample 0 immediately */
     hal_acq_start(HAL_ACQ_ECG);
-    CHECK_EQ(hal_ecg_read(tmp, 300), 1);
+    CHECK_EQ(ecg_read(tmp, 300), 1);
 }
 
 TEST(overrun_counting)
@@ -140,15 +140,82 @@ TEST(overrun_counting)
     hal_acq_start(HAL_ACQ_ECG);
     hal_delay_ms(100); /* samples 0..400 = 401 */
     CHECK_EQ(sim_facts()->ecg_samples, 401);
-    CHECK_EQ(hal_ecg_overruns(), 401 - SIM_ECG_RING_SAMPLES);
+    CHECK_EQ(hal_ecg_overruns(), 0); /* counted when a read passes the loss */
     uint16_t tmp[512];
-    CHECK_EQ(hal_ecg_read(tmp, 512), SIM_ECG_RING_SAMPLES);
-    CHECK_EQ(hal_ecg_read(tmp, 512), 0);
+    uint32_t first = 12345;
+    CHECK_EQ(hal_ecg_read(tmp, 512, &first), SIM_ECG_RING_SAMPLES);
+    CHECK_EQ(first, 401 - SIM_ECG_RING_SAMPLES); /* the oldest were overwritten */
+    CHECK_EQ(hal_ecg_overruns(), 401 - SIM_ECG_RING_SAMPLES);
+    first = 777;
+    CHECK_EQ(hal_ecg_read(tmp, 512, &first), 0);
+    CHECK_EQ(first, 777); /* untouched when nothing is returned */
     /* partial reads keep order and nothing is lost */
     hal_delay_ms(10);
-    CHECK_EQ(hal_ecg_read(tmp, 10), 10);
-    CHECK_EQ(hal_ecg_read(tmp, 512), 40 - 10);
+    CHECK_EQ(hal_ecg_read(tmp, 10, &first), 10);
+    CHECK_EQ(first, 401);
+    CHECK_EQ(hal_ecg_read(tmp, 512, &first), 40 - 10);
+    CHECK_EQ(first, 411);
     CHECK_EQ(hal_ecg_overruns(), 401 - SIM_ECG_RING_SAMPLES);
+    /* restart: indices and the counter restart */
+    hal_acq_stop();
+    hal_acq_start(HAL_ACQ_ECG);
+    CHECK_EQ(hal_ecg_read(tmp, 512, &first), 1);
+    CHECK_EQ(first, 0);
+    CHECK_EQ(hal_ecg_overruns(), 0);
+}
+
+/* The fw/bsp failure pattern: 512-sample ring, 16 kept from the writer,
+ * reads end at lap boundaries; missed conversions skip an index. Whatever
+ * happens, index + count stays exact: first index of each read = delivered +
+ * overruns, and the sample values (a ramp source) match their index. */
+static int32_t ramp_uv(uint64_t t_us, void *ctx)
+{
+    (void)ctx;
+    /* 1 code per sample at 558x: 805.7/558 uV; period 256 samples */
+    uint64_t n = t_us / 250;
+    return (int32_t)lrint(((double)(n % 256) - 128.0) * 805.7 / 558.0 * 4.0);
+}
+
+TEST(bsp_ring_model_timeline)
+{
+    for (int model = 0; model < 2; model++) {
+        fresh();
+        sim_acq_set_ring_model(model ? SIM_RING_BSP : SIM_RING_DEFAULT);
+        sim_acq_set_missed(1000, 0);
+        sim_ecg_set_contact_offset_uv(0);
+        sim_ecg_set_contact_transient_uv(0);
+        sim_set_ecg_source(ramp_uv, NULL);
+        ecg_rails_up();
+        high(PIN_MEASURE_REQ);
+        sim_set_thumbs(true);
+        hal_clock_fast(true);
+        hal_acq_start(HAL_ACQ_ECG);
+        uint32_t next = 0, delivered = 0, lost = 0, stalls = 0;
+        bool crossed_lap = false;
+        for (int ms = 0; ms < 3000; ms++) {
+            hal_wdt_kick();
+            hal_delay_ms(ms % 700 == 699 ? 150 : 1); /* 150 ms reader stalls */
+            stalls += ms % 700 == 699;
+            uint16_t c[64];
+            uint32_t first;
+            size_t n;
+            while ((n = hal_ecg_read(c, 64, &first)) != 0) {
+                CHECK((int32_t)(first - next) >= 0);
+                lost += first - next;
+                delivered += (uint32_t)n;
+                if (model && first / 512 != (first + (uint32_t)n - 1) / 512) crossed_lap = true;
+                next = first + (uint32_t)n;
+                CHECK_EQ(next, delivered + hal_ecg_overruns());
+            }
+        }
+        CHECK(!crossed_lap);
+        CHECK(stalls >= 4);
+        CHECK_EQ(lost, hal_ecg_overruns());
+        CHECK(lost > stalls * (model ? 600u - 496u : 600u - 256u));
+        CHECK_EQ(hal_acq_resyncs(), 0);
+        CHECK_EQ(sim_violation_count(), 0);
+        sim_acq_set_missed(0, 0);
+    }
 }
 
 TEST(lead_off_railing)
@@ -200,7 +267,7 @@ static int settle_ms(bool pulse_fr, double *first_code)
         if (pulse_fr && ms == 70) low(PIN_FAST_RESTORE);
         hal_delay_ms(1);
         uint16_t c[8];
-        size_t n = hal_ecg_read(c, 8);
+        size_t n = ecg_read(c, 8);
         if (ms == 5) *first_code = c[n - 1];
         if (fabs((double)c[n - 1] - 2048.0) >= 1024.0) last_bad = ms;
     }
@@ -228,7 +295,7 @@ TEST(contact_step_and_fast_restore)
     high(PIN_FAST_RESTORE);
     hal_delay_ms(30);
     uint16_t c[300];
-    size_t n = hal_ecg_read(c, 300);
+    size_t n = ecg_read(c, 300);
     CHECK_NEAR(c[n - 1], 2048, 6);
     CHECK_EQ(sim_violation_count(), 0);
     /* with a small offset (no saturation) the HP node settling is observable at the output:
@@ -243,7 +310,7 @@ TEST(contact_step_and_fast_restore)
     hal_delay_ms(30);
     low(PIN_FAST_RESTORE);
     run_ms(3000);
-    n = hal_ecg_read(c, 300);
+    n = ecg_read(c, 300);
     CHECK(fabs((double)c[n - 1] - 2048.0) < 25);
 }
 
@@ -314,6 +381,7 @@ int main(void)
     RUN(sine_amplitude_both_gains);
     RUN(sample_timing_exactly_4khz);
     RUN(overrun_counting);
+    RUN(bsp_ring_model_timeline);
     RUN(lead_off_railing);
     RUN(contact_step_and_fast_restore);
     RUN(gain_and_rld_changes_inject_steps);

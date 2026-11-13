@@ -172,7 +172,12 @@ bool sim_clock_fast(void) { return S.clock_fast; }
 bool sim_in_standby(void) { return S.in_standby; }
 bool sim_usb_present(void) { return S.usb; }
 bool sim_reset_requested(void) { return S.reset_requested; }
-const sim_facts_t *sim_facts(void) { return &S.facts; }
+sim_facts_t *sim_facts_raw(void) { return &S.facts; }
+const sim_facts_t *sim_facts(void)
+{
+    mcp_vref_track();
+    return &S.facts;
+}
 uint16_t sim_battery_mv_get(void) { return S.battery_mv; }
 int sim_soc_override_get(void) { return S.soc_override; }
 bool sim_thumbs(void) { return S.thumbs; }
@@ -433,6 +438,7 @@ static void pin_set(board_pin_t pin, bool high)
     }
     an_pin_changed(pin, old, high);
     oled_pin_changed(pin, old, high);
+    if (pin == PIN_VLED_EN) mcp_vref_track();
 }
 
 void hal_pin_write(board_pin_t pin, bool high)
@@ -548,6 +554,7 @@ static void mcu_pins_reset(void)
     S.wdt_on = false;
     an_mcu_reset();
     oled_mcu_reset();
+    mcp_vref_track(); /* VLED_EN went low; the MCP4728 keeps its registers */
 }
 
 void sim_reboot(void)
@@ -651,6 +658,9 @@ uint32_t hal_standby(uint32_t wake_after_s)
     if (an_ppg_analog_on()) sim_viol(SIM_V_STANDBY_PRECOND, "standby with PPG analog blocks on");
     if (S.oled_attached) sim_viol(SIM_V_STANDBY_PRECOND, "standby with OLED bus attached");
     if (S.clock_fast) sim_viol(SIM_V_STANDBY_PRECOND, "standby with fast MCLK");
+    /* Not a violation (a dead I2C bus can leave it on), a fact for tests:
+     * ~45 uA on the always-on rail (DS22187E IPD_INT). */
+    if (sim_mcp_int_ref_on()) S.facts.mcp_vref_int_standby++;
 
     S.events &= ~(uint32_t)HAL_EV_RTC; /* periodic awake tick is not a standby wake source */
     /* As in the BSP: CHG_STAT1 is masked in STANDBY (a 2 Hz charger-fault

@@ -299,10 +299,53 @@ bool hal_oled_busy(void)
     return DL_DMA_isChannelEnabled(DMA, BSP_DMA_CH_OLED) || DL_SPI_isBusy(SPI1);
 }
 
+/* Bounded waits on SPI1 (review finding: hal_oled_write spun forever if the
+ * SPI never finished). A full frame takes ~1 ms at 8 MHz; OLED_WAIT_MS is
+ * time-based (SysTick runs in the main loop), OLED_WAIT_SPINS a backstop in
+ * case SysTick is masked (each pass is a few register reads: well over
+ * 10 ms at 80 MHz). */
+#define OLED_WAIT_MS    10u
+#define OLED_WAIT_SPINS 400000u
+
+typedef struct {
+    uint32_t t0, spins;
+} oled_deadline_t;
+
+static oled_deadline_t oled_deadline(void)
+{
+    oled_deadline_t d = {hal_millis(), 0u};
+    return d;
+}
+
+static bool oled_expired(oled_deadline_t *d)
+{
+    return (uint32_t) (hal_millis() - d->t0) > OLED_WAIT_MS || ++d->spins > OLED_WAIT_SPINS;
+}
+
+static bool oled_wait_idle(void)
+{
+    oled_deadline_t d = oled_deadline();
+    while (hal_oled_busy()) {
+        if (oled_expired(&d)) return false;
+    }
+    return true;
+}
+
+/* The SPI did not finish: stop the DMA and reset SPI1 (FIFOs, shifter);
+ * bsp_spi_init() re-applies the attached / detached pin state. */
+static void oled_abort(void)
+{
+    DL_DMA_disableChannel(DMA, BSP_DMA_CH_OLED);
+    DL_SPI_disableDMATransmitEvent(SPI1);
+    bsp_spi_init();
+}
+
 void hal_oled_bus_attach(bool attached)
 {
-    uint32_t t;
-    for (t = 0; t < 2000000u && hal_oled_busy(); t++) {
+    if (!oled_wait_idle()) {
+        DL_DMA_disableChannel(DMA, BSP_DMA_CH_OLED);
+        DL_SPI_disableDMATransmitEvent(SPI1);
+        /* the pin state below takes the bus away from SPI1 either way */
     }
     if (attached) {
         DL_GPIO_initPeripheralOutputFunction(IOMUX_PINCM25, IOMUX_PINCM25_PF_SPI1_PICO);
@@ -320,16 +363,32 @@ void hal_oled_bus_attach(bool attached)
 void hal_oled_write(const uint8_t *buf, size_t n)
 {
     size_t i;
+    oled_deadline_t d;
     if (!s_oled_attached || buf == NULL || n == 0u) return;
-    while (hal_oled_busy()) {
+    if (!oled_wait_idle()) {
+        oled_abort(); /* a DMA transfer that never finished */
+        return;
     }
     spi_drain_rx();
+    d = oled_deadline();
     for (i = 0; i < n; i++) {
-        while (DL_SPI_isTXFIFOFull(SPI1)) spi_drain_rx();
+        while (DL_SPI_isTXFIFOFull(SPI1)) {
+            spi_drain_rx();
+            if (oled_expired(&d)) {
+                oled_abort();
+                return;
+            }
+        }
         DL_SPI_transmitData8(SPI1, buf[i]);
         spi_drain_rx(); /* TX-only: discard what the shifter clocked in */
     }
-    while (DL_SPI_isBusy(SPI1)) spi_drain_rx(); /* last bit out of the shifter */
+    while (DL_SPI_isBusy(SPI1)) { /* last bit out of the shifter */
+        spi_drain_rx();
+        if (oled_expired(&d)) {
+            oled_abort();
+            return;
+        }
+    }
     spi_drain_rx();
 }
 
