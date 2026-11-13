@@ -407,6 +407,10 @@ static void screen_settings(const ui_model_t *m)
     hint_row("Change", "Next", UI_SCREEN_SETTINGS);
 }
 
+/* Hardware designer credit: boot and power-down screens, About page. */
+#define CREDIT_NAME "Matthew Austin"
+#define CREDIT_YEAR "2026"
+
 static void kv_row(int y, const char *k, const char *v)
 {
     gfx_text(0, y, k, TXT_LEFT);
@@ -426,17 +430,23 @@ static void screen_about(const ui_model_t *m)
     kv_row(11, "Device", b);
     kv_row(20, "Firmware", m->fw_version ? m->fw_version : "?");
     kv_row(29, "Radio firmware", m->radio_fw ? m->radio_fw : "n/a");
-    p = str_u(b, m->batt_mv);
-    str_cpy(p, " mV");
-    kv_row(38, "Battery", m->batt_mv ? b : "--");
-    p = b;
-    if (m->batt_valid) {
-        p = str_u(p, clamp_u(m->batt_pct, 100));
+    /* voltage and charge share a row to leave one for the designer */
+    if (m->batt_mv) {
+        p = str_u(b, m->batt_mv);
+        p = str_cpy(p, " mV");
+        if (m->batt_valid) {
+            p = str_cpy(p, " ");
+            p = str_u(p, clamp_u(m->batt_pct, 100));
+            str_cpy(p, "%");
+        }
+    } else if (m->batt_valid) {
+        p = str_u(b, clamp_u(m->batt_pct, 100));
         str_cpy(p, "%");
     } else {
-        str_cpy(p, "--");
+        str_cpy(b, "--");
     }
-    kv_row(47, "Charge", b);
+    kv_row(38, "Battery", b);
+    kv_row(47, "Design", CREDIT_NAME);
     hint_row(NULL, NULL, UI_SCREEN_ABOUT);
 }
 
@@ -700,7 +710,7 @@ static void screen_summary(const ui_model_t *m)
 
 /* ---- boot / power-down: who designed and built the card ------------------- */
 
-#define SPLASH_NAME     "Matthew Austin"
+#define SPLASH_NAME CREDIT_NAME
 #define SPLASH_BY       "Designed & built by"
 #define SPLASH_TITLE_Y  1
 #define SPLASH_TRACE_Y  24 /* baseline; the R wave peaks 10 rows higher */
@@ -737,11 +747,15 @@ static void screen_boot(const ui_model_t *m)
     unsigned t = m->screen_ms < BOOT_DRAW_MS ? m->screen_ms : BOOT_DRAW_MS;
     splash_trace(SPLASH_X0 + (int)(t * (unsigned)(SPLASH_X1 + 2 - SPLASH_X0) / BOOT_DRAW_MS));
     if (m->fw_version) {
-        /* "v0.1.0" without copying a string of unknown length */
+        /* "2026  v0.1.0" without copying a string of unknown length */
+        int wy = gfx_text_width(CREDIT_YEAR, 0) + 9;
         int wv = gfx_text_width("v", 0) + 1;
-        int x = OLED_W / 2 - (wv + gfx_text_width(m->fw_version, 0)) / 2;
-        gfx_text(x, SPLASH_FOOT_Y, "v", TXT_LEFT);
-        gfx_text(x + wv, SPLASH_FOOT_Y, m->fw_version, TXT_LEFT);
+        int x = OLED_W / 2 - (wy + wv + gfx_text_width(m->fw_version, 0)) / 2;
+        gfx_text(x, SPLASH_FOOT_Y, CREDIT_YEAR, TXT_LEFT);
+        gfx_text(x + wy, SPLASH_FOOT_Y, "v", TXT_LEFT);
+        gfx_text(x + wy + wv, SPLASH_FOOT_Y, m->fw_version, TXT_LEFT);
+    } else {
+        gfx_text(OLED_W / 2, SPLASH_FOOT_Y, CREDIT_YEAR, TXT_CENTER);
     }
 }
 

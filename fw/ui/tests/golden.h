@@ -4,8 +4,8 @@ static const golden_t golden[] = {
     {"card_ecg", 0xA97519D0u},
     {"card_both", 0xA81F321Eu},
     {"settings_2", 0xD60729B9u}, /* scroll arrow: Settings has 6 rows */
-    {"about", 0x9B54076Cu},
-    {"about_radio", 0xF8641D41u},
+    {"about", 0x0D028659u},
+    {"about_radio", 0x54E6FE38u},
     {"settings_5", 0x07FF11B1u},
     {"home_ble_adv", 0xD5BF89BAu},
     {"home_ble_conn", 0x025A0DD4u},
@@ -21,7 +21,7 @@ static const golden_t golden[] = {
     {"sum_both", 0x83AC6C04u},
     {"ov_power_50", 0x34AF89F1u},
     {"ov_fault", 0xAEC639F2u},
-    {"boot", 0xDBEC4A39u},       /* designer credit after reset / button wake */
-    {"boot_t500", 0x76F7F6CAu},  /* trace half drawn */
+    {"boot", 0xDD0E9E3Cu},       /* designer credit after reset / button wake */
+    {"boot_t500", 0x311E815Bu},  /* trace half drawn */
     {"power_down", 0x82B88BCBu}, /* designer credit before STANDBY */
 };
