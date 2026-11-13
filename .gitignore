@@ -1,0 +1,5 @@
+mspm0_sdk_*.run
+build*/
+__pycache__/
+*.pyc
+.venv/

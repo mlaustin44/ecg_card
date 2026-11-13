@@ -1,0 +1,10 @@
+add_library(ecg_testlib INTERFACE)
+target_include_directories(ecg_testlib INTERFACE ${CMAKE_CURRENT_SOURCE_DIR})
+
+# ecg_add_test(<name> SOURCES a.c ... LIBS ecg_dsp ...)
+function(ecg_add_test name)
+  cmake_parse_arguments(T "" "" "SOURCES;LIBS" ${ARGN})
+  add_executable(${name} ${T_SOURCES})
+  target_link_libraries(${name} PRIVATE ecg_testlib ecg_iface ${T_LIBS} m)
+  add_test(NAME ${name} COMMAND ${name} WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
+endfunction()

@@ -1,0 +1,30 @@
+# Toolchain file for the MSPM0G3507 (Cortex-M0+).
+set(CMAKE_SYSTEM_NAME Generic)
+set(CMAKE_SYSTEM_PROCESSOR cortex-m0plus)
+set(CMAKE_TRY_COMPILE_TARGET_TYPE STATIC_LIBRARY)
+
+if(DEFINED ENV{ARM_GCC_ROOT})
+  set(ARM_GCC_ROOT $ENV{ARM_GCC_ROOT})
+else()
+  set(ARM_GCC_ROOT $ENV{HOME}/ti/arm-gnu-toolchain-14.2.rel1-x86_64-arm-none-eabi)
+endif()
+if(DEFINED ENV{MSPM0_SDK_ROOT})
+  set(MSPM0_SDK_ROOT $ENV{MSPM0_SDK_ROOT} CACHE PATH "TI MSPM0 SDK")
+else()
+  set(MSPM0_SDK_ROOT $ENV{HOME}/ti/mspm0_sdk_2_11_00_07 CACHE PATH "TI MSPM0 SDK")
+endif()
+list(APPEND CMAKE_TRY_COMPILE_PLATFORM_VARIABLES MSPM0_SDK_ROOT)
+
+set(CMAKE_C_COMPILER   ${ARM_GCC_ROOT}/bin/arm-none-eabi-gcc)
+set(CMAKE_ASM_COMPILER ${ARM_GCC_ROOT}/bin/arm-none-eabi-gcc)
+set(CMAKE_OBJCOPY      ${ARM_GCC_ROOT}/bin/arm-none-eabi-objcopy)
+set(CMAKE_SIZE         ${ARM_GCC_ROOT}/bin/arm-none-eabi-size)
+
+set(CMAKE_C_FLAGS_INIT "-mcpu=cortex-m0plus -mthumb -mfloat-abi=soft -ffunction-sections -fdata-sections -fno-common")
+set(CMAKE_C_FLAGS_RELEASE "-Os -g" CACHE STRING "")
+set(CMAKE_C_FLAGS_DEBUG "-Og -g3" CACHE STRING "")
+set(CMAKE_EXE_LINKER_FLAGS_INIT "-Wl,--gc-sections --specs=nano.specs --specs=nosys.specs")
+
+set(CMAKE_FIND_ROOT_PATH_MODE_PROGRAM NEVER)
+set(CMAKE_FIND_ROOT_PATH_MODE_LIBRARY ONLY)
+set(CMAKE_FIND_ROOT_PATH_MODE_INCLUDE ONLY)
