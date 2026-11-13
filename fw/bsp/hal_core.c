@@ -640,10 +640,21 @@ void bsp_safe_state(void)
     bsp_led_blank_gpio_high();
 }
 
+static void crumb(const char *s)
+{
+    (void) hal_log_write(s, strlen(s));
+}
+
 void hal_init(void)
 {
     if (s_inited) return; /* idempotent: main() and app_main() may both call */
     __disable_irq();
+
+    /* RTT first (RAM only, needs no clock or peripheral), then a breadcrumb
+     * before each step: if init hangs or resets, the last line on RTT
+     * channel 0 names the step that did it. */
+    bsp_rtt_init();
+    crumb("\nhal_init: wdt\n");
 
     s_reset_cause = map_reset_cause(DL_SYSCTL_getResetCause());
 
@@ -673,14 +684,20 @@ void hal_init(void)
     DL_RTC_enablePower(RTC);
     bsp_delay_cycles(32u); /* POWER_STARTUP_DELAY (SysConfig uses 16) */
 
+    crumb("hal_init: gpio\n");
     gpio_init();
+    crumb("hal_init: clocks\n");
     sysctl_init();
     bsp_systick_config();
+    crumb("hal_init: rtc\n");
     rtc_init();
+    crumb("hal_init: i2c\n");
     bsp_i2c_init();
+    crumb("hal_init: spi\n");
     bsp_spi_init();
+    crumb("hal_init: acq\n");
     bsp_acq_init();
-    bsp_rtt_init();
+    crumb("hal_init: done\n");
     hal_wdt_kick(); /* the period starts over for app_init() */
 
     g_events = 0u;

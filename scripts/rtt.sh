@@ -52,7 +52,15 @@ text_log() {
     local log="$root/build/rtt-log.txt"
     mkdir -p "$root/build"
     : >"$log"
-    run_logger 0 "$log" >/dev/null
+    # Keep the logger's own messages: they say whether the probe connected
+    # and whether the RTT control block was found.
+    run_logger 0 "$log" >"$root/build/rtt-logger.txt" 2>&1
+    sleep 3
+    if [ ! -s "$log" ]; then
+        echo "No RTT data after 3 s. JLinkRTTLogger says:" >&2
+        tail -n 15 "$root/build/rtt-logger.txt" >&2
+        echo "(still waiting; run scripts/where.sh to see where the CPU is)" >&2
+    fi
     tail -n +1 -f "$log"
 }
 
@@ -66,7 +74,8 @@ capture)
     ;;
 both)
     [ -n "$out" ] || usage
-    run_logger 1 "$out" >/dev/null
+    mkdir -p "$root/build"
+    run_logger 1 "$out" >"$root/build/rtt-logger-ch1.txt" 2>&1
     text_log
     ;;
 *)
