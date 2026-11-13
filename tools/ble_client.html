@@ -1,0 +1,2346 @@
+<!doctype html>
+<!--
+  ECG Card BLE client (single file, no dependencies, works offline).
+
+  Open in Chrome/Chromium/Edge on desktop or Android. Implements the contract in
+  fw/include/link_fmt.h, fw/include/stream_fmt.h, fw/include/settings.h and
+  fw/include/ui_model.h (protocol version 1). Timing follows tools/ecgcard/record.py:
+    ECG stream sample m (block start + i, EV_R_PEAK index, EV_PULSE foot index) is at
+        t = m / 500 + ECG_T0_S,  ECG_T0_S = -0.010 s
+    PPG frame k (LED-on sample) is at
+        t = k / 100 + 0.00995 s
+  in seconds from the acquisition start. Plots, CSV time_s columns and markers use it.
+
+  Browser requirements (checked with Chrome for Testing 153 on Linux):
+    * Chromium-based browser (Chrome, Edge, Chromium). Firefox and Safari have no Web Bluetooth.
+    * Linux: navigator.bluetooth does not exist until
+      chrome://flags/#enable-experimental-web-platform-features is enabled (then restart);
+      BlueZ (bluetoothd) must be running and the adapter powered.
+    * Secure context: https://, http://localhost or http://127.0.0.1, or file://. Chrome treats
+      file:// pages as secure contexts (origin serialises as "null") and exposes
+      navigator.bluetooth there with the flag above. Plain http:// on another host does not work.
+    * Android: Chrome 56+ on Android 6+, no flag. Chrome needs the Nearby devices permission
+      (Android 12+) or Location permission with Location on (Android 6-11). file:// is
+      awkward on Android; serve the page from a laptop and use `adb reverse tcp:8000 tcp:8000`
+      so the phone opens http://localhost:8000/ble_client.html, or host it on https.
+    * requestDevice() needs a user gesture (the Connect button). The page cannot choose the
+      connection interval, PHY or MTU (the device requests them) and cannot read
+      LINK_CONN_STATE (it exists only on the UART link).
+
+  Client-visible rules (link_fmt.h "Clarifications", fw/app/src/app.c):
+    * A session is running while LINK_STATUS.mode != 0. During a session START and SET of
+      gain / notch / RLD / LED limit are answered LINK_RES_BUSY (sweep and Bluetooth are
+      allowed); the page disables those controls and says why.
+    * SET item 5 is Bluetooth on/off. Off disconnects this page; only the card's own Settings
+      screen can turn it back on. LINK_STATUS has no Bluetooth field.
+    * SET_TIME is refused (BAD_ARG) before 2024-01-01 or with an offset outside -720..+840 min;
+      the page checks this before sending.
+    * A command that arrives as a session starts or stops can be lost on the UART (no
+      CMD_RESULT): the page times out after 2 s, says so, and offers Retry.
+    * Notifications are at most 32 bytes. Heart Rate 0x2A37 is derived by the radio from the
+      R-peak / pulse events, so "HR events" vs "HR 0x2A37" checks the radio path.
+    * Device name "ECG Card XXXX" = BLE address bytes [1],[0] (last 4 hex digits of
+      A1:B2:C3:D4:E5:F6 is E5F6); the Device panel compares it with the DIS serial.
+
+  Code layout (one <script>, sections in this order):
+    CODEC      pure functions, no DOM: UUIDs, payload parsers/encoders, continuity, unwrap,
+               display filters, capture file format. Between the BEGIN/END CODEC markers so
+               tools/tests/test_ble_client.mjs can evaluate it in Node.
+    DEMOSIG    pure synthetic ECG/PPG/event generator that emits wire-format payloads.
+    STATE      ring buffers (typed arrays), integrity counters, event log, recorder.
+    TRANSPORT  BleTransport (Web Bluetooth) and DemoTransport; both call the same onNotify().
+    RENDER     canvas strips (requestAnimationFrame, min/max decimation per pixel column).
+    UI         DOM wiring.
+  URL parameters: ?demo=1 starts the simulator, ?theme=light|dark forces a theme.
+
+  ---- Capture file (.ecgcap), written by "Save capture" ----------------------------------
+  All little-endian.
+    offset 0   8 bytes  ASCII "ECGCAP01"
+    offset 8   u32      H = length of the header JSON in bytes
+    offset 12  H bytes  UTF-8 JSON header:
+                 { "format": "ecgcard-ble-capture", "version": 1,
+                   "t0_unix_ms": <Date.now() at record start>,
+                   "created_utc": "...", "device": {"name","id","demo"},
+                   "device_info": {manufacturer, model, firmware, software, serial},
+                   "status_hex": "<last LINK_STATUS payload before the start>",
+                   "channels": {"2":"ecg", ...}, "user_agent": "..." }
+    then records until the end of the file, each:
+               u16 ch     channel id (below)
+               u16 len    payload length
+               f64 t_ms   receive time, ms since t0_unix_ms (browser monotonic clock)
+               u8  payload[len]   exactly the bytes of the notification / write / read
+  Channel ids: 0x0002 ECG stream, 0x0003 PPG stream, 0x0004 Events, 0x0005 Status (notify
+  or read), 0x0006 Control (bytes this page wrote), 0x2A37 Heart Rate Measurement,
+  0x2A19 Battery Level, 0xFFFF client note (UTF-8 text, e.g. "connected", "disconnected").
+  Python: hdr = json.loads(b[12:12+H]); then struct.unpack_from("<HHd", b, off), off += 12+len.
+
+  ---- CSV export --------------------------------------------------------------------------
+    <base>.ecg.csv     index,time_s,uv,flags,gain_hi,settling,lead_off,run
+    <base>.ppg.csv     frame,time_s,coarse,fine,fine_raw,led_code,flags,disturbed,no_finger,run
+    <base>.events.csv  rx_s,time_s,kind,fields          (fields is JSON)
+  Rows are in arrival order. index/frame are the stream indices (unwrapped across u32 wrap);
+  "run" increments when a stream restarts at index 0. fine is unwrapped modulo 2^16 per run.
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light dark">
+<link rel="icon" href="data:,">
+<title>ECG Card Client</title>
+<style>
+:root {
+  --bg: #f4f5f7; --panel: #ffffff; --panel-2: #f0f2f5; --border: #d7dbe1; --border-strong: #b9c0ca;
+  --text: #1a1e24; --muted: #5a636f; --faint: #8a929d;
+  --accent: #0a5fc2; --accent-text: #ffffff; --focus: #0a5fc2;
+  --ok: #18794e; --warn: #9a5b00; --err: #c22b2b;
+  --ok-bg: #e3f4ea; --warn-bg: #fdf1dc; --err-bg: #fbe6e6;
+  --plot-bg: #ffffff; --grid-major: #e3b9b9; --grid-minor: #f5e4e4; --grid-plain: #e4e7eb;
+  --axis-text: #5a636f; --gap: rgba(120, 128, 140, 0.16);
+  --ecg: #0068a8; --ppg: #c85000; --coarse: #8a4a9e; --marker: #1a1e24;
+  --mono: ui-monospace, "SF Mono", "Cascadia Mono", "DejaVu Sans Mono", Menlo, Consolas, monospace;
+  --sans: system-ui, -apple-system, "Segoe UI", Roboto, "Noto Sans", "DejaVu Sans", sans-serif;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #0e1115; --panel: #161a20; --panel-2: #1d222a; --border: #2a3039; --border-strong: #3a424e;
+    --text: #e4e8ee; --muted: #9ba5b2; --faint: #6c7682;
+    --accent: #4c9aff; --accent-text: #08111f; --focus: #7cb6ff;
+    --ok: #4cc38a; --warn: #e2a33a; --err: #ff6b6b;
+    --ok-bg: #12301f; --warn-bg: #33260e; --err-bg: #3a1616;
+    --plot-bg: #0b0d11; --grid-major: #4a2a2e; --grid-minor: #24181b; --grid-plain: #252b33;
+    --axis-text: #9ba5b2; --gap: rgba(150, 160, 175, 0.14);
+    --ecg: #56b4e9; --ppg: #e69f00; --coarse: #cc79a7; --marker: #e4e8ee;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #0e1115; --panel: #161a20; --panel-2: #1d222a; --border: #2a3039; --border-strong: #3a424e;
+  --text: #e4e8ee; --muted: #9ba5b2; --faint: #6c7682;
+  --accent: #4c9aff; --accent-text: #08111f; --focus: #7cb6ff;
+  --ok: #4cc38a; --warn: #e2a33a; --err: #ff6b6b;
+  --ok-bg: #12301f; --warn-bg: #33260e; --err-bg: #3a1616;
+  --plot-bg: #0b0d11; --grid-major: #4a2a2e; --grid-minor: #24181b; --grid-plain: #252b33;
+  --axis-text: #9ba5b2; --gap: rgba(150, 160, 175, 0.14);
+  --ecg: #56b4e9; --ppg: #e69f00; --coarse: #cc79a7; --marker: #e4e8ee;
+}
+* { box-sizing: border-box; }
+html, body { margin: 0; height: 100%; }
+body { background: var(--bg); color: var(--text); font: 13px/1.35 var(--sans); }
+button, select, input { font: inherit; color: inherit; }
+button {
+  background: var(--panel-2); border: 1px solid var(--border-strong); border-radius: 5px;
+  padding: 4px 10px; min-height: 28px; cursor: pointer; white-space: nowrap;
+}
+button:hover:not(:disabled) { border-color: var(--accent); }
+button.primary { background: var(--accent); border-color: var(--accent); color: var(--accent-text); font-weight: 600; }
+button.on { background: var(--accent); border-color: var(--accent); color: var(--accent-text); }
+button:disabled, select:disabled { opacity: 0.45; cursor: not-allowed; }
+select { background: var(--panel-2); border: 1px solid var(--border-strong); border-radius: 5px; padding: 3px 6px; min-height: 28px; }
+input[type="text"], input[type="search"] { background: var(--panel); border: 1px solid var(--border-strong); border-radius: 5px; padding: 3px 7px; min-height: 26px; }
+:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
+.mono { font-family: var(--mono); font-variant-numeric: tabular-nums; }
+.muted { color: var(--muted); }
+.ok { color: var(--ok); } .warn { color: var(--warn); } .err { color: var(--err); }
+
+/* layout */
+.app { display: grid; grid-template-rows: auto auto 1fr auto; height: 100vh; }
+header.top {
+  display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+  padding: 7px 12px; background: var(--panel); border-bottom: 1px solid var(--border);
+}
+header.top h1 { font-size: 14px; margin: 0 6px 0 0; font-weight: 650; letter-spacing: 0.01em; }
+.pill { display: inline-flex; align-items: center; gap: 6px; padding: 2px 9px; border-radius: 999px; border: 1px solid var(--border-strong); font-weight: 600; font-size: 12px; }
+.pill::before { content: ""; width: 8px; height: 8px; border-radius: 50%; background: var(--faint); }
+.pill.connected { border-color: var(--ok); color: var(--ok); } .pill.connected::before { background: var(--ok); }
+.pill.busy { border-color: var(--warn); color: var(--warn); } .pill.busy::before { background: var(--warn); }
+.pill.lost { border-color: var(--err); color: var(--err); } .pill.lost::before { background: var(--err); }
+.devname { font-weight: 600; }
+.spacer { flex: 1; }
+.banner { padding: 8px 12px; background: var(--warn-bg); color: var(--text); border-bottom: 1px solid var(--border); }
+.banner b { color: var(--warn); }
+.banner details { display: inline; }
+.banner summary { display: inline; cursor: pointer; color: var(--accent); text-decoration: underline; margin-left: 4px; }
+.banner details[open] summary { margin-right: 6px; }
+.banner[hidden] { display: none; }
+main.body { display: grid; grid-template-columns: minmax(0, 1fr) 340px; min-height: 0; }
+.plots { display: flex; flex-direction: column; min-width: 0; min-height: 0; border-right: 1px solid var(--border); }
+.toolbar { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; padding: 6px 10px; background: var(--panel); border-bottom: 1px solid var(--border); }
+.toolbar label { display: inline-flex; align-items: center; gap: 5px; color: var(--muted); }
+.toolbar .seg { display: inline-flex; }
+.toolbar .seg button { border-radius: 0; margin-left: -1px; min-width: 38px; }
+.toolbar .seg button:first-child { border-radius: 5px 0 0 5px; margin-left: 0; }
+.toolbar .seg button:last-child { border-radius: 0 5px 5px 0; }
+#history { width: 160px; }
+.strips { flex: 1; display: flex; flex-direction: column; min-height: 0; background: var(--plot-bg); outline: none; }
+.strip { position: relative; flex: 1 1 0; min-height: 90px; border-bottom: 1px solid var(--border); }
+.strip.coarse { flex: 0.6 1 0; }
+.strip[hidden] { display: none; }
+.strip canvas { position: absolute; inset: 0; width: 100%; height: 100%; display: block; touch-action: pan-y; cursor: grab; }
+.strip .shead { position: absolute; top: 4px; left: 8px; right: 8px; display: flex; gap: 8px; align-items: center; pointer-events: none; }
+.strip .shead .name { white-space: nowrap; font-weight: 650; font-size: 12px; padding: 1px 6px; border-radius: 4px; background: color-mix(in srgb, var(--plot-bg) 85%, transparent); }
+.strip .shead .val { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: var(--mono); font-size: 12px; color: var(--muted); background: color-mix(in srgb, var(--plot-bg) 85%, transparent); padding: 1px 4px; border-radius: 4px; }
+.strip .shead .ctl { margin-left: auto; display: flex; gap: 4px; pointer-events: auto; }
+.strip .shead .ctl button { min-height: 22px; padding: 0 7px; font-size: 12px; background: color-mix(in srgb, var(--panel-2) 90%, transparent); }
+.swatch { display: inline-block; width: 14px; height: 3px; border-radius: 2px; vertical-align: middle; margin-right: 5px; }
+
+.side { overflow-y: auto; min-height: 0; padding: 8px; display: flex; flex-direction: column; gap: 8px; }
+.card { background: var(--panel); border: 1px solid var(--border); border-radius: 8px; padding: 9px 10px; }
+.card h2 { font-size: 11px; margin: 0 0 7px; text-transform: uppercase; letter-spacing: 0.07em; color: var(--muted); font-weight: 650; display: flex; align-items: center; gap: 6px; }
+.card h2 .right { margin-left: auto; text-transform: none; letter-spacing: 0; font-weight: 500; }
+.bignums { display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px; }
+.bn { background: var(--panel-2); border-radius: 6px; padding: 5px 7px; min-width: 0; }
+.bn .k { font-size: 11px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.bn .v { font: 600 21px/1.15 var(--mono); font-variant-numeric: tabular-nums; }
+.bn .v small { font-size: 11px; font-weight: 500; color: var(--muted); margin-left: 2px; }
+.bn.stale .v { color: var(--faint); }
+dl.kv { display: grid; grid-template-columns: auto 1fr; gap: 2px 10px; margin: 8px 0 0; }
+dl.kv dt { color: var(--muted); white-space: nowrap; }
+dl.kv dd { margin: 0; font-family: var(--mono); font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
+.chips { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 8px; }
+.chip { font-size: 11px; padding: 1px 7px; border-radius: 999px; border: 1px solid var(--border); color: var(--faint); }
+.chip.on { color: var(--text); border-color: var(--border-strong); background: var(--panel-2); font-weight: 600; }
+.chip.on.bad { color: var(--err); border-color: var(--err); background: var(--err-bg); }
+.chip.on.good { color: var(--ok); border-color: var(--ok); background: var(--ok-bg); }
+.btnrow { display: flex; flex-wrap: wrap; gap: 5px; }
+.btnrow button { flex: 1 1 auto; }
+.res { font-family: var(--mono); font-size: 11.5px; color: var(--muted); min-height: 16px; margin-top: 4px; overflow-wrap: anywhere; }
+.res.ok { color: var(--ok); } .res.err { color: var(--err); } .res.warn { color: var(--warn); }
+.setgrid { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; gap: 5px 8px; align-items: center; margin-top: 8px; }
+.setgrid label { color: var(--muted); }
+.setgrid select { width: 100%; }
+.setgrid .res { margin: 0; min-width: 62px; text-align: right; }
+.note { font-size: 11.5px; color: var(--warn); margin-top: 5px; }
+#btnRetry { min-height: 20px; padding: 0 8px; font-size: 11px; margin-left: 6px; }
+.sub { margin-top: 9px; padding-top: 8px; border-top: 1px solid var(--border); }
+
+/* integrity + log */
+details.bottom { background: var(--panel); border-top: 1px solid var(--border); }
+details.bottom > summary { padding: 6px 12px; cursor: pointer; font-weight: 650; display: flex; gap: 14px; align-items: center; list-style: none; }
+details.bottom > summary::-webkit-details-marker { display: none; }
+details.bottom > summary::before { content: "\25B8"; color: var(--muted); }
+details.bottom[open] > summary::before { content: "\25BE"; }
+details.bottom > summary .sumline { font-weight: 500; font-family: var(--mono); font-size: 12px; color: var(--muted); }
+.ipanel { display: grid; grid-template-columns: minmax(0, 1.35fr) minmax(0, 0.8fr) minmax(0, 1.25fr); gap: 10px; padding: 0 12px 10px; height: 34vh; min-height: 230px; }
+.ipanel > section { min-height: 0; display: flex; flex-direction: column; border: 1px solid var(--border); border-radius: 8px; overflow: hidden; }
+.ipanel h3 { margin: 0; padding: 5px 8px; font-size: 11px; text-transform: uppercase; letter-spacing: 0.07em; color: var(--muted); background: var(--panel-2); border-bottom: 1px solid var(--border); display: flex; align-items: center; gap: 6px; }
+.ipanel h3 .right { margin-left: auto; text-transform: none; letter-spacing: 0; }
+.ipanel h3 button { min-height: 20px; padding: 0 7px; font-size: 11px; }
+.scroll { overflow: auto; min-height: 0; flex: 1; }
+table.it { border-collapse: collapse; width: 100%; font-size: 12px; }
+table.it th, table.it td { padding: 2px 7px; text-align: right; white-space: nowrap; border-bottom: 1px solid var(--border); }
+table.it th:first-child, table.it td:first-child { text-align: left; }
+table.it th { color: var(--muted); font-weight: 600; position: sticky; top: 0; background: var(--panel); }
+table.it td { font-family: var(--mono); font-variant-numeric: tabular-nums; }
+table.it td.bad { color: var(--err); font-weight: 600; }
+.streamstats { display: grid; grid-template-columns: auto 1fr 1fr; gap: 1px 10px; padding: 6px 8px; font-size: 12px; border-top: 1px solid var(--border); }
+.streamstats div { font-family: var(--mono); font-variant-numeric: tabular-nums; text-align: right; white-space: nowrap; }
+.streamstats .h { color: var(--muted); font-family: var(--sans); font-weight: 600; text-align: right; }
+.streamstats .l { color: var(--muted); font-family: var(--sans); text-align: left; }
+.streamstats .bad { color: var(--err); font-weight: 600; }
+ol.list { list-style: none; margin: 0; padding: 0; font: 11.5px/1.45 var(--mono); }
+ol.list li { padding: 1px 8px; border-bottom: 1px solid var(--border); white-space: pre-wrap; overflow-wrap: anywhere; }
+ol.list li .t { color: var(--faint); }
+ol.list li .c { display: inline-block; min-width: 54px; color: var(--muted); }
+ol.list li.error .c, ol.list li.error .m { color: var(--err); }
+ol.list li.integrity .c { color: var(--warn); }
+ol.list li.cmd .c { color: var(--accent); }
+.logfilters { display: flex; flex-wrap: wrap; gap: 3px 9px; padding: 4px 8px; border-bottom: 1px solid var(--border); font-size: 11.5px; align-items: center; }
+.logfilters label { display: inline-flex; gap: 3px; align-items: center; color: var(--muted); }
+.logfilters input[type="search"] { flex: 1; min-width: 90px; min-height: 22px; font-size: 12px; }
+.empty { color: var(--faint); padding: 6px 8px; font-size: 12px; }
+
+@media (max-width: 900px) {
+  .app { height: auto; min-height: 100vh; grid-template-rows: auto auto auto auto; }
+  main.body { grid-template-columns: 1fr; }
+  .plots { border-right: 0; height: 64vh; min-height: 340px; }
+  .side { overflow: visible; }
+  .ipanel { grid-template-columns: 1fr; height: auto; }
+  .ipanel > section { max-height: 46vh; }
+  #history { width: 110px; }
+  details.bottom > summary { flex-wrap: wrap; gap: 2px 10px; }
+  details.bottom > summary .sumline { flex-basis: 100%; padding-left: 16px; }
+}
+@media (max-width: 480px) {
+  header.top { padding: 6px 10px; gap: 6px; }
+  header.top h1 { font-size: 13px; }
+  header.top .spacer { flex-basis: 100%; height: 0; }
+  header.top button, header.top select { min-height: 30px; padding: 3px 9px; }
+  #devName { font-size: 12px; }
+  .toolbar { gap: 6px; padding: 5px 8px; }
+  .toolbar .seg button { min-width: 32px; padding: 4px 6px; }
+  .side { padding: 8px 6px; }
+  .bn .v { font-size: 19px; }
+}
+</style>
+</head>
+<body>
+<div class="app">
+  <header class="top">
+    <h1>ECG Card client</h1>
+    <span id="connPill" class="pill">Disconnected</span>
+    <span id="devName" class="devname"></span>
+    <span class="spacer"></span>
+    <button id="btnConnect" class="primary" title="Scan for an ECG Card (needs Web Bluetooth)">Connect</button>
+    <button id="btnReconnect" disabled title="Reconnect to the same device without a new scan">Reconnect</button>
+    <button id="btnDisconnect" disabled>Disconnect</button>
+    <button id="btnDemo" title="Simulated device in the exact wire format (also ?demo=1)">Demo</button>
+    <select id="selTheme" aria-label="Theme" title="Colour theme">
+      <option value="auto">Theme: system</option><option value="light">Light</option><option value="dark">Dark</option>
+    </select>
+  </header>
+  <div id="banner" class="banner" hidden></div>
+  <main class="body">
+    <section class="plots" aria-label="Live traces">
+      <div class="toolbar">
+        <div class="seg" role="group" aria-label="Time window" id="segWindow">
+          <button data-w="2">2 s</button><button data-w="5">5 s</button><button data-w="10" class="on">10 s</button><button data-w="30">30 s</button>
+        </div>
+        <button id="btnPause" title="Freeze the display (Space). Drag or wheel on the plot to scroll back.">Pause</button>
+        <label title="Scroll back over buffered history (paused)">History <input id="history" type="range" min="0" max="1000" value="1000" step="1" disabled></label>
+        <span id="histInfo" class="muted mono"></span>
+        <span class="spacer"></span>
+        <label>ECG <select id="selEcgFilt" title="Display filter for the ECG trace (not applied to recordings)">
+          <option value="raw">raw</option><option value="hp" selected>HP 0.5 Hz</option><option value="bp">0.5-40 Hz</option><option value="bpn">0.5-40 Hz + notch</option>
+        </select></label>
+        <label>PPG <select id="selPpgFilt" title="Display detrend for the PPG fine trace">
+          <option value="raw">raw fine</option><option value="hp" selected>HP 0.3 Hz</option>
+        </select></label>
+        <label><input id="chkCoarse" type="checkbox"> coarse</label>
+      </div>
+      <div class="strips" id="strips" tabindex="0" aria-label="Plot area. Space pauses; arrow keys scroll when paused.">
+        <div class="strip" id="stripEcg"><canvas></canvas>
+          <div class="shead"><span class="name"><span class="swatch" style="background:var(--ecg)"></span>ECG &micro;V</span><span class="val" data-val></span>
+            <span class="ctl"><button data-act="lock" title="Lock the vertical scale">Auto</button><button data-act="zin" title="Zoom in (locked)">+</button><button data-act="zout" title="Zoom out (locked)">&minus;</button></span></div></div>
+        <div class="strip" id="stripPpg"><canvas></canvas>
+          <div class="shead"><span class="name"><span class="swatch" style="background:var(--ppg)"></span>PPG fine nA</span><span class="val" data-val></span>
+            <span class="ctl"><button data-act="lock">Auto</button><button data-act="zin">+</button><button data-act="zout">&minus;</button></span></div></div>
+        <div class="strip coarse" id="stripCoarse" hidden><canvas></canvas>
+          <div class="shead"><span class="name"><span class="swatch" style="background:var(--coarse)"></span>PPG coarse nA</span><span class="val" data-val></span>
+            <span class="ctl"><button data-act="lock">Auto</button><button data-act="zin">+</button><button data-act="zout">&minus;</button></span></div></div>
+      </div>
+    </section>
+
+    <aside class="side">
+      <div class="card" id="cardNums">
+        <h2>Measurement <span class="right mono" id="numAge"></span></h2>
+        <div class="bignums">
+          <div class="bn" id="bnHrEv" title="hr_bpm of the last EV_R_PEAK event"><div class="k">HR events</div><div class="v">--</div></div>
+          <div class="bn" id="bnHrSvc" title="Heart Rate Measurement 0x2A37 (the radio derives it from the R-peak / pulse events, so this checks the radio path, not an independent detector)"><div class="k">HR 0x2A37</div><div class="v">--</div></div>
+          <div class="bn" id="bnHrSt" title="LINK_STATUS.hr_bpm"><div class="k">HR status</div><div class="v">--</div></div>
+          <div class="bn" id="bnPulse" title="pulse_bpm of the last EV_PULSE"><div class="k">Pulse</div><div class="v">--</div></div>
+          <div class="bn" id="bnPat" title="pat_ms of the last EV_PULSE (foot minus true R time)"><div class="k">PAT ms</div><div class="v">--</div></div>
+          <div class="bn" id="bnPi" title="Perfusion index (pi_permille / 10)"><div class="k">PI %</div><div class="v">--</div></div>
+        </div>
+        <dl class="kv">
+          <dt>Mode / state</dt><dd id="kvMode">--</dd>
+          <dt>Battery</dt><dd id="kvBatt">--</dd>
+          <dt>ECG gain</dt><dd id="kvGain">--</dd>
+          <dt>Notch</dt><dd id="kvNotch">--</dd>
+          <dt>RLD / LED / sweep</dt><dd id="kvMisc">--</dd>
+          <dt>PPG LED</dt><dd id="kvLed">--</dd>
+        </dl>
+        <div class="chips" id="chips"></div>
+      </div>
+
+      <div class="card" id="cardCtl">
+        <h2>Control <span class="right"><span class="mono muted" id="queueInfo"></span> <button id="btnRetry" disabled title="Send the last command that got no result again">Retry</button></span></h2>
+        <div class="btnrow">
+          <button data-cmd="start1">Start ECG</button><button data-cmd="start2">Start PPG</button><button data-cmd="start3">Start both</button><button data-cmd="stop">Stop</button>
+        </div>
+        <div class="res" id="resRun"></div>
+        <div class="res warn" id="sesHint"></div>
+        <div class="setgrid" id="setGrid"></div>
+        <div class="note" id="bleNote">Bluetooth Off disconnects this page, and the card must then be switched back on from its own Settings screen.</div>
+        <div class="sub btnrow">
+          <button data-cmd="time" title="LINK_CMD_SET_TIME: UTC seconds and the local UTC offset">Set time</button>
+          <button data-cmd="getstatus" title="LINK_CMD_GET_STATUS (answer arrives as a Status notification)">Get status</button>
+          <button data-cmd="readstatus" title="GATT read of the Status characteristic">Read status</button>
+        </div>
+        <div class="res" id="resMisc"></div>
+      </div>
+
+      <div class="card" id="cardRec">
+        <h2>Recording <span class="right mono" id="recInfo">idle</span></h2>
+        <div class="btnrow">
+          <button id="btnRec">Record</button>
+          <button id="btnCsv" disabled title="Download ECG, PPG and event CSV files">Export CSV</button>
+          <button id="btnCap" disabled title="Download the raw capture (.ecgcap, original payloads)">Save capture</button>
+          <button id="btnRecClear" disabled>Discard</button>
+        </div>
+        <div class="res" id="resRec"></div>
+      </div>
+
+      <div class="card" id="cardDev">
+        <h2>Device</h2>
+        <dl class="kv" id="kvDev"></dl>
+      </div>
+    </aside>
+  </main>
+
+  <details class="bottom" id="bottom" open>
+    <summary>Stream integrity and log <span class="sumline" id="sumLine"></span></summary>
+    <div class="ipanel">
+      <section aria-label="Per characteristic statistics">
+        <h3>Characteristics <span class="right"><button id="btnResetStats" title="Reset counters">Reset</button></span></h3>
+        <div class="scroll">
+          <table class="it" id="tblChars">
+            <thead><tr><th>Char</th><th>Notif</th><th>/s</th><th>B/s</th><th>Last</th><th>Bad</th></tr></thead>
+            <tbody></tbody>
+          </table>
+          <div class="streamstats" id="streamStats"></div>
+        </div>
+      </section>
+      <section aria-label="Recent gaps">
+        <h3>Gaps / duplicates <span class="right mono" id="gapCount"></span></h3>
+        <div class="scroll"><ol class="list" id="gapList"></ol></div>
+      </section>
+      <section aria-label="Event log">
+        <h3>Event log <span class="right"><span class="mono" id="logCount"></span> <button id="btnLogClear">Clear</button></span></h3>
+        <div class="logfilters" id="logFilters"></div>
+        <div class="scroll" id="logScroll"><ol class="list" id="logList"></ol></div>
+      </section>
+    </div>
+  </details>
+</div>
+<script>
+"use strict";
+
+// ==== BEGIN CODEC ====
+// Pure protocol code: no DOM, no globals except what it defines. tools/tests/test_ble_client.mjs
+// evaluates the text between the BEGIN/END CODEC markers and uses the returned object.
+const Codec = (() => {
+  "use strict";
+
+  // ---- UUIDs (link_fmt.h: base d578xxxx-8a28-493a-ad8d-6b741ba09ea7) ----
+  const uuid = (shortId) => "d578" + shortId.toString(16).padStart(4, "0") + "-8a28-493a-ad8d-6b741ba09ea7";
+  const SERVICE_UUID = uuid(0x0001);
+  const CHAR = Object.freeze({ ECG: 0x0002, PPG: 0x0003, EVENTS: 0x0004, STATUS: 0x0005, CONTROL: 0x0006,
+    HRM: 0x2a37, BATTERY: 0x2a19, NOTE: 0xffff });
+  const CHAR_UUID = Object.freeze({ ECG: uuid(CHAR.ECG), PPG: uuid(CHAR.PPG), EVENTS: uuid(CHAR.EVENTS),
+    STATUS: uuid(CHAR.STATUS), CONTROL: uuid(CHAR.CONTROL) });
+  const CHAR_NAME = { [CHAR.ECG]: "ECG", [CHAR.PPG]: "PPG", [CHAR.EVENTS]: "Events", [CHAR.STATUS]: "Status",
+    [CHAR.CONTROL]: "Control", [CHAR.HRM]: "HR 2A37", [CHAR.BATTERY]: "Batt 2A19", [CHAR.NOTE]: "note" };
+  const DEVICE_NAME_PREFIX = "ECG Card";
+
+  // ---- timing (tools/ecgcard/record.py) ----
+  const ECG_HZ = 500, PPG_HZ = 100;
+  const ECG_T0_S = -0.010;              // ECG stream sample m is the signal at m/500 + ECG_T0_S
+  const ECG_ANALOG_DELAY_S = 0.000974;  // true R = stream R time - this
+  const PPG_ON_SAMPLE_S = 0.00995;      // PPG frame k LED-on sample at k/100 + this
+  const ecgTime = (m) => m / ECG_HZ + ECG_T0_S;
+  const ecgIndexAt = (t) => (t - ECG_T0_S) * ECG_HZ;
+  const ppgTime = (k) => k / PPG_HZ + PPG_ON_SAMPLE_S;
+  const ppgIndexAt = (t) => (t - PPG_ON_SAMPLE_S) * PPG_HZ;
+
+  // ---- stream_fmt.h ----
+  const ECG_SAMPLES = 10, PPG_FRAMES = 2;
+  const ECG_LEN = 25, PPG_LEN = 15, STATUS_LEN = 20, CMD_MAX_LEN = 16;
+  const ECG_F = { GAIN_HI: 0x01, SETTLING: 0x02, LEAD_OFF: 0x04 };
+  const PPG_F = { DIST0: 0x01, DIST1: 0x02, NO_FINGER: 0x04 };
+  const UV_PER_CODE = 805.7, GAIN_LO = 558, GAIN_HI = 1098, ECG_SCALE = 8;
+  const NA_PER_COARSE = 0.8057, NA_PER_FINE = 0.08057, LED_UA_PER_CODE = 3.718;
+  const ecgGain = (flags) => (flags & ECG_F.GAIN_HI ? GAIN_HI : GAIN_LO);
+  /** microvolts per stream unit for a block's flags: 805.7 / (8 * gain) */
+  const ecgUvPerUnit = (flags) => UV_PER_CODE / (ECG_SCALE * ecgGain(flags));
+
+  const EV = { R_PEAK: 1, PULSE: 2, LEAD: 3, STATE: 4, BUTTON: 5, CMD_RESULT: 6 };
+  const EV_LEN = { 1: 7, 2: 11, 3: 2, 4: 7, 5: 3, 6: 3 };
+  const EV_NAME = { 1: "r_peak", 2: "pulse", 3: "lead", 4: "state", 5: "button", 6: "cmd_result" };
+
+  // ---- link_fmt.h ----
+  const PROTO_VERSION = 1;
+  const ST = { USB: 0x01, CHARGING: 0x02, CHARGE_FAULT: 0x04, NO_CONTACT: 0x08, BATT_LOW: 0x10,
+    GAIN_HI: 0x20, TIME_VALID: 0x40 };
+  const ST_NAMES = [[ST.USB, "USB"], [ST.CHARGING, "charging"], [ST.CHARGE_FAULT, "charge fault"],
+    [ST.NO_CONTACT, "no contact"], [ST.BATT_LOW, "batt low"], [ST.GAIN_HI, "gain hi"], [ST.TIME_VALID, "time valid"]];
+  const CMD = { START: 1, STOP: 2, SET: 3, SET_TIME: 4, GET_STATUS: 5 };
+  const CMD_NAME = { 1: "START", 2: "STOP", 3: "SET", 4: "SET_TIME", 5: "GET_STATUS" };
+  const RES_NAME = { 0: "OK", 1: "UNKNOWN", 2: "BAD_ARG", 3: "REFUSED_USB", 4: "REFUSED_BATT", 5: "BUSY", 6: "FAULT" };
+  const RES_TEXT = { 0: "OK", 1: "unknown command", 2: "bad argument", 3: "refused: USB power present",
+    4: "refused: battery low", 5: "busy (stop the measurement first)", 6: "fault" };
+  const MODE_NAME = { 0: "idle", 1: "ECG", 2: "PPG", 3: "ECG + PPG" };
+  const MEAS_NAME = { 0: "wait contact", 1: "settling", 2: "running", 3: "USB blocked", 4: "fault", 255: "n/a" }; // ui_meas_state_t
+
+  // settings.h: settings_item_t order and enum values. lockedInSession: the MCU answers
+  // LINK_RES_BUSY while a measurement session runs (link_fmt.h clarifications).
+  const SETTINGS = [
+    { item: 0, key: "gain", label: "Gain", options: ["auto", "558x (lo)", "1098x (hi)"], lockedInSession: true },
+    { item: 1, key: "notch", label: "Mains notch", options: ["auto", "50 Hz", "60 Hz"], lockedInSession: true },
+    { item: 2, key: "rld", label: "RLD", options: ["both", "left", "right", "off"], lockedInSession: true },
+    { item: 3, key: "led_limit", label: "LED limit", options: ["5 mA", "10 mA", "15 mA"], lockedInSession: true },
+    { item: 4, key: "sweep", label: "Sweep", options: ["1.5 s", "3 s", "6 s"], lockedInSession: false },
+    { item: 5, key: "ble", label: "Bluetooth", options: ["off", "on"], lockedInSession: false },
+  ];
+  const SET_ITEM_BLE = 5, BLE_OFF = 0;
+  // SET_TIME limits (link_fmt.h clarifications): refused with BAD_ARG outside these
+  const TIME_MIN_UNIX = 1704067200;                  // 2024-01-01T00:00:00Z
+  const UTC_OFF_MIN = -720, UTC_OFF_MAX = 840;
+  const NOTIFY_MAX_LEN = 32;                         // notification payloads are at most 32 bytes
+  /** null if the device would accept SET_TIME with these arguments, else the reason. */
+  function setTimeProblem(unixSeconds, offMin) {
+    if (!(unixSeconds >= TIME_MIN_UNIX)) return "clock is before 2024-01-01 (device would answer BAD_ARG)";
+    if (unixSeconds > 0xffffffff) return "time does not fit u32";
+    if (!(offMin >= UTC_OFF_MIN && offMin <= UTC_OFF_MAX)) return `UTC offset ${offMin} min outside -720..+840 (device would answer BAD_ARG)`;
+    return null;
+  }
+  /** "ECG Card XXXX" suffix for a BLE address "A1:B2:C3:D4:E5:F6" (ble_addr[1], ble_addr[0] = E5, F6). */
+  function nameSuffixOfAddress(addr) {
+    const h = String(addr || "").replace(/[^0-9a-fA-F]/g, "");
+    return h.length === 12 ? h.slice(8).toUpperCase() : null;
+  }
+  const settingText = (item, v) => (SETTINGS[item] && SETTINGS[item].options[v] !== undefined ? SETTINGS[item].options[v] : `?${v}`);
+
+  // ---- parsers. Each validates the length first and returns null on success or an error string.
+  // They write into caller-owned objects so the hot path does not allocate.
+  function newEcgBlock() { return { start: 0, flags: 0, s: new Int16Array(ECG_SAMPLES) }; }
+  function parseEcg(dv, out) {
+    if (dv.byteLength !== ECG_LEN) return `ECG payload ${dv.byteLength} B, expected ${ECG_LEN}`;
+    out.start = dv.getUint32(0, true);
+    out.flags = dv.getUint8(4);
+    for (let i = 0; i < ECG_SAMPLES; i++) out.s[i] = dv.getInt16(5 + 2 * i, true);
+    return null;
+  }
+  function newPpgBlock() { return { start: 0, led: 0, flags: 0, coarse: new Int16Array(PPG_FRAMES), fine: new Int16Array(PPG_FRAMES) }; }
+  function parsePpg(dv, out) {
+    if (dv.byteLength !== PPG_LEN) return `PPG payload ${dv.byteLength} B, expected ${PPG_LEN}`;
+    out.start = dv.getUint32(0, true);
+    out.led = dv.getUint16(4, true);
+    out.flags = dv.getUint8(6);
+    for (let j = 0; j < PPG_FRAMES; j++) {
+      out.coarse[j] = dv.getInt16(7 + 4 * j, true);
+      out.fine[j] = dv.getInt16(9 + 4 * j, true);
+    }
+    return null;
+  }
+  /** Event: out gets kind plus the kind's fields. Unknown kinds set out.known = false and are not an error. */
+  function newEvent() {
+    return { kind: 0, known: false, index: 0, hr: 0, pulse: 0, pat: 0, pi: 0, contact: 0, mode: 0, notchHz: 0,
+      midCode: 0, batt: 0, flags: 0, button: 0, press: 0, cmd: 0, result: 0 };
+  }
+  function parseEvent(dv, out) {
+    const n = dv.byteLength;
+    if (n < 1) return "empty event";
+    const kind = dv.getUint8(0);
+    out.kind = kind;
+    const want = EV_LEN[kind];
+    if (want === undefined) { out.known = false; return null; }
+    if (n !== want) return `event kind ${kind} (${EV_NAME[kind]}) is ${n} B, expected ${want}`;
+    out.known = true;
+    switch (kind) {
+      case EV.R_PEAK: out.index = dv.getUint32(1, true); out.hr = dv.getUint16(5, true); break;
+      case EV.PULSE: out.index = dv.getUint32(1, true); out.pulse = dv.getUint16(5, true);
+        out.pat = dv.getUint16(7, true); out.pi = dv.getUint16(9, true); break;
+      case EV.LEAD: out.contact = dv.getUint8(1); break;
+      case EV.STATE: out.mode = dv.getUint8(1); out.notchHz = dv.getUint8(2); out.midCode = dv.getUint16(3, true);
+        out.batt = dv.getUint8(5); out.flags = dv.getUint8(6); break;
+      case EV.BUTTON: out.button = dv.getUint8(1); out.press = dv.getUint8(2); break;
+      case EV.CMD_RESULT: out.cmd = dv.getUint8(1); out.result = dv.getUint8(2); break;
+    }
+    return null;
+  }
+  /** Plain-object copy of a parsed event (for logs and CSV; low rate). */
+  function eventFields(e) {
+    switch (e.kind) {
+      case EV.R_PEAK: return { sample: e.index, hr_bpm: e.hr };
+      case EV.PULSE: return { foot_sample: e.index, pulse_bpm: e.pulse, pat_ms: e.pat, pi_permille: e.pi };
+      case EV.LEAD: return { contact: e.contact };
+      case EV.STATE: return { mode: e.mode, notch_hz: e.notchHz, mid_code: e.midCode, batt_pct: e.batt, flags: e.flags };
+      case EV.BUTTON: return { button: e.button, kind: e.press };
+      case EV.CMD_RESULT: return { cmd: e.cmd, result: e.result };
+      default: return {};
+    }
+  }
+  function describeEvent(e) {
+    switch (e.kind) {
+      case EV.R_PEAK: return `R-peak @${e.index} (t=${ecgTime(e.index).toFixed(3)} s) HR ${e.hr} bpm`;
+      case EV.PULSE: return `pulse foot @${e.index} (t=${ecgTime(e.index).toFixed(3)} s) ${e.pulse} bpm, PAT ${e.pat ? e.pat + " ms" : "n/a"}, PI ${(e.pi / 10).toFixed(1)} %`;
+      case EV.LEAD: return `lead contact ${e.contact === 1 ? "ON" : e.contact === 0 ? "OFF" : "?" + e.contact}`;
+      case EV.STATE: return `state mode=${MODE_NAME[e.mode] ?? "?" + e.mode} notch=${e.notchHz} Hz mid_code=${e.midCode} batt=${e.batt === 255 ? "?" : e.batt + " %"}${e.flags & 1 ? " USB" : ""}${e.flags & 2 ? " charging" : ""}`;
+      case EV.BUTTON: return `button ${e.button} ${e.press === 0 ? "short" : e.press === 1 ? "long" : "?" + e.press}`;
+      case EV.CMD_RESULT: return `result ${CMD_NAME[e.cmd] ?? "cmd " + e.cmd}: ${RES_NAME[e.result] ?? "?" + e.result}${e.result ? " (" + (RES_TEXT[e.result] ?? "unknown result code") + ")" : ""}`;
+      default: return `unknown event kind ${e.kind}`;
+    }
+  }
+
+  /** LINK_STATUS, 20 bytes. Returns {err} or the status object (low rate, allocates). */
+  function parseStatus(dv) {
+    if (dv.byteLength !== STATUS_LEN) return { err: `Status payload ${dv.byteLength} B, expected ${STATUS_LEN}` };
+    const u8 = (o) => dv.getUint8(o);
+    return {
+      err: null, proto: u8(0), mode: u8(1), meas: u8(2), battPct: u8(3), flags: u8(4),
+      gain: u8(5), notch: u8(6), rld: u8(7), ledLimit: u8(8), sweep: u8(9),
+      notchHz: u8(10), hrBpm: u8(11), battMv: dv.getUint16(12, true),
+      fw: `${u8(14)}.${u8(15)}.${u8(16)}`, reserved: u8(17), uptimeMin: dv.getUint16(18, true),
+    };
+  }
+  function statusFlagsText(f) { return ST_NAMES.filter(([b]) => f & b).map(([, n]) => n).join(", ") || "none"; }
+
+  /** Heart Rate Measurement 0x2A37 (Bluetooth HRS): flags, u8 or u16 bpm, optional energy, RR list. */
+  function parseHrm(dv) {
+    const n = dv.byteLength;
+    if (n < 2) return { err: `HRM payload ${n} B` };
+    const flags = dv.getUint8(0);
+    let o = 1, bpm;
+    if (flags & 1) { if (n < 3) return { err: "HRM u16 bpm truncated" }; bpm = dv.getUint16(1, true); o = 3; } else { bpm = dv.getUint8(1); o = 2; }
+    let energy = null; const rr = [];
+    if (flags & 0x08) { if (n < o + 2) return { err: "HRM energy truncated" }; energy = dv.getUint16(o, true); o += 2; }
+    if (flags & 0x10) { while (o + 2 <= n) { rr.push(dv.getUint16(o, true) / 1024); o += 2; } }
+    const contact = (flags & 0x04) ? ((flags & 0x02) ? 1 : 0) : null;
+    return { err: null, flags, bpm, energy, rr, contact };
+  }
+  function parseBattery(dv) {
+    if (dv.byteLength !== 1) return { err: `Battery Level payload ${dv.byteLength} B` };
+    return { err: null, pct: dv.getUint8(0) };
+  }
+
+  // ---- command encoders (LINK_CMD payloads, written to Control) ----
+  const cmdStart = (mode) => Uint8Array.of(CMD.START, mode & 0xff);
+  const cmdStop = () => Uint8Array.of(CMD.STOP);
+  const cmdSet = (item, value) => Uint8Array.of(CMD.SET, item & 0xff, value & 0xff);
+  const cmdGetStatus = () => Uint8Array.of(CMD.GET_STATUS);
+  function cmdSetTime(unixSeconds, utcOffsetMinutes) {
+    const b = new Uint8Array(7), dv = new DataView(b.buffer);
+    b[0] = CMD.SET_TIME;
+    dv.setUint32(1, unixSeconds >>> 0, true);
+    dv.setInt16(5, Math.max(-32768, Math.min(32767, Math.round(utcOffsetMinutes))), true);
+    return b;
+  }
+  /** Current time as SET_TIME arguments: UTC seconds and the local offset (minutes east of UTC). */
+  function nowSetTimeArgs(date) { return [Math.floor(date.getTime() / 1000), -date.getTimezoneOffset()]; }
+  function describeCommand(b) {
+    if (!b.length) return "empty";
+    const dv = new DataView(b.buffer, b.byteOffset, b.byteLength);
+    switch (b[0]) {
+      case CMD.START: return b.length === 2 ? `START ${MODE_NAME[b[1]] ?? "?" + b[1]}` : "START (bad length)";
+      case CMD.STOP: return "STOP";
+      case CMD.SET: return b.length === 3 ? `SET ${SETTINGS[b[1]] ? SETTINGS[b[1]].key : "item " + b[1]} = ${settingText(b[1], b[2])}` : "SET (bad length)";
+      case CMD.SET_TIME: return b.length === 7 ? `SET_TIME ${dv.getUint32(1, true)} UTC, offset ${dv.getInt16(5, true)} min` : "SET_TIME (bad length)";
+      case CMD.GET_STATUS: return "GET_STATUS";
+      default: return `cmd ${b[0]}`;
+    }
+  }
+
+  // ---- encoders for the simulator (and tests): the exact wire layouts ----
+  function encodeEcg(start, flags, samples) {
+    const b = new Uint8Array(ECG_LEN), dv = new DataView(b.buffer);
+    dv.setUint32(0, start >>> 0, true); dv.setUint8(4, flags);
+    for (let i = 0; i < ECG_SAMPLES; i++) dv.setInt16(5 + 2 * i, clampI16(samples[i]), true);
+    return b;
+  }
+  function encodePpg(start, led, flags, coarse, fine) {
+    const b = new Uint8Array(PPG_LEN), dv = new DataView(b.buffer);
+    dv.setUint32(0, start >>> 0, true); dv.setUint16(4, led, true); dv.setUint8(6, flags);
+    for (let j = 0; j < PPG_FRAMES; j++) {
+      dv.setInt16(7 + 4 * j, clampI16(coarse[j]), true);
+      dv.setInt16(9 + 4 * j, wrapI16(fine[j]), true);  // fine wraps modulo 2^16 on the wire
+    }
+    return b;
+  }
+  function encodeEvent(kind, f) {
+    const n = EV_LEN[kind] ?? 1 + (f.extra ? f.extra.length : 0);
+    const b = new Uint8Array(n), dv = new DataView(b.buffer);
+    b[0] = kind;
+    switch (kind) {
+      case EV.R_PEAK: dv.setUint32(1, f.index >>> 0, true); dv.setUint16(5, f.hr, true); break;
+      case EV.PULSE: dv.setUint32(1, f.index >>> 0, true); dv.setUint16(5, f.pulse, true); dv.setUint16(7, f.pat, true); dv.setUint16(9, f.pi, true); break;
+      case EV.LEAD: b[1] = f.contact; break;
+      case EV.STATE: b[1] = f.mode; b[2] = f.notchHz; dv.setUint16(3, f.midCode, true); b[5] = f.batt; b[6] = f.flags; break;
+      case EV.BUTTON: b[1] = f.button; b[2] = f.press; break;
+      case EV.CMD_RESULT: b[1] = f.cmd; b[2] = f.result; break;
+      default: if (f.extra) b.set(f.extra, 1);
+    }
+    return b;
+  }
+  function encodeStatus(s) {
+    const b = new Uint8Array(STATUS_LEN), dv = new DataView(b.buffer);
+    const fw = (s.fw || "0.0.0").split(".").map(Number);
+    b.set([s.proto ?? PROTO_VERSION, s.mode, s.meas, s.battPct, s.flags, s.gain, s.notch, s.rld, s.ledLimit, s.sweep, s.notchHz, Math.min(255, s.hrBpm)], 0);
+    dv.setUint16(12, s.battMv, true);
+    b[14] = fw[0]; b[15] = fw[1]; b[16] = fw[2]; b[17] = 0;
+    dv.setUint16(18, s.uptimeMin, true);
+    return b;
+  }
+  const encodeHrm = (bpm) => Uint8Array.of(0x00, Math.min(255, bpm)); // flags 0x00, u8 bpm (link_fmt.h)
+
+  function clampI16(v) { v = Math.round(v); return v > 32767 ? 32767 : v < -32768 ? -32768 : v; }
+  function wrapI16(v) { return ((Math.round(v) + 32768) & 0xffff) - 32768; }
+  /** Smallest signed difference a - b modulo 2^16. */
+  function diffI16(a, b) { return ((a - b + 32768) & 0xffff) - 32768; }
+  /** Signed difference a - b of two u32 indices modulo 2^32. */
+  function diffU32(a, b) { return (a - b) | 0; }
+
+  /** Unwraps a modulo-2^16 int16 series (smallest step each time, also across gaps; record.unwrap_int16). */
+  class Unwrap16 {
+    constructor() { this.reset(); }
+    reset() { this.has = false; this.last = 0; this.acc = 0; }
+    push(raw) {
+      if (!this.has) { this.has = true; this.last = raw; this.acc = raw; return raw; }
+      this.acc += diffI16(raw, this.last);
+      this.last = raw;
+      return this.acc;
+    }
+  }
+
+  /** Block start-index continuity for one stream.
+   *  push(start, n) classifies the block and gives its unwrapped index uStart (a JS number that
+   *  keeps counting across the u32 wrap). Rules: contiguous -> OK; ahead -> GAP (missing samples
+   *  counted); start 0 or more than backLimit behind -> NEWRUN (acquisition restarted);
+   *  otherwise behind -> BACK (duplicate or late; the caller decides with its buffer). */
+  const CONT = Object.freeze({ FIRST: 0, OK: 1, GAP: 2, BACK: 3, NEWRUN: 4 });
+  class Continuity {
+    constructor(backLimit) { this.backLimit = backLimit; this.reset(); }
+    reset() { this.next = -1; this.uNext = 0; this.uStart = 0; this.missing = 0; this.behind = 0; this.run = 0; this.runStartU = 0; }
+    push(start, n) {
+      start >>>= 0;
+      this.missing = 0; this.behind = 0;
+      if (this.next < 0) {
+        this.next = (start + n) >>> 0; this.uStart = start; this.uNext = start + n; this.runStartU = start;
+        return CONT.FIRST;
+      }
+      const d = diffU32(start, this.next);
+      if (d === 0) {
+        this.uStart = this.uNext; this.uNext += n; this.next = (start + n) >>> 0;
+        return CONT.OK;
+      }
+      if (d < 0 && (start === 0 || -d > this.backLimit)) {
+        this.run++; this.uStart = start; this.uNext = start + n; this.next = (start + n) >>> 0; this.runStartU = start;
+        return CONT.NEWRUN;
+      }
+      if (d > 0) {
+        this.missing = d; this.uStart = this.uNext + d; this.uNext = this.uStart + n; this.next = (start + n) >>> 0;
+        return CONT.GAP;
+      }
+      this.behind = -d; this.uStart = this.uNext + d;   // expectation unchanged
+      return CONT.BACK;
+    }
+  }
+
+  // ---- display filters (causal, per sample, no allocation) ----
+  class HighPass1 {               // first-order high-pass, y = a (y + x - x_prev)
+    constructor(fc, fs) { this.a = 1 / (1 + 2 * Math.PI * fc / fs); this.reset(); }
+    reset() { this.has = false; this.x = 0; this.y = 0; }
+    step(x) {
+      if (!this.has) { this.has = true; this.x = x; this.y = 0; return 0; }
+      this.y = this.a * (this.y + x - this.x); this.x = x; return this.y;
+    }
+  }
+  class Biquad {                  // RBJ cookbook, direct form I
+    constructor(type, f0, fs, q) {
+      const w = 2 * Math.PI * f0 / fs, c = Math.cos(w), al = Math.sin(w) / (2 * q);
+      let b0, b1, b2;
+      if (type === "lowpass") { b0 = (1 - c) / 2; b1 = 1 - c; b2 = (1 - c) / 2; } else { b0 = 1; b1 = -2 * c; b2 = 1; } // notch
+      const a0 = 1 + al;
+      this.b0 = b0 / a0; this.b1 = b1 / a0; this.b2 = b2 / a0; this.a1 = -2 * c / a0; this.a2 = (1 - al) / a0;
+      this.reset();
+    }
+    reset() { this.has = false; this.x1 = this.x2 = this.y1 = this.y2 = 0; }
+    step(x) {
+      if (!this.has) { this.has = true; this.x1 = this.x2 = x; this.y1 = this.y2 = x * (this.b0 + this.b1 + this.b2) / (1 + this.a1 + this.a2); }
+      const y = this.b0 * x + this.b1 * this.x1 + this.b2 * this.x2 - this.a1 * this.y1 - this.a2 * this.y2;
+      this.x2 = this.x1; this.x1 = x; this.y2 = this.y1; this.y1 = y; return y;
+    }
+  }
+  /** ECG display chain: "raw" | "hp" (0.5 Hz) | "bp" (0.5 Hz HP + 40 Hz LP) | "bpn" (+ mains notch). */
+  class EcgDisplayFilter {
+    constructor(mode, notchHz) { this.configure(mode, notchHz); }
+    configure(mode, notchHz) {
+      this.mode = mode; this.notchHz = notchHz === 60 ? 60 : 50;
+      this.hp = new HighPass1(0.5, ECG_HZ); this.lp = new Biquad("lowpass", 40, ECG_HZ, Math.SQRT1_2);
+      this.nt = new Biquad("notch", this.notchHz, ECG_HZ, 30);
+    }
+    reset() { this.hp.reset(); this.lp.reset(); this.nt.reset(); }
+    step(x) {
+      if (this.mode === "raw") return x;
+      let y = this.hp.step(x);
+      if (this.mode === "bpn") y = this.nt.step(y);
+      if (this.mode !== "hp") y = this.lp.step(y);
+      return y;
+    }
+  }
+
+  // ---- capture file (see the comment at the top of the page) ----
+  const CAP_MAGIC = "ECGCAP01";
+  const CAP_REC_HDR = 12;
+  function encodeCaptureHeader(obj) {
+    const json = new TextEncoder().encode(JSON.stringify(obj));
+    const b = new Uint8Array(12 + json.length);
+    for (let i = 0; i < 8; i++) b[i] = CAP_MAGIC.charCodeAt(i);
+    new DataView(b.buffer).setUint32(8, json.length, true);
+    b.set(json, 12);
+    return b;
+  }
+  /** Writes one record into dst (a Uint8Array with room) at off; returns the new offset. */
+  function writeCaptureRecord(dst, off, ch, tMs, payload) {
+    const dv = new DataView(dst.buffer, dst.byteOffset, dst.byteLength);
+    dv.setUint16(off, ch, true); dv.setUint16(off + 2, payload.length, true); dv.setFloat64(off + 4, tMs, true);
+    dst.set(payload, off + CAP_REC_HDR);
+    return off + CAP_REC_HDR + payload.length;
+  }
+  /** Parses a whole capture (Uint8Array). Returns {header, records:[{ch, tMs, payload}], err}. */
+  function parseCapture(b) {
+    const dv = new DataView(b.buffer, b.byteOffset, b.byteLength);
+    if (b.length < 12 || String.fromCharCode(...b.subarray(0, 8)) !== CAP_MAGIC) return { err: "not an ECGCAP01 file" };
+    const h = dv.getUint32(8, true);
+    if (12 + h > b.length) return { err: "header truncated" };
+    const header = JSON.parse(new TextDecoder().decode(b.subarray(12, 12 + h)));
+    const records = [];
+    let o = 12 + h;
+    while (o + CAP_REC_HDR <= b.length) {
+      const ch = dv.getUint16(o, true), len = dv.getUint16(o + 2, true), tMs = dv.getFloat64(o + 4, true);
+      if (o + CAP_REC_HDR + len > b.length) return { header, records, err: "record truncated" };
+      records.push({ ch, tMs, payload: b.subarray(o + CAP_REC_HDR, o + CAP_REC_HDR + len) });
+      o += CAP_REC_HDR + len;
+    }
+    return { header, records, err: o === b.length ? null : "trailing bytes" };
+  }
+
+  function hex(dv) {
+    const u = dv instanceof Uint8Array ? dv : new Uint8Array(dv.buffer, dv.byteOffset, dv.byteLength);
+    let s = "";
+    for (let i = 0; i < u.length; i++) s += (i ? " " : "") + u[i].toString(16).padStart(2, "0");
+    return s;
+  }
+
+  return {
+    uuid, SERVICE_UUID, CHAR, CHAR_UUID, CHAR_NAME, DEVICE_NAME_PREFIX,
+    ECG_HZ, PPG_HZ, ECG_T0_S, ECG_ANALOG_DELAY_S, PPG_ON_SAMPLE_S, ecgTime, ecgIndexAt, ppgTime, ppgIndexAt,
+    ECG_SAMPLES, PPG_FRAMES, ECG_LEN, PPG_LEN, STATUS_LEN, CMD_MAX_LEN, ECG_F, PPG_F,
+    UV_PER_CODE, GAIN_LO, GAIN_HI, NA_PER_COARSE, NA_PER_FINE, LED_UA_PER_CODE, ecgGain, ecgUvPerUnit,
+    EV, EV_LEN, EV_NAME, PROTO_VERSION, ST, CMD, CMD_NAME, RES_NAME, RES_TEXT, MODE_NAME, MEAS_NAME, SETTINGS, settingText,
+    SET_ITEM_BLE, BLE_OFF, TIME_MIN_UNIX, UTC_OFF_MIN, UTC_OFF_MAX, NOTIFY_MAX_LEN, setTimeProblem, nameSuffixOfAddress,
+    newEcgBlock, parseEcg, newPpgBlock, parsePpg, newEvent, parseEvent, eventFields, describeEvent,
+    parseStatus, statusFlagsText, parseHrm, parseBattery,
+    cmdStart, cmdStop, cmdSet, cmdSetTime, cmdGetStatus, nowSetTimeArgs, describeCommand,
+    encodeEcg, encodePpg, encodeEvent, encodeStatus, encodeHrm,
+    clampI16, wrapI16, diffI16, diffU32, Unwrap16, CONT, Continuity,
+    HighPass1, Biquad, EcgDisplayFilter,
+    CAP_MAGIC, CAP_REC_HDR, encodeCaptureHeader, writeCaptureRecord, parseCapture, hex,
+  };
+})();
+// ==== END CODEC ====
+
+// ==== DEMOSIG: simulated card (pure; produces wire-format payloads) ====
+// DemoDevice models the MCU + radio as seen through GATT: it answers Control writes with
+// STREAM_EV_CMD_RESULT, sends Status every 5 s and on change, and streams ECG/PPG blocks with
+// R-peak / pulse events on the stream timeline. Faults are injected on purpose: dropped
+// blocks (gaps), a duplicate block, a truncated payload and an unknown event kind.
+class DemoDevice {
+  constructor(emit, seed = 12345) {
+    this.emit = emit;                 // emit(charId, Uint8Array)
+    this.rng = mulberry32(seed);
+    this.st = { proto: 1, mode: 0, meas: 255, battPct: 82, flags: 0, gain: 0, notch: 0, rld: 0, ledLimit: 2, sweep: 1,
+      notchHz: 50, hrBpm: 0, battMv: 3930, fw: "0.3.1", uptimeMin: 17 };
+    this.t = 0;                       // device clock, s since power-up of the simulation
+    this.runT0 = 0;                   // device time of acquisition start
+    this.ecgNext = 0; this.ppgNext = 0; // next block start index
+    this.lastStatusT = -10;
+    this.lastBattT = 0;
+    this.lead = 1;
+  }
+  /** Measurement time (s since acquisition start). */
+  get mt() { return this.t - this.runT0; }
+  sendStatus() { this.emit(Codec.CHAR.STATUS, Codec.encodeStatus(this.st)); this.lastStatusT = this.t; }
+  start(mode) {
+    this.st.mode = mode; this.st.meas = 1; this.runT0 = this.t; this.sessionChangeT = this.t;
+    this.ecgNext = 0; this.ppgNext = 0;
+    this.beats = []; this.nextBeatT = 0.35; this.pendR = []; this.pendP = [];
+    this.fineStepAcc = 0; this.led = 600; this.lead = 1;
+    this.dropEcgAt = 6 + 10 * this.rng(); this.dropPpgAt = 9 + 12 * this.rng(); this.dupAt = 21; this.badAt = 33;
+    this.emit(Codec.CHAR.EVENTS, Codec.encodeEvent(Codec.EV.STATE, { mode, notchHz: this.st.notchHz, midCode: 2048, batt: this.st.battPct, flags: this.st.flags & 3 }));
+    this.sendStatus();
+  }
+  stop() {
+    this.sessionChangeT = this.t;
+    this.st.mode = 0; this.st.meas = 255; this.st.hrBpm = 0;
+    this.emit(Codec.CHAR.EVENTS, Codec.encodeEvent(Codec.EV.STATE, { mode: 0, notchHz: this.st.notchHz, midCode: 2048, batt: this.st.battPct, flags: this.st.flags & 3 }));
+    this.sendStatus();
+  }
+  /** A Control write (already accepted at ATT level). The result is decided and emitted a
+   *  few tens of ms later by advance(), with the firmware's rules (fw/app/src/app.c, link.c). */
+  command(b) {
+    this.pendingCmd = this.pendingCmd || [];
+    this.pendingCmd.push({ due: this.t + 0.03 + 0.04 * this.rng(), b: b.slice() });
+  }
+  _result(b) {
+    const C_ = Codec.CMD, n = b.length, cmd = b[0], ses = this.st.mode !== 0;
+    if (cmd === C_.START) return n !== 2 || b[1] < 1 || b[1] > 3 ? 2 : ses ? 5 : 0;
+    if (cmd === C_.STOP || cmd === C_.GET_STATUS) return n === 1 ? 0 : 2;
+    if (cmd === C_.SET) {
+      const it = Codec.SETTINGS[b[1]];
+      if (n !== 3 || !it || b[2] >= it.options.length) return 2;
+      return it.lockedInSession && ses ? 5 : 0;
+    }
+    if (cmd === C_.SET_TIME) {
+      if (n !== 7) return 2;
+      const dv = new DataView(b.buffer, b.byteOffset, n);
+      return Codec.setTimeProblem(dv.getUint32(1, true), dv.getInt16(5, true)) ? 2 : 0;
+    }
+    return 1;
+  }
+  _apply(p) {
+    const C_ = Codec.CMD, b = p.b, cmd = b[0];
+    // a command that lands as a session starts or stops can be lost on the UART: no result
+    if (this.t - (this.sessionChangeT ?? -1) < 0.03) return;
+    const res = this._result(b);
+    if (res === 0) {
+      if (cmd === C_.START) this.start(b[1]);
+      else if (cmd === C_.STOP) { if (this.st.mode) this.stop(); }
+      else if (cmd === C_.SET) {
+        const key = Codec.SETTINGS[b[1]].key;
+        if (key === "ble") this.ble = b[2];
+        else this.st[key === "led_limit" ? "ledLimit" : key] = b[2];
+        if (b[1] === 1) this.st.notchHz = b[2] === 2 ? 60 : 50;
+      } else if (cmd === C_.SET_TIME) this.st.flags |= Codec.ST.TIME_VALID;
+    }
+    this.emit(Codec.CHAR.EVENTS, Codec.encodeEvent(Codec.EV.CMD_RESULT, { cmd, result: res }));
+    if (res === 0 && (cmd === C_.SET || cmd === C_.SET_TIME || cmd === C_.GET_STATUS)) this.sendStatus();
+    if (res === 0 && cmd === C_.SET && b[1] === Codec.SET_ITEM_BLE && b[2] === Codec.BLE_OFF && this.onBleOff) setTimeout(this.onBleOff, 120);
+  }
+  gainHi() { return this.st.gain === 2 || this.st.gain === 0; } // auto -> hi for this simulated signal
+
+  /** Advance the device clock to t (s) and emit everything due. */
+  advance(t) {
+    this.t = t;
+    if (this.pendingCmd) {
+      while (this.pendingCmd.length && this.pendingCmd[0].due <= t) this._apply(this.pendingCmd.shift());
+    }
+    if (t - this.lastStatusT >= 5) { this.st.uptimeMin = 17 + Math.floor(t / 60); this.sendStatus(); }
+    if (t - this.lastBattT >= 30) { this.lastBattT = t; this.emit(Codec.CHAR.BATTERY, Uint8Array.of(this.st.battPct)); }
+    if (this.st.mode === 0) return;
+    const ecgOn = (this.st.mode & 1) !== 0, ppgOn = (this.st.mode & 2) !== 0;
+    // beats on the measurement timeline (stream R time)
+    while (this.nextBeatT < this.mt + 1.5) {
+      const tr = this.nextBeatT;
+      const rr = 60 / 66 * (1 + 0.05 * Math.sin(2 * Math.PI * tr / 4.3)) + 0.02 * (this.rng() - 0.5);
+      const pat = 0.205 + 0.012 * Math.sin(2 * Math.PI * tr / 23);
+      this.beats.push({ tr, rr, pat });
+      if (this.beats.length > 6) this.beats.shift();
+      this.pendR.push({ due: tr + 0.22, tr, rr });
+      this.pendP.push({ due: tr + pat + 0.32, tr, rr, pat });
+      this.nextBeatT += rr;
+    }
+    // ECG blocks: block covering samples [s, s+10) is sent once its last sample exists
+    const mt = this.mt;
+    while (ecgOn && Codec.ecgTime(this.ecgNext + 9) <= mt) this._ecgBlock();
+    while (ppgOn && Codec.ppgTime(this.ppgNext + 1) <= mt) this._ppgBlock();
+    while (this.pendR.length && this.pendR[0].due <= mt) {
+      const b = this.pendR.shift();
+      if (!ecgOn || this._leadOffAt(b.tr) || b.tr < 1.2) continue;
+      const hr = Math.round(60 / b.rr);
+      this.st.hrBpm = hr;
+      this.emit(Codec.CHAR.EVENTS, Codec.encodeEvent(Codec.EV.R_PEAK, { index: Math.round(Codec.ecgIndexAt(b.tr)), hr }));
+      this.emit(Codec.CHAR.HRM, Codec.encodeHrm(hr));
+    }
+    while (this.pendP.length && this.pendP[0].due <= mt) {
+      const p = this.pendP.shift();
+      const tf = p.tr + p.pat;
+      if (!ppgOn || this._noFingerAt(tf) || tf < 1.5) continue;
+      const pr = Math.round(60 / p.rr);
+      const patMs = ecgOn && !this._leadOffAt(p.tr) ? Math.round((p.pat + Codec.ECG_ANALOG_DELAY_S) * 1000) : 0;
+      this.emit(Codec.CHAR.EVENTS, Codec.encodeEvent(Codec.EV.PULSE, { index: Math.round(Codec.ecgIndexAt(tf)), pulse: pr, pat: patMs, pi: 11 }));
+      if (!ecgOn) this.emit(Codec.CHAR.HRM, Codec.encodeHrm(pr));
+    }
+    if (this.st.meas === 1 && mt > 2) { this.st.meas = 2; this.sendStatus(); }
+    // lead contact events
+    const lead = ecgOn && this._leadOffAt(mt) ? 0 : 1;
+    if (lead !== this.lead) {
+      this.lead = lead;
+      this.st.flags = lead ? this.st.flags & ~Codec.ST.NO_CONTACT : this.st.flags | Codec.ST.NO_CONTACT;
+      this.emit(Codec.CHAR.EVENTS, Codec.encodeEvent(Codec.EV.LEAD, { contact: lead }));
+      if (!lead) this.emit(Codec.CHAR.EVENTS, Codec.encodeEvent(Codec.EV.BUTTON, { button: 2, press: 0 }));
+      this.sendStatus();
+    }
+  }
+  _leadOffAt(t) { const p = t % 47; return t > 10 && p > 40 && p < 42; }
+  _noFingerAt(t) { const p = t % 61; return t > 10 && p > 52 && p < 55; }
+  /** ECG in microvolts at stream time t (PQRST as Gaussians, wander, mains, noise). */
+  _ecgUv(t) {
+    let v = 0;
+    for (const b of this.beats) {
+      const d = t - b.tr;
+      if (d < -0.4 || d > 0.6) continue;
+      v += 110 * g(d + 0.19, 0.022) - 90 * g(d + 0.028, 0.009) + 1150 * g(d, 0.0105) - 260 * g(d - 0.03, 0.011) + 290 * g(d - 0.27, 0.048);
+    }
+    v += 70 * Math.sin(2 * Math.PI * 0.21 * t) + 14 * Math.sin(2 * Math.PI * this.st.notchHz * t) + 9 * gauss(this.rng);
+    return v;
+  }
+  _ecgBlock() {
+    const s0 = this.ecgNext, hi = this.gainHi();
+    const k = 8 * (hi ? Codec.GAIN_HI : Codec.GAIN_LO) / Codec.UV_PER_CODE;   // stream units per uV
+    let flags = hi ? Codec.ECG_F.GAIN_HI : 0;
+    const t0 = Codec.ecgTime(s0);
+    if (t0 < 1.0) flags |= Codec.ECG_F.SETTLING;
+    const off = this._leadOffAt(t0);
+    if (off) flags |= Codec.ECG_F.LEAD_OFF;
+    const s = this._ecgBuf || (this._ecgBuf = new Float64Array(10));
+    for (let i = 0; i < 10; i++) {
+      const t = Codec.ecgTime(s0 + i);
+      s[i] = off ? (1400 * Math.sin(2 * Math.PI * 1.3 * t) + 300 * gauss(this.rng)) * k : this._ecgUv(t) * k;
+    }
+    this.ecgNext += 10;
+    const mt = this.mt;
+    if (mt > this.dropEcgAt) { this.dropEcgAt = mt + 14 + 12 * this.rng(); if (this.rng() < 0.5) this.ecgNext += 10; return; } // lost block(s)
+    const pay = Codec.encodeEcg(s0, flags, s);
+    this.emit(Codec.CHAR.ECG, pay);
+    if (mt > this.dupAt) { this.dupAt = mt + 40; this.emit(Codec.CHAR.ECG, pay); }
+    if (mt > this.badAt) {
+      this.badAt = mt + 55;
+      this.emit(Codec.CHAR.ECG, pay.subarray(0, 24));                                   // truncated payload
+      this.emit(Codec.CHAR.EVENTS, Codec.encodeEvent(0x7e, { extra: Uint8Array.of(1, 2, 3) })); // unknown kind
+    }
+  }
+  /** PPG pulse shape (0..1) at time since foot d. */
+  _pulse(d, rr) {
+    if (d < 0 || d >= rr) return 0;
+    const up = 0.12;
+    const v = d < up ? 0.5 - 0.5 * Math.cos(Math.PI * d / up)
+      : Math.exp(-(d - up) / 0.32) + 0.13 * g(d - up - 0.21, 0.035);
+    return v * Math.min(1, (rr - d) / 0.12);          // taper into the next beat's foot
+  }
+  _ppgBlock() {
+    const k0 = this.ppgNext;
+    let flags = 0;
+    const coarse = this._c || (this._c = [0, 0]), fine = this._f || (this._f = [0, 0]);
+    for (let j = 0; j < 2; j++) {
+      const t = Codec.ppgTime(k0 + j);
+      const nf = this._noFingerAt(t);
+      if (nf) flags |= Codec.PPG_F.NO_FINGER;
+      // AGC step every 25 s: LED code changes, the frame is flagged disturbed
+      if (Math.floor(t / 25) !== Math.floor((t - 0.01) / 25) && t > 5) { this.agcUp = !this.agcUp; this.led += this.agcUp ? 24 : -24; flags |= j ? Codec.PPG_F.DIST1 : Codec.PPG_F.DIST0; }
+      let p = 0;
+      for (const b of this.beats) p += this._pulse(t - (b.tr + b.pat), b.rr);
+      const ledScale = this.led / 600;
+      // photocurrent in 80.6 pA units: DC ~2.4 uA drifting, pulse lowers the light by ~1.1 %
+      const dc = ledScale * (30600 + 3000 * Math.sin(2 * Math.PI * t / 120) + 50 * Math.sin(2 * Math.PI * 0.25 * t));
+      const light = nf ? 900 + 40 * gauss(this.rng) : dc * (1 - 0.011 * p) + 6 * gauss(this.rng);
+      fine[j] = -light;                                 // fine = minus photocurrent: systole up, wraps on the wire
+      coarse[j] = light * Codec.NA_PER_FINE / Codec.NA_PER_COARSE + 1.5 * gauss(this.rng);
+    }
+    this.ppgNext += 2;
+    const mt = this.mt;
+    if (mt > this.dropPpgAt) { this.dropPpgAt = mt + 18 + 15 * this.rng(); return; }
+    this.emit(Codec.CHAR.PPG, Codec.encodePpg(k0, this.led, flags, coarse, fine));
+  }
+}
+function g(x, s) { return Math.exp(-0.5 * (x / s) * (x / s)); }
+function gauss(rng) { return (rng() + rng() + rng() + rng() - 2) * 1.732; }
+function mulberry32(a) {
+  return function () {
+    a |= 0; a = (a + 0x6d2b79f5) | 0;
+    let t = Math.imul(a ^ (a >>> 15), 1 | a);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+// ==== STATE: ring buffers, integrity counters, log, recorder ====
+const C = Codec;
+const ECG_CAP = 1 << 19;   // 524288 samples = 17.5 min at 500 Hz
+const PPG_CAP = 1 << 17;   // 131072 frames  = 21.8 min at 100 Hz
+const MARK_CAP = 4096;     // R-peak / pulse markers kept for drawing
+const LOG_CAP = 3000, GAPLIST_CAP = 300;
+const CMD_TIMEOUT_MS = 2000, CMD_QUEUE_MAX = 8;
+
+/** One sampled stream on its unwrapped index axis u. A slot is valid for u iff own[slot] === u,
+ *  so gaps never need clearing and stale data is never shown. */
+class StreamRing {
+  constructor(cap, withPpg) {
+    this.cap = cap; this.mask = cap - 1;
+    this.own = new Float64Array(cap).fill(-1);
+    this.val = new Float32Array(cap);      // ECG uV | PPG fine (nA, unwrapped)
+    this.disp = new Float32Array(cap);     // display-filtered value
+    this.fl = new Uint8Array(cap);         // ECG block flags | PPG per-frame flags (bit0 disturbed, bit2 no finger)
+    if (withPpg) { this.coarse = new Float32Array(cap); this.led = new Uint16Array(cap); }
+    this.clear();
+  }
+  clear() { this.own.fill(-1); this.lo = 0; this.hi = 0; this.empty = true; }
+  has(u) { return u >= 0 && this.own[u & this.mask] === u; }
+  /** Oldest index still in the buffer. */
+  oldest() { return this.empty ? 0 : Math.max(this.lo, this.hi - this.cap); }
+  mark(u) {
+    if (this.empty) { this.lo = u; this.hi = u + 1; this.empty = false; }
+    else { if (u + 1 > this.hi) this.hi = u + 1; if (u < this.lo) this.lo = u; }
+  }
+}
+
+/** Fixed-capacity marker ring (times in s on the common axis). */
+class MarkRing {
+  constructor(cap) { this.cap = cap; this.t = new Float64Array(cap); this.a = new Float32Array(cap); this.b = new Float32Array(cap); this.n = 0; this.head = 0; }
+  clear() { this.n = 0; this.head = 0; }
+  push(t, a, b) { const i = this.head; this.t[i] = t; this.a[i] = a; this.b[i] = b; this.head = (i + 1) % this.cap; if (this.n < this.cap) this.n++; }
+  /** Calls fn(t, a, b) for markers in [t0, t1]. */
+  each(t0, t1, fn) {
+    for (let k = 0; k < this.n; k++) {
+      const i = (this.head - 1 - k + this.cap) % this.cap, t = this.t[i];
+      if (t < t0 - 1) break;          // markers are pushed in time order (newest first here)
+      if (t <= t1) fn(t, this.a[i], this.b[i]);
+    }
+  }
+}
+
+function newCharStats() { return { n: 0, bytes: 0, bad: 0, lastRx: 0, rate: 0, bps: 0, pn: 0, pb: 0 }; }
+function newStreamStats() {
+  return { blocks: 0, samples: 0, gaps: 0, missing: 0, dups: 0, late: 0, runs: 0, resumeGaps: 0, resumeMissing: 0,
+    snaps: [], rate10: NaN, runT0: 0, runU0: 0, lastT: 0, lastU: 0, runRate: NaN };
+}
+
+const S = {
+  ecg: new StreamRing(ECG_CAP, false),
+  ppg: new StreamRing(PPG_CAP, true),
+  ecgCont: new C.Continuity(C.ECG_HZ * 2),
+  ppgCont: new C.Continuity(C.PPG_HZ * 2),
+  rMarks: new MarkRing(MARK_CAP),           // R-peaks: t, hr
+  pMarks: new MarkRing(MARK_CAP),           // pulse feet: t, pat_ms, pulse bpm
+  ecgFilt: new C.EcgDisplayFilter("hp", 50),
+  ppgFiltMode: "hp",
+  ppgHp: new C.HighPass1(0.3, C.PPG_HZ),
+  unwrap: new C.Unwrap16(),
+  chars: {},                                // charId -> stats
+  ecgS: newStreamStats(), ppgS: newStreamStats(),
+  resumeEcg: false, resumePpg: false,       // first block after a (re)connect: a gap is "resume", not loss
+  status: null, statusRx: 0, statusRaw: null,
+  batterySvc: null, hrSvc: null, hrSvcRx: 0,
+  lastR: null, lastRRx: 0, lastPulse: null, lastPulseRx: 0, lead: null, lastState: null,
+  ecgFlags: -1, ppgLed: -1, ppgFlags: -1,
+  devInfo: {}, malformed: 0, exceptions: 0,
+  latestT: -Infinity,                       // newest data time on the common axis
+};
+for (const id of [C.CHAR.ECG, C.CHAR.PPG, C.CHAR.EVENTS, C.CHAR.STATUS, C.CHAR.HRM, C.CHAR.BATTERY]) S.chars[id] = newCharStats();
+
+// ---- log ----
+const LOG_CATS = [["conn", "conn"], ["cmd", "cmd"], ["status", "status"], ["state", "state"], ["lead", "lead"],
+  ["button", "button"], ["beat", "R-peak"], ["pulse", "pulse"], ["integrity", "integrity"], ["error", "error"], ["info", "info"]];
+const Log = {
+  entries: [], seq: 0, listeners: [],
+  add(cat, msg, devT) {
+    const e = { id: ++this.seq, wall: Date.now(), cat, msg, devT: devT ?? null };
+    this.entries.push(e);
+    if (this.entries.length > LOG_CAP) this.entries.splice(0, this.entries.length - LOG_CAP);
+    for (const fn of this.listeners) fn(e);
+  },
+  clear() { this.entries.length = 0; for (const fn of this.listeners) fn(null); },
+};
+const GapList = {
+  entries: [], seq: 0,
+  add(stream, kind, text) {
+    this.entries.push({ id: ++this.seq, wall: Date.now(), stream, kind, text });
+    if (this.entries.length > GAPLIST_CAP) this.entries.shift();
+  },
+};
+
+// ---- recorder: raw payloads in 1 MiB chunks (see capture format at the top) ----
+const Recorder = {
+  on: false, chunks: [], cur: null, off: 0, bytes: 0, records: 0, t0Perf: 0, t0Unix: 0, header: null, stoppedAt: 0,
+  start(header) {
+    this.chunks = []; this.cur = new Uint8Array(1 << 20); this.off = 0; this.bytes = 0; this.records = 0;
+    this.t0Perf = performance.now(); this.t0Unix = Date.now();
+    this.header = Object.assign({ format: "ecgcard-ble-capture", version: 1, t0_unix_ms: this.t0Unix,
+      created_utc: new Date(this.t0Unix).toISOString(),
+      channels: { "2": "ecg", "3": "ppg", "4": "events", "5": "status", "6": "control_write", "10807": "hrm_2a37", "10777": "battery_2a19", "65535": "note" },
+      user_agent: navigator.userAgent }, header);
+    this.on = true;
+    this.note("record start");
+  },
+  stop() { if (!this.on) return; this.note("record stop"); this.on = false; this.stoppedAt = performance.now(); },
+  add(ch, u8, tPerf) {
+    if (!this.on) return;
+    const need = C.CAP_REC_HDR + u8.length;
+    if (this.off + need > this.cur.length) { this.chunks.push(this.cur.subarray(0, this.off)); this.cur = new Uint8Array(1 << 20); this.off = 0; }
+    this.off = C.writeCaptureRecord(this.cur, this.off, ch, tPerf - this.t0Perf, u8);
+    this.bytes += need; this.records++;
+  },
+  note(text) { this.add(C.CHAR.NOTE, new TextEncoder().encode(text), performance.now()); },
+  parts() { return [...this.chunks, this.cur ? this.cur.subarray(0, this.off) : new Uint8Array(0)]; },
+  has() { return this.records > 0; },
+  durationS() { return ((this.on ? performance.now() : this.stoppedAt) - this.t0Perf) / 1000; },
+  /** Calls fn(ch, tMs, Uint8Array payload) for every record (export). */
+  each(fn) {
+    for (const part of this.parts()) {
+      const dv = new DataView(part.buffer, part.byteOffset, part.byteLength);
+      let o = 0;
+      while (o + C.CAP_REC_HDR <= part.length) {
+        const ch = dv.getUint16(o, true), len = dv.getUint16(o + 2, true), t = dv.getFloat64(o + 4, true);
+        fn(ch, t, part.subarray(o + C.CAP_REC_HDR, o + C.CAP_REC_HDR + len));
+        o += C.CAP_REC_HDR + len;
+      }
+    }
+  },
+  clear() { this.on = false; this.chunks = []; this.cur = null; this.off = 0; this.bytes = 0; this.records = 0; },
+};
+
+// ---- ingest: every notification (BLE or demo) comes through here ----
+const blkE = C.newEcgBlock(), blkP = C.newPpgBlock(), evt = C.newEvent();
+const hooks = { onStatus: null, onCmdResult: null, onEvent: null };
+
+function onNotify(ch, dv, tRx) {
+  const st = S.chars[ch];
+  if (st) { st.n++; st.bytes += dv.byteLength; st.lastRx = tRx; }
+  if (dv.byteLength > C.NOTIFY_MAX_LEN) Log.add("error", `${C.CHAR_NAME[ch] || ch}: ${dv.byteLength} B notification exceeds the ${C.NOTIFY_MAX_LEN}-byte maximum`);
+  if (Recorder.on) Recorder.add(ch, new Uint8Array(dv.buffer, dv.byteOffset, dv.byteLength), tRx);
+  try {
+    switch (ch) {
+      case C.CHAR.ECG: { const e = C.parseEcg(dv, blkE); if (e) return bad(ch, e, dv); ingestEcg(blkE, tRx); break; }
+      case C.CHAR.PPG: { const e = C.parsePpg(dv, blkP); if (e) return bad(ch, e, dv); ingestPpg(blkP, tRx); break; }
+      case C.CHAR.EVENTS: { const e = C.parseEvent(dv, evt); if (e) return bad(ch, e, dv); ingestEvent(evt, dv, tRx); break; }
+      case C.CHAR.STATUS: {
+        const s = C.parseStatus(dv); if (s.err) return bad(ch, s.err, dv);
+        const prev = S.status; S.status = s; S.statusRx = tRx; S.statusRaw = C.hex(dv);
+        if (s.proto !== C.PROTO_VERSION && (!prev || prev.proto !== s.proto)) Log.add("error", `Status proto ${s.proto}, this client speaks ${C.PROTO_VERSION}`);
+        Log.add("status", statusLine(s));
+        if (S.ecgFilt.notchHz !== s.notchHz && (s.notchHz === 50 || s.notchHz === 60)) { S.ecgFilt.configure(S.ecgFilt.mode, s.notchHz); refilterEcg(); }
+        if (hooks.onStatus) hooks.onStatus(s);
+        break;
+      }
+      case C.CHAR.HRM: { const h = C.parseHrm(dv); if (h.err) return bad(ch, h.err, dv); S.hrSvc = h; S.hrSvcRx = tRx; break; }
+      case C.CHAR.BATTERY: { const b = C.parseBattery(dv); if (b.err) return bad(ch, b.err, dv); S.batterySvc = b.pct; break; }
+      default: Log.add("error", `notification on unexpected characteristic 0x${ch.toString(16)}: ${C.hex(dv)}`);
+    }
+  } catch (err) {
+    S.exceptions++;
+    if (st) st.bad++;
+    Log.add("error", `exception while handling ${C.CHAR_NAME[ch] || ch}: ${err && err.message} [${C.hex(dv)}]`);
+  }
+}
+function bad(ch, msg, dv) {
+  S.malformed++;
+  if (S.chars[ch]) S.chars[ch].bad++;
+  Log.add("error", `malformed ${C.CHAR_NAME[ch]}: ${msg} [${C.hex(dv)}]`);
+  GapList.add(C.CHAR_NAME[ch], "bad", msg);
+}
+function statusLine(s) {
+  return `status mode=${C.MODE_NAME[s.mode] ?? s.mode} meas=${C.MEAS_NAME[s.meas] ?? s.meas} batt=${s.battPct === 255 ? "?" : s.battPct + "%"} ${s.battMv || "?"} mV` +
+    ` gain=${C.settingText(0, s.gain)} notch=${C.settingText(1, s.notch)}(${s.notchHz} Hz) rld=${C.settingText(2, s.rld)}` +
+    ` led=${C.settingText(3, s.ledLimit)} sweep=${C.settingText(4, s.sweep)} hr=${s.hrBpm || "-"} flags=[${C.statusFlagsText(s.flags)}] fw=${s.fw} up=${s.uptimeMin} min`;
+}
+
+/** Common bookkeeping for a block's continuity result. Returns false if the block is to be dropped. */
+function continuity(name, cont, ring, ss, kind, n, tRx, resumeKey, timeOf) {
+  const resume = S[resumeKey]; S[resumeKey] = false;
+  switch (kind) {
+    case C.CONT.FIRST: case C.CONT.OK: return true;
+    case C.CONT.NEWRUN:
+      ss.runs++;
+      Log.add("integrity", `${name}: index restarted at ${cont.uStart} (new acquisition run)`);
+      GapList.add(name, "run", `restart at ${cont.uStart}`);
+      newRun(name);
+      return true;
+    case C.CONT.GAP: {
+      const from = cont.uStart - cont.missing;
+      const txt = `${cont.missing} ${name === "ECG" ? "samples" : "frames"} missing, ${from}..${cont.uStart - 1} (t=${timeOf(from).toFixed(2)} s)`;
+      if (resume) { ss.resumeGaps++; ss.resumeMissing += cont.missing; GapList.add(name, "resume", txt + " across reconnect"); Log.add("integrity", `${name} resumed after reconnect: ${txt}`, timeOf(from)); }
+      else { ss.gaps++; ss.missing += cont.missing; GapList.add(name, "gap", txt); Log.add("integrity", `${name} gap: ${txt}`, timeOf(from)); }
+      return true;
+    }
+    case C.CONT.BACK: {
+      let present = 0;
+      for (let i = 0; i < n; i++) if (ring.has(cont.uStart + i)) present++;
+      if (present === n) { ss.dups++; GapList.add(name, "dup", `block ${cont.uStart} repeated (${cont.behind} behind)`); Log.add("integrity", `${name} duplicate block at ${cont.uStart}`); return false; }
+      ss.late++; GapList.add(name, "late", `block ${cont.uStart} arrived ${cont.behind} behind`); Log.add("integrity", `${name} out-of-order block at ${cont.uStart}`);
+      return true;
+    }
+  }
+  return true;
+}
+
+function newRun(name) {
+  // the other stream is cleared too if it holds data from well before the restart
+  const clearOther = (ring, timeOfHi) => !ring.empty && timeOfHi > 1.0;
+  if (name === "ECG") {
+    S.ecg.clear(); S.ecgFilt.reset();
+    if (clearOther(S.ppg, C.ppgTime(S.ppg.hi))) { S.ppg.clear(); S.ppgHp.reset(); S.unwrap.reset(); }
+  } else {
+    S.ppg.clear(); S.ppgHp.reset(); S.unwrap.reset();
+    if (clearOther(S.ecg, C.ecgTime(S.ecg.hi))) { S.ecg.clear(); S.ecgFilt.reset(); }
+  }
+  S.rMarks.clear(); S.pMarks.clear();
+  S.latestT = -Infinity;
+  if (hooks.onRun) hooks.onRun();
+}
+
+function rateBook(ss, uEnd, tRx, kind) {
+  if (kind === C.CONT.FIRST || kind === C.CONT.NEWRUN || ss.runT0 === 0) { ss.runT0 = tRx; ss.runU0 = uEnd; }
+  ss.lastT = tRx; ss.lastU = uEnd;
+}
+
+function ingestEcg(b, tRx) {
+  const cont = S.ecgCont, ring = S.ecg, ss = S.ecgS;
+  const kind = cont.push(b.start, C.ECG_SAMPLES);
+  if (!continuity("ECG", cont, ring, ss, kind, C.ECG_SAMPLES, tRx, "resumeEcg", C.ecgTime)) return;
+  ss.blocks++; ss.samples += C.ECG_SAMPLES;
+  const k = C.ecgUvPerUnit(b.flags), u0 = cont.uStart, late = kind === C.CONT.BACK;
+  if (kind === C.CONT.GAP || kind === C.CONT.NEWRUN || kind === C.CONT.FIRST) S.ecgFilt.reset();
+  for (let i = 0; i < C.ECG_SAMPLES; i++) {
+    const u = u0 + i, s = u & ring.mask, v = b.s[i] * k;
+    ring.own[s] = u; ring.val[s] = v; ring.fl[s] = b.flags;
+    if (!late) ring.disp[s] = S.ecgFilt.step(v);
+    ring.mark(u);
+  }
+  if (late) refilterEcg();
+  if (b.flags !== S.ecgFlags) {
+    if (S.ecgFlags >= 0) {
+      const ch = b.flags ^ S.ecgFlags, parts = [];
+      if (ch & C.ECG_F.GAIN_HI) parts.push(`gain ${C.ecgGain(b.flags)}x`);
+      if (ch & C.ECG_F.SETTLING) parts.push(b.flags & C.ECG_F.SETTLING ? "settling" : "settled");
+      if (ch & C.ECG_F.LEAD_OFF) parts.push(b.flags & C.ECG_F.LEAD_OFF ? "lead off" : "lead on");
+      if (parts.length) Log.add("state", `ECG block flags: ${parts.join(", ")}`, C.ecgTime(u0));
+    }
+    S.ecgFlags = b.flags;
+  }
+  if (!late) rateBook(ss, cont.uNext, tRx, kind);
+  const t = C.ecgTime(cont.uNext - 1);
+  if (t > S.latestT) S.latestT = t;
+}
+
+function ingestPpg(b, tRx) {
+  const cont = S.ppgCont, ring = S.ppg, ss = S.ppgS;
+  const kind = cont.push(b.start, C.PPG_FRAMES);
+  if (!continuity("PPG", cont, ring, ss, kind, C.PPG_FRAMES, tRx, "resumePpg", C.ppgTime)) return;
+  ss.blocks++; ss.samples += C.PPG_FRAMES;
+  const u0 = cont.uStart, late = kind === C.CONT.BACK;
+  if (kind === C.CONT.GAP || kind === C.CONT.NEWRUN || kind === C.CONT.FIRST) S.ppgHp.reset();
+  if (kind === C.CONT.NEWRUN || kind === C.CONT.FIRST) S.unwrap.reset();
+  for (let j = 0; j < C.PPG_FRAMES; j++) {
+    const u = u0 + j, s = u & ring.mask;
+    const fl = ((b.flags >> j) & 1) | (b.flags & C.PPG_F.NO_FINGER);
+    const fu = late ? S.unwrap.acc + C.diffI16(b.fine[j], S.unwrap.last) : S.unwrap.push(b.fine[j]);
+    ring.own[s] = u; ring.val[s] = fu * C.NA_PER_FINE; ring.fl[s] = fl;
+    ring.coarse[s] = b.coarse[j] * C.NA_PER_COARSE; ring.led[s] = b.led;
+    if (fl & 1) S.ppgHp.reset();
+    ring.disp[s] = S.ppgFiltMode === "raw" ? ring.val[s] : S.ppgHp.step(ring.val[s]);
+    ring.mark(u);
+  }
+  if (b.led !== S.ppgLed) { if (S.ppgLed >= 0) Log.add("state", `PPG LED code ${S.ppgLed} -> ${b.led} (${(b.led * C.LED_UA_PER_CODE / 1000).toFixed(2)} mA)`, C.ppgTime(u0)); S.ppgLed = b.led; }
+  const nf = b.flags & C.PPG_F.NO_FINGER;
+  if (S.ppgFlags >= 0 && nf !== (S.ppgFlags & C.PPG_F.NO_FINGER)) Log.add("state", nf ? "PPG no finger" : "PPG finger detected", C.ppgTime(u0));
+  S.ppgFlags = b.flags;
+  if (!late) rateBook(ss, cont.uNext, tRx, kind);
+  const t = C.ppgTime(cont.uNext - 1);
+  if (t > S.latestT) S.latestT = t;
+}
+
+function ingestEvent(e, dv, tRx) {
+  const E = C.EV;
+  if (!e.known) {
+    Log.add("error", `unknown event kind 0x${e.kind.toString(16).padStart(2, "0")}: ${C.hex(dv)}`);
+    if (S.chars[C.CHAR.EVENTS]) S.chars[C.CHAR.EVENTS].bad++;
+    GapList.add("Events", "bad", `unknown kind 0x${e.kind.toString(16)}`);
+    return;
+  }
+  switch (e.kind) {
+    case E.R_PEAK: S.lastR = { index: e.index, hr: e.hr }; S.lastRRx = tRx; S.rMarks.push(C.ecgTime(e.index), e.hr, 0); Log.add("beat", C.describeEvent(e), C.ecgTime(e.index)); break;
+    case E.PULSE: S.lastPulse = { index: e.index, pulse: e.pulse, pat: e.pat, pi: e.pi }; S.lastPulseRx = tRx; S.pMarks.push(C.ecgTime(e.index), e.pat, e.pulse); Log.add("pulse", C.describeEvent(e), C.ecgTime(e.index)); break;
+    case E.LEAD: S.lead = e.contact; Log.add("lead", C.describeEvent(e)); break;
+    case E.STATE: S.lastState = C.eventFields(e); Log.add("state", C.describeEvent(e)); break;
+    case E.BUTTON: Log.add("button", C.describeEvent(e)); break;
+    case E.CMD_RESULT: Log.add("cmd", C.describeEvent(e)); if (hooks.onCmdResult) hooks.onCmdResult(e.cmd, e.result); break;
+  }
+}
+
+function refilterEcg() {
+  const r = S.ecg; if (r.empty) return;
+  S.ecgFilt.reset();
+  let prevValid = false;
+  for (let u = r.oldest(); u < r.hi; u++) {
+    const s = u & r.mask;
+    if (r.own[s] !== u) { prevValid = false; continue; }
+    if (!prevValid) S.ecgFilt.reset();
+    r.disp[s] = S.ecgFilt.step(r.val[s]); prevValid = true;
+  }
+}
+function refilterPpg() {
+  const r = S.ppg; if (r.empty) return;
+  S.ppgHp.reset();
+  let prevValid = false;
+  for (let u = r.oldest(); u < r.hi; u++) {
+    const s = u & r.mask;
+    if (r.own[s] !== u) { prevValid = false; continue; }
+    if (!prevValid || (r.fl[s] & 1)) S.ppgHp.reset();
+    r.disp[s] = S.ppgFiltMode === "raw" ? r.val[s] : S.ppgHp.step(r.val[s]); prevValid = true;
+  }
+}
+
+/** Once per second: per-characteristic rates and effective sample rates. */
+function tickStats(now) {
+  for (const id in S.chars) {
+    const c = S.chars[id];
+    c.rate = c.n - c.pn; c.bps = c.bytes - c.pb; c.pn = c.n; c.pb = c.bytes;
+  }
+  for (const ss of [S.ecgS, S.ppgS]) {
+    ss.snaps.push([now, ss.samples]);
+    if (ss.snaps.length > 11) ss.snaps.shift();
+    const a = ss.snaps[0], b = ss.snaps[ss.snaps.length - 1];
+    ss.rate10 = b[0] - a[0] >= 3000 && now - ss.lastT < 2000 ? (b[1] - a[1]) / ((b[0] - a[0]) / 1000) : NaN;
+    ss.runRate = ss.lastT - ss.runT0 > 5000 ? (ss.lastU - ss.runU0) / ((ss.lastT - ss.runT0) / 1000) : NaN;
+  }
+}
+function resetStats() {
+  for (const id in S.chars) S.chars[id] = newCharStats();
+  const keep = (o) => ({ runT0: o.runT0, runU0: o.runU0, lastT: o.lastT, lastU: o.lastU });
+  S.ecgS = Object.assign(newStreamStats(), keep(S.ecgS)); S.ppgS = Object.assign(newStreamStats(), keep(S.ppgS));
+  S.malformed = 0; S.exceptions = 0; GapList.entries.length = 0;
+}
+
+// ---- command queue: one command in flight; each waits for its STREAM_EV_CMD_RESULT ----
+const Cmd = {
+  q: [], cur: null, transport: null, onChange: null, lastLost: null,
+  send(bytes, label, sink) {
+    if (!this.transport) { sink("not connected", "err"); return; }
+    if (this.q.length >= CMD_QUEUE_MAX) { sink("queue full", "err"); return; }
+    this.q.push({ bytes, label, sink });
+    sink(this.cur || this.q.length > 1 ? "queued" : "sending", "");
+    this._pump();
+  },
+  async _pump() {
+    if (this.cur || !this.q.length) { this._changed(); return; }
+    const c = this.cur = this.q.shift();
+    this._changed();
+    const tr = this.transport;
+    try {
+      c.sink("writing", "");
+      if (Recorder.on) Recorder.add(C.CHAR.CONTROL, c.bytes, performance.now());
+      Log.add("cmd", `write ${C.describeCommand(c.bytes)} [${C.hex(c.bytes)}]`);
+      c.t0 = performance.now();
+      await tr.write(c.bytes);
+      c.tw = performance.now();
+      c.sink(`written, waiting for result`, "");
+      const r = await new Promise((resolve) => { c.resolve = resolve; c.timer = setTimeout(() => resolve(null), CMD_TIMEOUT_MS); });
+      if (r === undefined) { /* aborted (disconnect); sink already set */ }
+      else if (r === null) {
+        c.sink(`no result after ${CMD_TIMEOUT_MS / 1000} s (may be lost; Retry)`, "warn");
+        Log.add("error", `${c.label}: no CMD_RESULT within ${CMD_TIMEOUT_MS} ms. A command that arrives as a session starts or stops can be lost on the UART; check Status and retry.`);
+        this.lastLost = c;
+      }
+      else { const ms = Math.round(performance.now() - c.t0); c.sink(`${C.RES_NAME[r] ?? r}${r ? " - " + (C.RES_TEXT[r] ?? "") : ""} (${ms} ms)`, r === 0 ? "ok" : "err"); }
+    } catch (err) {
+      c.sink(`write failed: ${err && err.message}`, "err");
+      Log.add("error", `${c.label}: write failed: ${err && err.name}: ${err && err.message}`);
+    } finally { clearTimeout(c.timer); this.cur = null; }
+    this._pump();
+  },
+  onResult(cmd, result) {
+    const c = this.cur;
+    if (c && c.resolve && c.bytes[0] === cmd) { const r = c.resolve; c.resolve = null; r(result); return; }
+    Log.add("cmd", `unsolicited CMD_RESULT for ${C.CMD_NAME[cmd] ?? cmd}: ${C.RES_NAME[result] ?? result}`);
+  },
+  abortAll(why) {
+    for (const c of this.q) c.sink(why, "err");
+    this.q.length = 0;
+    if (this.cur && this.cur.resolve) { const r = this.cur.resolve; this.cur.resolve = null; this.cur.sink(why, "err"); clearTimeout(this.cur.timer); r(undefined); }
+    this._changed();
+  },
+  _changed() { if (this.onChange) this.onChange(); },
+};
+hooks.onCmdResult = (cmd, res) => Cmd.onResult(cmd, res);
+
+// ==== TRANSPORT: Web Bluetooth and demo, same handler interface ====
+// handlers: notify(charId, DataView, tRx), log(cat, msg), state(name, detail), disconnected(byUser), info(obj)
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+/** Why Web Bluetooth cannot be used here, or null if it can. */
+function webBluetoothProblem() {
+  const linuxHint = "On Linux, enable chrome://flags/#enable-experimental-web-platform-features and restart Chrome " +
+    "(without it Chrome on Linux does not expose navigator.bluetooth at all); bluetoothd must be running.";
+  if (!window.isSecureContext)
+    return "This page is not a secure context, so Web Bluetooth is disabled. Open it from file://, http://localhost, http://127.0.0.1 or https:// (plain http:// from another host does not work).";
+  if (!("bluetooth" in navigator)) {
+    const chromium = !!(navigator.userAgentData && navigator.userAgentData.brands && navigator.userAgentData.brands.some((b) => /Chrom|Edge/.test(b.brand)));
+    if (!chromium) return "This browser has no Web Bluetooth. Use Chrome, Chromium or Edge (desktop or Android); Firefox and Safari do not implement it. " + linuxHint;
+    return "navigator.bluetooth is missing (Linux needs a Chrome flag). " + linuxHint + " On Android use Chrome 56+ and allow the Nearby devices (Android 12+) or Location permission.";
+  }
+  return null;
+}
+
+class BleTransport {
+  constructor(h) { this.h = h; this.kind = "ble"; this.device = null; this.server = null; this.chars = {}; this.q = Promise.resolve(); this.byUser = false; this.services = []; }
+  /** Serialise every GATT operation (Web Bluetooth rejects overlapping ones). */
+  op(fn) { const p = this.q.then(fn); this.q = p.then(() => {}, () => {}); return p; }
+  get connected() { return !!(this.device && this.device.gatt && this.device.gatt.connected); }
+  get name() { return this.device ? this.device.name || "(unnamed)" : ""; }
+
+  async pick() {                    // must run inside a user gesture
+    const dev = await navigator.bluetooth.requestDevice({
+      filters: [{ services: [C.SERVICE_UUID] }, { namePrefix: C.DEVICE_NAME_PREFIX }],
+      optionalServices: [C.SERVICE_UUID, "battery_service", "heart_rate", "device_information"],
+    });
+    if (this.device !== dev) {
+      this.device = dev;
+      dev.addEventListener("gattserverdisconnected", () => this._onDisconnected());
+    }
+    return dev;
+  }
+
+  async connect() {
+    const h = this.h, dev = this.device;
+    this.byUser = false; this.chars = {}; this.services = [];
+    h.state("connecting", "GATT connect");
+    this.server = await dev.gatt.connect();
+    h.state("connecting", "discovering services");
+    const svc = await this.op(() => this.server.getPrimaryService(C.SERVICE_UUID));
+    this.services.push("ECG Card");
+    for (const key of ["ECG", "PPG", "EVENTS", "STATUS", "CONTROL"]) {
+      try { this.chars[key] = await this.op(() => svc.getCharacteristic(C.CHAR_UUID[key])); }
+      catch (e) { h.log("error", `characteristic ${key} (${C.CHAR_UUID[key]}) not found: ${e.message}`); }
+    }
+    // One handler function per characteristic id for the life of this transport: Chrome may hand
+    // back the same characteristic objects after a reconnect, and addEventListener ignores a
+    // listener that is already registered, so notifications are never delivered twice.
+    this.handlers = this.handlers || {};
+    const listen = (c, id) => {
+      const fn = this.handlers[id] || (this.handlers[id] = (ev) => h.notify(id, ev.target.value, ev.timeStamp > 0 ? ev.timeStamp : performance.now()));
+      c.addEventListener("characteristicvaluechanged", fn);
+    };
+    for (const [key, id] of [["ECG", C.CHAR.ECG], ["PPG", C.CHAR.PPG], ["EVENTS", C.CHAR.EVENTS], ["STATUS", C.CHAR.STATUS]])
+      if (this.chars[key]) listen(this.chars[key], id);
+    // standard services are optional for the client
+    try {
+      const hr = await this.op(() => this.server.getPrimaryService("heart_rate"));
+      this.chars.HRM = await this.op(() => hr.getCharacteristic("heart_rate_measurement"));
+      listen(this.chars.HRM, C.CHAR.HRM); this.services.push("Heart Rate");
+    } catch (e) { h.log("info", `Heart Rate service not available: ${e.message}`); }
+    try {
+      const bs = await this.op(() => this.server.getPrimaryService("battery_service"));
+      this.chars.BATT = await this.op(() => bs.getCharacteristic("battery_level"));
+      listen(this.chars.BATT, C.CHAR.BATTERY); this.services.push("Battery");
+    } catch (e) { h.log("info", `Battery service not available: ${e.message}`); }
+    const info = {};
+    try {
+      const dis = await this.op(() => this.server.getPrimaryService("device_information"));
+      this.services.push("Device Information");
+      const td = new TextDecoder();
+      for (const [k, uuid] of [["manufacturer", "manufacturer_name_string"], ["model", "model_number_string"], ["serial", "serial_number_string"],
+        ["hardware", "hardware_revision_string"], ["firmware", "firmware_revision_string"], ["software", "software_revision_string"]]) {
+        try { const c = await this.op(() => dis.getCharacteristic(uuid)); const v = await this.op(() => c.readValue()); info[k] = td.decode(v).replace(/\0+$/, ""); }
+        catch (e) { /* characteristic absent */ }
+      }
+    } catch (e) { h.log("info", `Device Information service not available: ${e.message}`); }
+    h.info(info);
+    h.state("connecting", "subscribing");
+    for (const key of ["ECG", "PPG", "EVENTS", "STATUS", "HRM", "BATT"]) {
+      if (!this.chars[key]) continue;
+      try { await this.op(() => this.chars[key].startNotifications()); }
+      catch (e) { h.log("error", `startNotifications(${key}) failed: ${e.name}: ${e.message}`); }
+    }
+    // reads fire characteristicvaluechanged too, so the listeners above handle the values
+    if (this.chars.STATUS) await this.op(() => this.chars.STATUS.readValue()).catch((e) => h.log("error", `Status read failed: ${e.message}`));
+    if (this.chars.BATT) await this.op(() => this.chars.BATT.readValue()).catch(() => {});
+    if (!this.connected) throw new Error("disconnected during setup");
+  }
+  async write(bytes) {
+    if (!this.chars.CONTROL) throw new Error("Control characteristic not available");
+    if (!this.connected) throw new Error("not connected");
+    return this.op(() => this.chars.CONTROL.writeValueWithResponse(bytes));
+  }
+  async readStatus() {
+    if (!this.chars.STATUS) throw new Error("Status characteristic not available");
+    return this.op(() => this.chars.STATUS.readValue());
+  }
+  disconnect() { this.byUser = true; if (this.connected) this.device.gatt.disconnect(); else this._onDisconnected(); }
+  _onDisconnected() { this.q = Promise.resolve(); this.h.disconnected(this.byUser, this); }
+  destroy() { this.disconnect(); }
+}
+
+class DemoTransport {
+  constructor(h) {
+    this.h = h; this.kind = "demo"; this.connectedFlag = false; this.started = false; this.services = [];
+    this.device = { name: "ECG Card 3F2A", id: "demo-device" };
+    this.dev = new DemoDevice((ch, u8) => {
+      if (this.connectedFlag) this.h.notify(ch, new DataView(u8.buffer, u8.byteOffset, u8.byteLength), performance.now());
+    });
+    this.dev.onBleOff = () => {            // SET_ITEM_BLE = off: the radio goes away
+      this.bleOff = true;
+      if (this.connectedFlag) { this.connectedFlag = false; this.h.disconnected(false, this); }
+    };
+    this.t0 = performance.now();
+    this.timer = setInterval(() => this.dev.advance((performance.now() - this.t0) / 1000), 20);
+  }
+  get connected() { return this.connectedFlag; }
+  get name() { return this.device.name; }
+  async pick() { return this.device; }
+  async connect() {
+    this.h.state("connecting", "simulated GATT connect");
+    await sleep(300);
+    if (this.bleOff) throw new DOMException("Bluetooth is off on the (simulated) card; turn it on in the card's Settings, or press Demo for a new simulation.", "NetworkError");
+    this.connectedFlag = true;
+    this.services = ["ECG Card", "Heart Rate", "Battery", "Device Information"];
+    this.h.info({ manufacturer: "Simulator", model: "ECG Card (demo)", serial: "C0:FF:EE:00:3F:2A", firmware: "radio 0.2.0 (demo)", software: "0.3.1 (demo)" });
+    this.dev.sendStatus();
+    this.h.notify(C.CHAR.BATTERY, new DataView(Uint8Array.of(this.dev.st.battPct).buffer), performance.now());
+    if (!this.started) {          // as if BUTTON1 started ECG + PPG on the card
+      this.started = true;
+      setTimeout(() => {
+        this.dev.emit(C.CHAR.EVENTS, C.encodeEvent(C.EV.BUTTON, { button: 1, press: 0 }));
+        this.dev.start(3);
+      }, 400);
+    }
+  }
+  async write(bytes) {
+    await sleep(6 + 6 * Math.random());
+    if (!this.connectedFlag) throw new DOMException("GATT Server is disconnected.", "NetworkError");
+    if (bytes.length < 1 || bytes.length > C.CMD_MAX_LEN) throw new DOMException("write rejected at ATT level (length)", "NotSupportedError");
+    this.dev.command(bytes);
+  }
+  async readStatus() { await sleep(10); this.dev.sendStatus(); }
+  disconnect() { if (!this.connectedFlag) return; this.connectedFlag = false; setTimeout(() => this.h.disconnected(true, this), 30); }
+  destroy() { this.connectedFlag = false; clearInterval(this.timer); }
+}
+
+// ==== RENDER: canvas strips on a shared time axis ====
+const View = { win: 10, live: true, tRight: 0, dispT: NaN, lastNow: 0, theme: {} };
+
+function readTheme() {
+  const cs = getComputedStyle(document.documentElement), v = (n) => cs.getPropertyValue(n).trim();
+  View.theme = { bg: v("--plot-bg"), major: v("--grid-major"), minor: v("--grid-minor"), plain: v("--grid-plain"), axis: v("--axis-text"),
+    gap: v("--gap"), ecg: v("--ecg"), ppg: v("--ppg"), coarse: v("--coarse"), marker: v("--marker"), faint: v("--faint"), mono: v("--mono") };
+}
+
+/** Source descriptors: how to read a ring as (time, value, dimmed). */
+const SRC = {
+  ecg: { ring: () => S.ecg, fs: C.ECG_HZ, off: C.ECG_T0_S, arr: (r) => r.disp, dim: C.ECG_F.SETTLING | C.ECG_F.LEAD_OFF, minSpan: 400, color: "ecg", unit: "uv" },
+  ppg: { ring: () => S.ppg, fs: C.PPG_HZ, off: C.PPG_ON_SAMPLE_S, arr: (r) => r.disp, dim: 0x01 | C.PPG_F.NO_FINGER, minSpan: 2, color: "ppg", unit: "na" },
+  coarse: { ring: () => S.ppg, fs: C.PPG_HZ, off: C.PPG_ON_SAMPLE_S, arr: (r) => r.coarse, dim: 0x01 | C.PPG_F.NO_FINGER, minSpan: 5, color: "coarse", unit: "na" },
+};
+
+class Strip {
+  constructor(el, srcKey) {
+    this.el = el; this.src = SRC[srcKey]; this.key = srcKey;
+    this.canvas = el.querySelector("canvas"); this.ctx = this.canvas.getContext("2d");
+    this.valEl = el.querySelector("[data-val]");
+    this.lockBtn = el.querySelector('[data-act="lock"]');
+    this.zinBtn = el.querySelector('[data-act="zin"]'); this.zoutBtn = el.querySelector('[data-act="zout"]');
+    this.lo = NaN; this.hi = NaN; this.locked = false;
+    this.w = 0; this.h = 0; this.dpr = 1; this.alloc(256);
+    this.bands = new Float32Array(256); this.nb = 0;
+    this.lastVal = "";
+    new ResizeObserver(() => this.resize()).observe(el);
+    this.lockBtn.addEventListener("click", () => this.setLocked(!this.locked));
+    this.zinBtn.addEventListener("click", () => this.zoom(0.8));
+    this.zoutBtn.addEventListener("click", () => this.zoom(1.25));
+    this.setLocked(false);
+  }
+  alloc(n) {
+    this.cap = n;
+    this.cMin = new Float32Array(n); this.cMax = new Float32Array(n); this.cFirst = new Float32Array(n); this.cLast = new Float32Array(n);
+    this.cX = new Float32Array(n); this.cN = new Int32Array(n); this.cGap = new Uint8Array(n); this.cDim = new Uint8Array(n);
+  }
+  resize() {
+    const r = this.el.getBoundingClientRect(), dpr = window.devicePixelRatio || 1;
+    this.w = Math.max(1, Math.floor(r.width)); this.h = Math.max(1, Math.floor(r.height)); this.dpr = dpr;
+    this.canvas.width = Math.round(this.w * dpr); this.canvas.height = Math.round(this.h * dpr);
+    if (this.w + 2 > this.cap) this.alloc(this.w + 64);
+  }
+  setLocked(on) {
+    this.locked = on;
+    this.lockBtn.textContent = on ? "Locked" : "Auto";
+    this.lockBtn.classList.toggle("on", on);
+    this.lockBtn.title = on ? "Vertical scale locked: click for auto scale" : "Auto scale: click to lock the current scale";
+    this.zinBtn.disabled = this.zoutBtn.disabled = !on;
+  }
+  zoom(f) {
+    if (!isFinite(this.lo)) return;
+    if (!this.locked) this.setLocked(true);
+    const c = (this.lo + this.hi) / 2, h = (this.hi - this.lo) / 2 * f;
+    this.lo = c - h; this.hi = c + h;
+  }
+
+  /** Draw [t0, t1]. Returns nothing; all buffers are preallocated. */
+  draw(t0, t1, showTimeLabels) {
+    const ctx = this.ctx, W = this.w, H = this.h, th = View.theme, src = this.src, ring = src.ring();
+    ctx.setTransform(this.dpr, 0, 0, this.dpr, 0, 0);
+    ctx.fillStyle = th.bg; ctx.fillRect(0, 0, W, H);
+    const plotTop = 30, plotBot = H - (showTimeLabels ? 16 : 3), ph = Math.max(10, plotBot - plotTop);
+    const pxs = W / (t1 - t0);
+
+    // ---- columns (min/max decimation) ----
+    const cN = this.cN; cN.fill(0, 0, W + 1);
+    let gLo = Infinity, gHi = -Infinity, aLo = Infinity, aHi = -Infinity, any = false, lastV = NaN, lastFl = 0;
+    this.nb = 0;
+    if (!ring.empty) {
+      const arr = src.arr(ring), own = ring.own, fl = ring.fl, mask = ring.mask;
+      let uA = Math.ceil((t0 - src.off) * src.fs), uB = Math.floor((t1 - src.off) * src.fs);
+      uA = Math.max(uA, ring.oldest()); uB = Math.min(uB, ring.hi - 1);
+      let pend = false, gapX = 0, seen = false;
+      for (let u = uA; u <= uB; u++) {
+        const s = u & mask;
+        if (own[s] !== u) { if (seen && !pend) { pend = true; gapX = (u / src.fs + src.off - t0) * pxs; } continue; }
+        const x = (u / src.fs + src.off - t0) * pxs;
+        let col = x | 0; if (col < 0) col = 0; else if (col >= W) col = W - 1;
+        const v = arr[s], d = fl[s] & src.dim;
+        if (pend && this.nb < 254) { this.bands[this.nb++] = gapX; this.bands[this.nb++] = x; }
+        if (cN[col] === 0) {
+          this.cMin[col] = this.cMax[col] = this.cFirst[col] = this.cLast[col] = v; this.cX[col] = x;
+          this.cGap[col] = pend ? 1 : 0; this.cDim[col] = d ? 1 : 0;
+        } else {
+          if (v < this.cMin[col]) this.cMin[col] = v; if (v > this.cMax[col]) this.cMax[col] = v;
+          this.cLast[col] = v; if (d) this.cDim[col] = 1;
+        }
+        cN[col]++; pend = false; seen = true; any = true;
+        if (d) { if (v < aLo) aLo = v; if (v > aHi) aHi = v; } else { if (v < gLo) gLo = v; if (v > gHi) gHi = v; }
+        lastV = v; lastFl = fl[s];
+      }
+    }
+    // ---- vertical scale ----
+    if (!this.locked) {
+      let lo = gLo, hi = gHi;
+      if (!isFinite(lo)) { lo = aLo; hi = aHi; }
+      if (isFinite(lo)) {
+        const span = Math.max(hi - lo, src.minSpan), mid = (hi + lo) / 2;
+        const tlo = mid - span * 0.56, thi = mid + span * 0.56;
+        if (!isFinite(this.lo) || this.resetScale) { this.lo = tlo; this.hi = thi; this.resetScale = false; }
+        else {
+          this.lo = tlo < this.lo ? tlo : this.lo + (tlo - this.lo) * 0.06;
+          this.hi = thi > this.hi ? thi : this.hi + (thi - this.hi) * 0.06;
+        }
+      }
+    }
+    const lo = isFinite(this.lo) ? this.lo : -1, hi = isFinite(this.hi) ? this.hi : 1;
+    const ky = ph / (hi - lo), Y = (v) => plotTop + (hi - v) * ky;
+
+    // ---- gap bands, grid ----
+    ctx.fillStyle = th.gap;
+    for (let i = 0; i < this.nb; i += 2) { const a = this.bands[i], b = this.bands[i + 1]; ctx.fillRect(a, plotTop, Math.max(1.5, b - a), ph); }
+    this.drawGrid(t0, t1, pxs, lo, hi, ky, plotTop, plotBot, showTimeLabels);
+
+    // ---- markers behind the trace ----
+    if (this.key === "ecg") this.drawRMarks(t0, t1, pxs, plotTop, plotBot, true);
+    if (this.key === "ppg") { this.drawRMarks(t0, t1, pxs, plotTop, plotBot, false); }
+
+    // ---- trace ----
+    if (any) {
+      const norm = new Path2D(), dim = new Path2D();
+      let have = false, px = 0, py = 0, prev = null;
+      for (let col = 0; col < W; col++) {
+        const n = cN[col]; if (!n) continue;
+        const p = this.cDim[col] ? dim : norm;
+        const yF = Y(this.cFirst[col]), yL = Y(this.cLast[col]);
+        const connect = have && !this.cGap[col];
+        if (!connect) p.moveTo(n === 1 ? this.cX[col] : col + 0.5, yF);
+        else if (p !== prev) p.moveTo(px, py);
+        if (n === 1) { p.lineTo(this.cX[col], yF); if (!connect) p.lineTo(this.cX[col] + 0.75, yF); px = this.cX[col]; }
+        else { const cx = col + 0.5; p.lineTo(cx, yF); p.lineTo(cx, Y(this.cMin[col])); p.lineTo(cx, Y(this.cMax[col])); p.lineTo(cx, yL); px = cx; }
+        py = yL; have = true; prev = p;
+      }
+      ctx.save();
+      ctx.beginPath(); ctx.rect(0, plotTop - 2, W, ph + 4); ctx.clip();
+      ctx.lineJoin = "round"; ctx.lineWidth = 1.35; ctx.strokeStyle = th[src.color];
+      ctx.globalAlpha = 1; ctx.stroke(norm);
+      ctx.globalAlpha = 0.3; ctx.stroke(dim);
+      ctx.restore(); ctx.globalAlpha = 1;
+    } else {
+      ctx.fillStyle = th.faint; ctx.font = "12px system-ui, sans-serif"; ctx.textAlign = "center"; ctx.textBaseline = "middle";
+      ctx.fillText(ring.empty ? (this.key === "ecg" ? "No ECG data" : "No PPG data") : "No data in this window", W / 2, plotTop + ph / 2);
+    }
+    if (this.key === "ppg") this.drawFeet(t0, t1, pxs, Y);
+
+    // header value text (changes rarely; avoid DOM writes per frame)
+    let txt = "";
+    if (this.key === "ecg") {
+      const f = S.ecgFlags;
+      txt = f < 0 ? "" : `${C.ecgGain(f)}x` + (f & C.ECG_F.LEAD_OFF ? "  lead off" : f & C.ECG_F.SETTLING ? "  settling" : "");
+    } else if (this.key === "ppg") {
+      txt = S.ppgLed < 0 ? "" : `LED ${(S.ppgLed * C.LED_UA_PER_CODE / 1000).toFixed(2)} mA` + (S.ppgFlags & C.PPG_F.NO_FINGER ? "  no finger" : "") + (S.ppgFiltMode === "raw" ? "  raw" : "");
+    } else if (isFinite(lastV)) txt = `${lastV.toFixed(0)} nA`;
+    if (this.gridTxt) txt += (txt ? "  |  " : "") + this.gridTxt;
+    if (txt !== this.lastVal) { this.valEl.textContent = txt; this.lastVal = txt; }
+  }
+
+  drawGrid(t0, t1, pxs, lo, hi, ky, top, bot, labels) {
+    const ctx = this.ctx, th = View.theme, W = this.w, ecg = this.key === "ecg";
+    // time: ECG paper style 0.2 s / 0.04 s, coarser when dense
+    const majors = [0.2, 1, 2, 5, 10, 30, 60];
+    let tMaj = majors.find((m) => m * pxs >= 14) || 60;
+    const tMin = tMaj === 0.2 ? 0.04 : tMaj / 5;
+    const labStep = [1, 5, 10, 25, 50, 100].map((m) => m * tMaj).find((s) => s * pxs >= 64) || tMaj * 100;
+    // amplitude
+    let aMaj, aMin;
+    if (ecg) {
+      aMaj = [500, 1000, 2000, 5000, 10000, 20000, 50000].find((m) => m * ky >= 26) || 50000; aMin = aMaj / 5;
+      this.gridTxt = `grid ${aMaj >= 1000 ? (aMaj / 1000) + " mV" : (aMaj / 1000).toFixed(1) + " mV"} / ${tMaj} s`;
+    } else {
+      aMaj = niceStep((hi - lo) / Math.max(2, (bot - top) / 34)); aMin = 0;
+      this.gridTxt = `grid ${fmtNum(aMaj)} nA`;
+    }
+    const line = (color, w, xs, ys, xe, ye) => { ctx.strokeStyle = color; ctx.lineWidth = w; ctx.beginPath(); ctx.moveTo(xs, ys); ctx.lineTo(xe, ye); ctx.stroke(); };
+    ctx.save();
+    if (ecg && tMin * pxs >= 5) for (let t = Math.ceil(t0 / tMin) * tMin; t <= t1; t += tMin) { const x = Math.round((t - t0) * pxs) + 0.5; line(th.minor, 1, x, top, x, bot); }
+    if (ecg && aMin * ky >= 5) for (let a = Math.ceil(lo / aMin) * aMin; a <= hi; a += aMin) { const y = Math.round(top + (hi - a) * ky) + 0.5; line(th.minor, 1, 0, y, W, y); }
+    const majC = ecg ? th.major : th.plain;
+    for (let t = Math.ceil(t0 / tMaj - 1e-9) * tMaj; t <= t1; t += tMaj) { const x = Math.round((t - t0) * pxs) + 0.5; line(majC, 1, x, top, x, bot); }
+    for (let a = Math.ceil(lo / aMaj) * aMaj; a <= hi; a += aMaj) { const y = Math.round(top + (hi - a) * ky) + 0.5; line(majC, 1, 0, y, W, y); }
+    // labels
+    ctx.font = `11px ${th.mono || "monospace"}`; ctx.fillStyle = th.axis; ctx.textBaseline = "middle"; ctx.textAlign = "left";
+    for (let a = Math.ceil(lo / aMaj) * aMaj; a <= hi; a += aMaj) {
+      const y = top + (hi - a) * ky; if (y < top + 8 || y > bot - 6) continue;
+      const s = Math.abs(a) < aMaj * 1e-6 ? (ecg ? "0 mV" : "0") : ecg ? `${fmtNum(a / 1000)} mV` : fmtNum(a);
+      const tw = ctx.measureText(s).width;
+      ctx.globalAlpha = 0.75; ctx.fillStyle = th.bg; ctx.fillRect(2, y - 14, tw + 4, 13); ctx.globalAlpha = 1;
+      ctx.fillStyle = th.axis; ctx.fillText(s, 4, y - 7);
+    }
+    if (labels) {
+      ctx.textBaseline = "alphabetic"; ctx.textAlign = "center";
+      for (let t = Math.ceil(t0 / labStep - 1e-9) * labStep; t <= t1 + 1e-9; t += labStep) {
+        const x = (t - t0) * pxs; if (x < 18 || x > W - 18) continue;
+        ctx.fillText(fmtTime(t, labStep), x, this.h - 3);
+      }
+    }
+    ctx.restore();
+  }
+
+  drawRMarks(t0, t1, pxs, top, bot, onEcg) {
+    const ctx = this.ctx, th = View.theme, showHr = onEcg && pxs > 45;
+    ctx.save();
+    ctx.fillStyle = th.ecg; ctx.strokeStyle = th.ecg;
+    ctx.font = `10px ${th.mono || "monospace"}`; ctx.textAlign = "left"; ctx.textBaseline = "top";
+    S.rMarks.each(t0, t1, (t, hr) => {
+      const x = (t - t0) * pxs;
+      ctx.globalAlpha = onEcg ? 0.28 : 0.22; ctx.lineWidth = 1;
+      ctx.setLineDash([3, 3]); ctx.beginPath(); ctx.moveTo(x + 0.5, top + 1); ctx.lineTo(x + 0.5, bot); ctx.stroke(); ctx.setLineDash([]);
+      ctx.globalAlpha = onEcg ? 0.95 : 0.6;
+      ctx.beginPath(); ctx.moveTo(x - 4, top - 6); ctx.lineTo(x + 4, top - 6); ctx.lineTo(x, top); ctx.closePath(); ctx.fill();
+      if (showHr) { ctx.globalAlpha = 0.85; ctx.fillStyle = th.axis; ctx.fillText(String(hr | 0), x + 5, top - 8); ctx.fillStyle = th.ecg; }
+    });
+    ctx.restore();
+  }
+  drawFeet(t0, t1, pxs, Y) {
+    const ctx = this.ctx, th = View.theme, r = S.ppg;
+    ctx.save(); ctx.lineWidth = 1.5; ctx.strokeStyle = th.marker; ctx.fillStyle = th.bg;
+    S.pMarks.each(t0, t1, (t) => {
+      const k = Math.round(C.ppgIndexAt(t));
+      if (!r.has(k)) return;
+      const x = (C.ppgTime(k) - t0) * pxs, y = Y(r.disp[k & r.mask]);
+      ctx.beginPath(); ctx.arc(x, y, 3.5, 0, 2 * Math.PI); ctx.fill(); ctx.stroke();
+    });
+    ctx.restore();
+  }
+}
+
+function niceStep(x) {
+  if (!(x > 0) || !isFinite(x)) return 1;
+  const p = Math.pow(10, Math.floor(Math.log10(x))), m = x / p;
+  return (m <= 1 ? 1 : m <= 2 ? 2 : m <= 5 ? 5 : 10) * p;
+}
+function fmtNum(v) {
+  const a = Math.abs(v);
+  if (a === 0) return "0";
+  if (a >= 1000) return v.toFixed(0);
+  if (a >= 10) return v.toFixed(a % 1 ? 1 : 0);
+  if (a >= 1) return v.toFixed(a % 1 ? 1 : 0).replace(/\.0$/, "");
+  return v.toPrecision(2).replace(/0+$/, "");
+}
+function fmtTime(t, step) {
+  const d = step < 1 ? 1 : 0;
+  if (Math.abs(t) >= 600) { const m = Math.floor(t / 60), s = t - 60 * m; return `${m}:${s.toFixed(d).padStart(d ? 4 : 2, "0")}`; }
+  return `${t.toFixed(d)} s`;
+}
+
+const strips = [];
+function visibleStrips() { return strips.filter((s) => !s.el.hidden); }
+/** Range of times the buffers can show (for scroll-back). */
+function dataExtent() {
+  let a = Infinity, b = -Infinity;
+  if (!S.ecg.empty) { a = Math.min(a, C.ecgTime(S.ecg.oldest())); b = Math.max(b, C.ecgTime(S.ecg.hi - 1)); }
+  if (!S.ppg.empty) { a = Math.min(a, C.ppgTime(S.ppg.oldest())); b = Math.max(b, C.ppgTime(S.ppg.hi - 1)); }
+  return [a, b];
+}
+function clampRight(t) {
+  const [a, b] = dataExtent();
+  if (!isFinite(a)) return t;
+  return Math.min(Math.max(t, a + View.win * 0.25), b + 0.05);
+}
+
+function frame(now) {
+  requestAnimationFrame(frame);
+  const dt = View.lastNow ? Math.min(0.25, (now - View.lastNow) / 1000) : 0;
+  View.lastNow = now;
+  // display clock: runs at the browser rate, trails the newest data by ~60 ms, never shows the future
+  const L = S.latestT;
+  if (isFinite(L)) {
+    if (!isFinite(View.dispT) || Math.abs(L - View.dispT) > 1.0) View.dispT = L - 0.06;
+    else { View.dispT += dt; View.dispT += (L - 0.06 - View.dispT) * 0.08; if (View.dispT > L) View.dispT = L; }
+  }
+  let tR = View.live ? View.dispT : View.tRight;
+  if (!isFinite(tR)) tR = View.win;
+  const t0 = tR - View.win, vs = visibleStrips();
+  for (let i = 0; i < vs.length; i++) vs[i].draw(t0, tR, i === vs.length - 1);
+}
+
+// ==== UI: DOM wiring ====
+const $ = (id) => document.getElementById(id);
+const PAGE_VERSION = "1.0";
+const params = new URLSearchParams(location.search);
+const App = { tr: null, conn: "idle", connDetail: "", connectedAt: 0, everConnected: false, btProblem: null, reconnects: 0 };
+
+function setText(el, s) { if (el.textContent !== s) el.textContent = s; }
+function clock(ms) { const d = new Date(ms); return d.toTimeString().slice(0, 8) + "." + String(d.getMilliseconds()).padStart(3, "0"); }
+function ago(ms) { if (!ms) return "never"; const s = (performance.now() - ms) / 1000; return s < 1 ? `${Math.round(s * 1000)} ms` : s < 120 ? `${s.toFixed(1)} s` : `${(s / 60).toFixed(1)} min`; }
+function bytes(n) { return n < 1024 ? `${n} B` : n < 1048576 ? `${(n / 1024).toFixed(1)} kB` : `${(n / 1048576).toFixed(2)} MB`; }
+
+// ---- theme ----
+function applyTheme(v) {
+  if (v === "light" || v === "dark") document.documentElement.dataset.theme = v; else delete document.documentElement.dataset.theme;
+  $("selTheme").value = v === "light" || v === "dark" ? v : "auto";
+  readTheme();
+}
+$("selTheme").addEventListener("change", (e) => { applyTheme(e.target.value); try { localStorage.setItem("ecgcard.theme", e.target.value); } catch (_) {} });
+matchMedia("(prefers-color-scheme: dark)").addEventListener("change", readTheme);
+
+// ---- connection state ----
+function setConn(state, detail) {
+  App.conn = state; App.connDetail = detail || "";
+  const pill = $("connPill"), demo = App.tr && App.tr.kind === "demo";
+  const label = { idle: "Disconnected", connecting: "Connecting", connected: demo ? "Demo" : "Connected", disconnected: "Disconnected", lost: "Connection lost" }[state];
+  pill.textContent = label + (state === "connecting" && detail ? `: ${detail}` : "");
+  pill.className = "pill " + ({ connected: "connected", connecting: "busy", lost: "lost" }[state] || "");
+  setText($("devName"), App.tr ? App.tr.name + (demo ? " (simulated)" : "") : "");
+  updateButtons();
+}
+function updateButtons() {
+  const c = App.conn, connected = c === "connected", busy = c === "connecting";
+  $("btnConnect").disabled = busy || connected || !!App.btProblem;
+  $("btnReconnect").disabled = busy || connected || !App.tr || !App.everConnected;
+  $("btnDisconnect").disabled = !connected && !busy;
+  $("btnDemo").disabled = busy || (connected && App.tr && App.tr.kind === "demo");
+  document.querySelectorAll("#cardCtl button, #setGrid select").forEach((b) => { b.disabled = !connected; });
+  applySessionLocks();
+}
+/** During a session (LINK_STATUS.mode != 0) the card answers START and SET gain/notch/RLD/LED
+ *  limit with BUSY, so those controls are disabled with an explanation. */
+function applySessionLocks() {
+  const connected = App.conn === "connected", ses = connected && !!S.status && S.status.mode !== 0;
+  document.querySelectorAll('#cardCtl [data-cmd^="start"]').forEach((b) => {
+    b.disabled = !connected || ses;
+    b.title = ses ? "A measurement is running: the card answers START with BUSY. Stop first." : "";
+  });
+  C.SETTINGS.forEach((it, i) => {
+    const sel = setSelects[i]; if (!sel) return;
+    sel.disabled = !connected || (it.lockedInSession && ses);
+    sel.title = it.lockedInSession && ses ? "Locked during a measurement (the card answers BUSY); applied at the next start. Stop first to change it." : "";
+  });
+  setText($("sesHint"), ses ? `Measurement running (${C.MODE_NAME[S.status.mode]}): Start and gain / notch / RLD / LED limit are refused with BUSY until Stop.` : "");
+  $("btnRetry").disabled = !connected || !Cmd.lastLost;
+}
+const handlers = {
+  notify: onNotify,
+  log: (cat, msg) => Log.add(cat, msg),
+  state: (s, d) => setConn(s, d),
+  info: (o) => { S.devInfo = o; },
+  disconnected: (byUser, tr) => {
+    if (tr !== App.tr || App.conn === "disconnected" || App.conn === "lost") return;
+    Cmd.transport = null; Cmd.abortAll("disconnected");
+    if (Recorder.on) Recorder.note(byUser ? "disconnected (by user)" : "disconnected (link lost)");
+    const bleOff = performance.now() - (App.bleOffAt || -1e9) < 10000;
+    Log.add(byUser ? "conn" : "error", byUser ? "Disconnected" : bleOff
+      ? "Disconnected: Bluetooth was turned off on the card. Turn it back on in the card's Settings screen, then Reconnect."
+      : "Connection lost (gattserverdisconnected). Use Reconnect.");
+    setConn(byUser ? "disconnected" : "lost");
+  },
+};
+async function connectWith(tr) {
+  App.tr = tr; setConn("connecting", "");
+  try {
+    await tr.connect();
+    App.everConnected = true; App.connectedAt = performance.now();
+    Cmd.transport = tr;
+    S.resumeEcg = !S.ecg.empty; S.resumePpg = !S.ppg.empty;
+    Cmd.lastLost = null;
+    const bleSel = setSelects[C.SET_ITEM_BLE]; if (bleSel) { bleSel.value = "1"; delete bleSel.dataset.pending; }
+    Log.add("conn", `Connected to ${tr.name}${tr.kind === "demo" ? " (simulator)" : ""}; services: ${tr.services.join(", ") || "?"}`);
+    if (Recorder.on) Recorder.note("connected " + tr.name);
+    setConn("connected");
+  } catch (e) {
+    Log.add("error", `Connect failed: ${e && e.name}: ${e && e.message}`);
+    try { if (tr.connected) tr.disconnect(); } catch (_) {}
+    setConn("lost", "");
+  }
+}
+$("btnConnect").addEventListener("click", async () => {
+  if (App.tr && App.tr.kind === "demo") { App.tr.destroy(); App.tr = null; }
+  const tr = App.tr && App.tr.kind === "ble" ? App.tr : new BleTransport(handlers);
+  try { await tr.pick(); }
+  catch (e) {
+    if (e && e.name === "NotFoundError" && /cancel/i.test(e.message)) Log.add("conn", "Device chooser cancelled");
+    else Log.add("error", `requestDevice: ${e && e.name}: ${e && e.message}`);
+    return;
+  }
+  App.reconnects = 0;
+  await connectWith(tr);
+});
+$("btnReconnect").addEventListener("click", () => { if (App.tr) { App.reconnects++; connectWith(App.tr); } });
+$("btnDisconnect").addEventListener("click", () => { if (App.tr) App.tr.disconnect(); });
+$("btnDemo").addEventListener("click", () => startDemo());
+function startDemo() {
+  if (App.tr) { try { App.tr.destroy(); } catch (_) {} }
+  App.conn = "idle";
+  connectWith(new DemoTransport(handlers));
+}
+
+// ---- controls ----
+function sinkFor(el, label) {
+  return (text, cls) => { el.textContent = label ? `${label}: ${text}` : text; el.className = "res " + (cls || ""); el.title = text; };
+}
+function shortSink(el) {
+  return (text, cls) => {
+    const t = /^(sending|writing|written)/.test(text) ? "..." : text.replace(/ - .*? \(/, " (").replace(/^no result after.*/, "timeout");
+    el.textContent = t; el.className = "res " + (cls || ""); el.title = text;
+  };
+}
+document.querySelectorAll("#cardCtl [data-cmd]").forEach((b) => b.addEventListener("click", async () => {
+  const k = b.dataset.cmd, run = sinkFor($("resRun"), b.textContent), misc = sinkFor($("resMisc"), b.textContent);
+  if (k.startsWith("start")) Cmd.send(C.cmdStart(+k.slice(5)), b.textContent, run);
+  else if (k === "stop") Cmd.send(C.cmdStop(), "Stop", run);
+  else if (k === "time") {
+    const [s, off] = C.nowSetTimeArgs(new Date()), why = C.setTimeProblem(s, off);
+    if (why) { misc(`not sent: ${why}`, "err"); return; }
+    Cmd.send(C.cmdSetTime(s, off), "Set time", sinkFor($("resMisc"), `Set time ${s} (UTC${off >= 0 ? "+" : "-"}${String(Math.floor(Math.abs(off) / 60)).padStart(2, "0")}:${String(Math.abs(off) % 60).padStart(2, "0")})`)); }
+  else if (k === "getstatus") Cmd.send(C.cmdGetStatus(), "Get status", misc);
+  else if (k === "readstatus") {
+    misc("reading", "");
+    try { await App.tr.readStatus(); misc("OK (value in Status)", "ok"); } catch (e) { misc(`failed: ${e.message}`, "err"); }
+  }
+}));
+const setSelects = [];
+(function buildSettings() {
+  const g = $("setGrid");
+  for (const it of C.SETTINGS) {
+    const lab = document.createElement("label"), sel = document.createElement("select"), res = document.createElement("span");
+    lab.textContent = it.label; lab.htmlFor = sel.id = "set_" + it.key; res.className = "res";
+    it.options.forEach((o, i) => sel.add(new Option(o, String(i))));
+    sel.value = ""; sel.selectedIndex = -1;
+    sel.addEventListener("change", () => {
+      if (it.item === C.SET_ITEM_BLE && +sel.value === C.BLE_OFF &&
+          !confirm("Turn Bluetooth off on the card?\n\nThis page will be disconnected, and Bluetooth can only be turned back on from the card's own Settings screen.")) { sel.value = "1"; return; }
+      if (it.item === C.SET_ITEM_BLE && +sel.value === C.BLE_OFF) App.bleOffAt = performance.now();
+      sel.dataset.pending = "1"; const sink = shortSink(res);
+      Cmd.send(C.cmdSet(it.item, +sel.value), `Set ${it.key}`, (t, c) => { sink(t, c); if (c) delete sel.dataset.pending; }); });
+    g.append(lab, sel, res); setSelects.push(sel);
+  }
+})();
+hooks.onStatus = (s) => {
+  // LINK_STATUS has no Bluetooth field: while connected it is necessarily on
+  const vals = [s.gain, s.notch, s.rld, s.ledLimit, s.sweep, 1];
+  setSelects.forEach((sel, i) => { if (!sel.dataset.pending && document.activeElement !== sel && String(vals[i]) !== sel.value) sel.value = String(vals[i]); });
+  applySessionLocks();
+};
+Cmd.onChange = () => { setText($("queueInfo"), Cmd.cur || Cmd.q.length ? `in flight ${Cmd.cur ? 1 : 0}, queued ${Cmd.q.length}` : ""); applySessionLocks(); };
+$("btnRetry").addEventListener("click", () => { const c = Cmd.lastLost; Cmd.lastLost = null; if (c) Cmd.send(c.bytes, c.label + " (retry)", c.sink); applySessionLocks(); });
+
+// ---- plot controls ----
+document.querySelectorAll("#segWindow button").forEach((b) => b.addEventListener("click", () => {
+  View.win = +b.dataset.w;
+  document.querySelectorAll("#segWindow button").forEach((x) => x.classList.toggle("on", x === b));
+  if (!View.live) View.tRight = clampRight(View.tRight);
+}));
+function setLive(live) {
+  if (!live && View.live) View.tRight = isFinite(View.dispT) ? View.dispT : View.win;
+  View.live = live;
+  $("btnPause").textContent = live ? "Pause" : "Live";
+  $("btnPause").classList.toggle("on", !live);
+  $("history").disabled = live;
+  if (live) $("history").value = 1000;
+}
+$("btnPause").addEventListener("click", () => setLive(!View.live));
+$("history").addEventListener("input", (e) => {
+  const [a, b] = dataExtent(); if (!isFinite(a)) return;
+  const lo = a + View.win * 0.25, hi = b + 0.05;
+  View.tRight = lo + (Math.max(hi, lo) - lo) * (+e.target.value / 1000);
+});
+function pan(dt) { if (View.live) setLive(false); View.tRight = clampRight(View.tRight + dt); }
+(function plotPointer() {
+  const area = $("strips");
+  let drag = null;
+  area.addEventListener("pointerdown", (e) => { if (e.target.tagName !== "CANVAS") return; drag = { x: e.clientX, t: View.live ? View.dispT : View.tRight, w: e.target.clientWidth, moved: false }; e.target.setPointerCapture(e.pointerId); });
+  area.addEventListener("pointermove", (e) => {
+    if (!drag) return;
+    const dx = e.clientX - drag.x;
+    if (!drag.moved && Math.abs(dx) < 4) return;
+    drag.moved = true; if (View.live) setLive(false);
+    View.tRight = clampRight(drag.t - dx / drag.w * View.win);
+  });
+  const end = () => { drag = null; };
+  area.addEventListener("pointerup", end); area.addEventListener("pointercancel", end);
+  area.addEventListener("wheel", (e) => {
+    const d = Math.abs(e.deltaX) > Math.abs(e.deltaY) ? e.deltaX : e.deltaY;
+    if (!d) return;
+    e.preventDefault();
+    pan(d / Math.max(200, area.clientWidth) * View.win * 0.6);
+  }, { passive: false });
+  area.addEventListener("keydown", (e) => {
+    if (e.key === " ") { e.preventDefault(); setLive(!View.live); }
+    else if (e.key === "ArrowLeft") { e.preventDefault(); pan(-View.win / 10); }
+    else if (e.key === "ArrowRight") { e.preventDefault(); pan(View.win / 10); }
+    else if (e.key === "End") setLive(true);
+  });
+})();
+$("selEcgFilt").addEventListener("change", (e) => { S.ecgFilt.configure(e.target.value, S.ecgFilt.notchHz); refilterEcg(); strips[0].resetScale = true; });
+$("selPpgFilt").addEventListener("change", (e) => { S.ppgFiltMode = e.target.value; refilterPpg(); strips[1].resetScale = true; });
+$("chkCoarse").addEventListener("change", (e) => { $("stripCoarse").hidden = !e.target.checked; });
+hooks.onRun = () => { View.dispT = NaN; strips.forEach((s) => { s.resetScale = true; }); };
+
+// ---- recording ----
+$("btnRec").addEventListener("click", () => {
+  if (Recorder.on) { Recorder.stop(); Log.add("info", `Recording stopped: ${Recorder.records} records, ${bytes(Recorder.bytes)}`); }
+  else {
+    if (Recorder.has() && !confirm("Discard the previous recording and start a new one?")) return;
+    const tr = App.tr;
+    Recorder.start({ device: { name: tr ? tr.name : null, id: tr && tr.device ? tr.device.id : null, demo: !!(tr && tr.kind === "demo") },
+      device_info: S.devInfo, status_hex: S.statusRaw, page_version: PAGE_VERSION });
+    Log.add("info", "Recording started");
+  }
+  updateRec();
+});
+$("btnRecClear").addEventListener("click", () => { if (confirm("Discard the recording?")) { Recorder.clear(); updateRec(); } });
+$("btnCap").addEventListener("click", () => {
+  const hdr = C.encodeCaptureHeader(Object.assign({}, Recorder.header, { saved_utc: new Date().toISOString(), records: Recorder.records }));
+  download(baseName() + ".ecgcap", [hdr, ...Recorder.parts()], "application/octet-stream");
+  sinkFor($("resRec"))(`saved ${baseName()}.ecgcap (${bytes(Recorder.bytes + hdr.length)})`, "ok");
+});
+$("btnCsv").addEventListener("click", () => {
+  const t = performance.now(), r = exportCsv();
+  const b = baseName();
+  download(b + ".ecg.csv", r.ecg, "text/csv"); download(b + ".ppg.csv", r.ppg, "text/csv"); download(b + ".events.csv", r.ev, "text/csv");
+  sinkFor($("resRec"))(`CSV: ${r.nE} ECG rows, ${r.nP} PPG rows, ${r.nV} events (${Math.round(performance.now() - t)} ms)`, "ok");
+});
+function baseName() {
+  const d = new Date(Recorder.t0Unix || Date.now()), p = (n) => String(n).padStart(2, "0");
+  return `ecgcard_${d.getFullYear()}${p(d.getMonth() + 1)}${p(d.getDate())}_${p(d.getHours())}${p(d.getMinutes())}${p(d.getSeconds())}`;
+}
+function download(name, parts, type) {
+  const url = URL.createObjectURL(new Blob(parts, { type }));
+  const a = document.createElement("a"); a.href = url; a.download = name;
+  document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 60000);
+}
+/** Re-decodes the recorded payloads into CSV (arrival order). */
+function exportCsv() {
+  const out = { ecg: ["index,time_s,uv,flags,gain_hi,settling,lead_off,run\n"], ppg: ["frame,time_s,coarse,fine,fine_raw,led_code,flags,disturbed,no_finger,run\n"],
+    ev: ["rx_s,time_s,kind,fields\n"], nE: 0, nP: 0, nV: 0 };
+  const ce = new C.Continuity(C.ECG_HZ * 2), cp = new C.Continuity(C.PPG_HZ * 2), uw = new C.Unwrap16();
+  const be = C.newEcgBlock(), bp = C.newPpgBlock(), ev = C.newEvent();
+  let runE = 0, runP = 0, now = 0, rows = [];
+  const flush = (arr) => { if (rows.length) { arr.push(rows.join("")); rows = []; } };
+  const q = (s) => '"' + s.replace(/"/g, '""') + '"';
+  Recorder.each((ch, tMs, p) => {
+    const dv = new DataView(p.buffer, p.byteOffset, p.byteLength);
+    if (ch === C.CHAR.ECG && !C.parseEcg(dv, be)) {
+      if (ce.push(be.start, 10) === C.CONT.NEWRUN) runE++;
+      const k = C.ecgUvPerUnit(be.flags), f = be.flags;
+      for (let i = 0; i < 10; i++) { const u = ce.uStart + i; rows.push(`${u},${C.ecgTime(u).toFixed(4)},${(be.s[i] * k).toFixed(2)},${f},${f & 1},${(f >> 1) & 1},${(f >> 2) & 1},${runE}\n`); }
+      out.nE += 10; now = Math.max(now, C.ecgTime(ce.uStart + 10));
+      if (rows.length > 20000) flush(out.ecg);
+    }
+  });
+  flush(out.ecg);
+  Recorder.each((ch, tMs, p) => {
+    const dv = new DataView(p.buffer, p.byteOffset, p.byteLength);
+    if (ch === C.CHAR.PPG && !C.parsePpg(dv, bp)) {
+      const kind = cp.push(bp.start, 2);
+      if (kind === C.CONT.NEWRUN) { runP++; uw.reset(); }
+      for (let j = 0; j < 2; j++) {
+        const u = cp.uStart + j, fu = uw.push(bp.fine[j]), fl = ((bp.flags >> j) & 1) | (bp.flags & 4);
+        rows.push(`${u},${C.ppgTime(u).toFixed(5)},${bp.coarse[j]},${fu},${bp.fine[j]},${bp.led},${bp.flags},${fl & 1},${(fl >> 2) & 1},${runP}\n`);
+      }
+      out.nP += 2;
+      if (rows.length > 20000) flush(out.ppg);
+    }
+  });
+  flush(out.ppg);
+  const ce2 = new C.Continuity(C.ECG_HZ * 2), cp2 = new C.Continuity(C.PPG_HZ * 2);
+  now = 0;
+  Recorder.each((ch, tMs, p) => {
+    const dv = new DataView(p.buffer, p.byteOffset, p.byteLength);
+    if (ch === C.CHAR.ECG && !C.parseEcg(dv, be)) { ce2.push(be.start, 10); now = C.ecgTime(ce2.uNext - 1); return; }
+    if (ch === C.CHAR.PPG && !C.parsePpg(dv, bp)) { cp2.push(bp.start, 2); now = C.ppgTime(cp2.uNext - 1); return; }
+    let kind, fields, tt = now.toFixed(4);
+    if (ch === C.CHAR.EVENTS) {
+      if (C.parseEvent(dv, ev)) { kind = "malformed"; fields = { hex: C.hex(dv) }; }
+      else if (!ev.known) { kind = "unknown_0x" + ev.kind.toString(16); fields = { hex: C.hex(dv) }; }
+      else { kind = C.EV_NAME[ev.kind]; fields = C.eventFields(ev); if (ev.kind === C.EV.R_PEAK || ev.kind === C.EV.PULSE) tt = C.ecgTime(ev.index).toFixed(4); }
+    } else if (ch === C.CHAR.STATUS) { const s = C.parseStatus(dv); kind = "status"; fields = s.err ? { hex: C.hex(dv) } : s; delete fields.err; }
+    else if (ch === C.CHAR.CONTROL) { kind = "control_write"; fields = { text: C.describeCommand(p), hex: C.hex(dv) }; }
+    else if (ch === C.CHAR.HRM) { const h = C.parseHrm(dv); kind = "hrm_2a37"; fields = h.err ? { hex: C.hex(dv) } : { bpm: h.bpm, flags: h.flags }; }
+    else if (ch === C.CHAR.BATTERY) { kind = "battery_2a19"; fields = { pct: p[0] }; }
+    else if (ch === C.CHAR.NOTE) { kind = "note"; fields = { text: new TextDecoder().decode(p) }; tt = ""; }
+    else return;
+    rows.push(`${(tMs / 1000).toFixed(4)},${tt},${kind},${q(JSON.stringify(fields))}\n`); out.nV++;
+  });
+  flush(out.ev);
+  return out;
+}
+function updateRec() {
+  const r = Recorder;
+  setText($("recInfo"), r.on ? `REC ${r.durationS().toFixed(1)} s, ${bytes(r.bytes)}` : r.has() ? `${r.durationS().toFixed(1)} s, ${bytes(r.bytes)}` : "idle");
+  $("recInfo").className = "right mono " + (r.on ? "err" : "");
+  $("btnRec").textContent = r.on ? "Stop recording" : "Record";
+  $("btnRec").classList.toggle("on", r.on);
+  $("btnCsv").disabled = $("btnCap").disabled = !r.has() || r.on;
+  $("btnRecClear").disabled = !r.has() || r.on;
+}
+
+// ---- numbers and device panel (4 Hz) ----
+function bn(id, v, unit, stale) {
+  const el = $(id), vEl = el.querySelector(".v"), s = v === null || v === undefined || v === "" ? "--" : String(v);
+  const html = s + (unit && s !== "--" ? `<small>${unit}</small>` : "");
+  if (vEl.innerHTML !== html) vEl.innerHTML = html;
+  el.classList.toggle("stale", !!stale);
+}
+function updateNumbers() {
+  const now = performance.now(), st = S.status;
+  bn("bnHrEv", S.lastR ? S.lastR.hr : null, "bpm", now - S.lastRRx > 5000);
+  bn("bnHrSvc", S.hrSvc ? S.hrSvc.bpm : null, "bpm", now - S.hrSvcRx > 5000);
+  bn("bnHrSt", st && st.hrBpm ? st.hrBpm : null, "bpm", now - S.statusRx > 11000);
+  const p = S.lastPulse, ps = now - S.lastPulseRx > 5000;
+  bn("bnPulse", p ? p.pulse : null, "bpm", ps);
+  bn("bnPat", p ? (p.pat ? p.pat : "n/a") : null, "", ps);
+  bn("bnPi", p ? (p.pi / 10).toFixed(1) : null, "", ps);
+  setText($("numAge"), st ? `status ${ago(S.statusRx)} ago` : "");
+  if (st) {
+    setText($("kvMode"), `${C.MODE_NAME[st.mode] ?? st.mode} / ${C.MEAS_NAME[st.meas] ?? st.meas}`);
+    setText($("kvBatt"), `${st.battPct === 255 ? "?" : st.battPct + " %"}${st.battMv ? ", " + (st.battMv / 1000).toFixed(2) + " V" : ""}` + (S.batterySvc !== null ? `; 2A19 ${S.batterySvc} %` : ""));
+    const inUse = S.ecgFlags >= 0 ? C.ecgGain(S.ecgFlags) : st.flags & C.ST.GAIN_HI ? C.GAIN_HI : C.GAIN_LO;
+    setText($("kvGain"), `${C.settingText(0, st.gain)}, in use ${inUse}x`);
+    setText($("kvNotch"), `${C.settingText(1, st.notch)}, in use ${st.notchHz} Hz`);
+    setText($("kvMisc"), `${C.settingText(2, st.rld)} / ${C.settingText(3, st.ledLimit)} / ${C.settingText(4, st.sweep)}`);
+  } else if (S.batterySvc !== null) setText($("kvBatt"), `2A19: ${S.batterySvc} %`);
+  setText($("kvLed"), S.ppgLed >= 0 ? `code ${S.ppgLed} = ${(S.ppgLed * C.LED_UA_PER_CODE / 1000).toFixed(2)} mA` : "--");
+  const f = st ? st.flags : 0, chips = [
+    ["USB", f & C.ST.USB, ""], ["charging", f & C.ST.CHARGING, ""], ["charge fault", f & C.ST.CHARGE_FAULT, "bad"],
+    ["no contact", f & C.ST.NO_CONTACT, "bad"], ["batt low", f & C.ST.BATT_LOW, "bad"], ["gain hi", f & C.ST.GAIN_HI, ""],
+    ["time valid", f & C.ST.TIME_VALID, "good"],
+    [S.lead === null ? "lead ?" : S.lead ? "lead on" : "lead off", S.lead !== null, S.lead ? "good" : "bad"],
+  ];
+  const html = chips.map(([n, on, cls]) => `<span class="chip ${on ? "on " + cls : ""}">${n}</span>`).join("");
+  if ($("chips").innerHTML !== html) $("chips").innerHTML = html;
+  const tr = App.tr, di = S.devInfo || {};
+  const rows = [
+    ["Name", tr ? tr.name : "--"], ["Transport", tr ? (tr.kind === "demo" ? "simulator" : "Web Bluetooth") : "--"],
+    ["Page device id", tr && tr.device ? tr.device.id || "--" : "--"],
+    ["Connected", App.conn === "connected" ? `${ago(App.connectedAt)}` + (App.reconnects ? `, ${App.reconnects} reconnects` : "") : App.conn],
+    ["Services", tr && tr.services.length ? tr.services.join(", ") : "--"],
+    ["Protocol", st ? `${st.proto}${st.proto !== C.PROTO_VERSION ? " (client: " + C.PROTO_VERSION + ")" : ""}` : "--"],
+    ["MCU fw (status)", st ? st.fw : "--"], ["DIS firmware", di.firmware || "--"], ["DIS software", di.software || "--"],
+    ["Manufacturer", di.manufacturer || "--"], ["Model", di.model || "--"], ["Serial", di.serial || "--"],
+    ["Name vs serial", nameCheck(tr ? tr.name : "", di.serial)],
+    ["Uptime", st ? `${st.uptimeMin} min` : "--"],
+    ["MTU / interval / PHY", "not visible to a web page"],
+  ];
+  const dh = rows.map(([k, v]) => `<dt>${k}</dt><dd>${escapeHtml(String(v))}</dd>`).join("");
+  if ($("kvDev").innerHTML !== dh) $("kvDev").innerHTML = dh;
+  updateRec();
+  // history slider
+  const [a, b] = dataExtent();
+  if (isFinite(a)) {
+    const lo = a + View.win * 0.25, hi = b + 0.05;
+    if (!View.live && document.activeElement !== $("history")) $("history").value = Math.round(1000 * (View.tRight - lo) / Math.max(1e-6, hi - lo));
+    setText($("histInfo"), (View.live ? "" : `${(View.tRight - b).toFixed(1)} s, `) + `buffer ${((b - a) / 60).toFixed(1)} min`);
+  } else setText($("histInfo"), "");
+}
+/** "ECG Card XXXX" uses address bytes [1],[0]: the last two bytes of the serial (BLE address). */
+function nameCheck(name, serial) {
+  const want = C.nameSuffixOfAddress(serial), m = /ECG Card ([0-9A-Fa-f]{4})$/.exec(name || "");
+  if (!want || !m) return "--";
+  return m[1].toUpperCase() === want ? `match (${want})` : `MISMATCH: name ${m[1]}, address ends ${want}`;
+}
+function escapeHtml(s) { return s.replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c])); }
+
+// ---- integrity panel (1 Hz) ----
+const CHAR_ROWS = [C.CHAR.ECG, C.CHAR.PPG, C.CHAR.EVENTS, C.CHAR.STATUS, C.CHAR.HRM, C.CHAR.BATTERY];
+function updateIntegrity() {
+  const now = performance.now();
+  const tb = $("tblChars").tBodies[0];
+  tb.innerHTML = CHAR_ROWS.map((id) => {
+    const c = S.chars[id];
+    return `<tr><td>${C.CHAR_NAME[id]}</td><td>${c.n}</td><td>${c.rate}</td><td>${c.bps}</td><td>${c.lastRx ? ago(c.lastRx) : "--"}</td><td class="${c.bad ? "bad" : ""}">${c.bad}</td></tr>`;
+  }).join("");
+  const e = S.ecgS, p = S.ppgS;
+  const rate = (r, exp) => (isFinite(r) ? r.toFixed(1) : "--");
+  const ppm = (r, exp) => (isFinite(r) ? `${r.toFixed(2)} (${((r / exp - 1) * 1e6).toFixed(0)} ppm)` : "--");
+  const rows = [
+    ["blocks", e.blocks, p.blocks], ["samples", e.samples, p.samples],
+    ["gaps", e.gaps, p.gaps, true], ["missing", e.missing, p.missing, true], ["duplicates", e.dups, p.dups, true],
+    ["out of order", e.late, p.late, true], ["new runs", e.runs, p.runs], ["reconnect gaps", `${e.resumeGaps} (${e.resumeMissing})`, `${p.resumeGaps} (${p.resumeMissing})`],
+    ["received/s, 10 s", rate(e.rate10), rate(p.rate10)], ["device clock, Hz", ppm(e.runRate, 500), ppm(p.runRate, 100)],
+    ["expected, Hz", "500", "100"],
+  ];
+  $("streamStats").innerHTML = `<div class="l"></div><div class="h">ECG</div><div class="h">PPG</div>` +
+    rows.map(([k, a, b, flag]) => `<div class="l">${k}</div><div class="${flag && a ? "bad" : ""}">${a}</div><div class="${flag && b ? "bad" : ""}">${b}</div>`).join("") +
+    `<div class="l">malformed / exc.</div><div class="${S.malformed ? "bad" : ""}">${S.malformed}</div><div class="${S.exceptions ? "bad" : ""}">${S.exceptions}</div>`;
+  const gl = GapList.entries;
+  setText($("gapCount"), `${e.gaps + p.gaps} gaps, ${e.dups + p.dups} dup`);
+  if (gl.length && gl[gl.length - 1].id !== updateIntegrity.lastGap || (!gl.length && updateIntegrity.lastGap)) {
+    updateIntegrity.lastGap = gl.length ? gl[gl.length - 1].id : 0;
+    $("gapList").innerHTML = gl.slice(-120).reverse().map((g) => `<li class="${g.kind === "bad" ? "error" : "integrity"}"><span class="t">${clock(g.wall)}</span> <span class="c">${g.stream} ${g.kind}</span> ${escapeHtml(g.text)}</li>`).join("") || "";
+  }
+  if (!gl.length && !$("gapList").firstChild) $("gapList").innerHTML = `<li class="empty">none</li>`;
+  const ce = S.chars[C.CHAR.ECG], cp = S.chars[C.CHAR.PPG];
+  setText($("sumLine"), `ECG ${ce.rate}/s ${rate(e.rate10)} Hz, gaps ${e.gaps}  |  PPG ${cp.rate}/s ${rate(p.rate10)} Hz, gaps ${p.gaps}  |  dup ${e.dups + p.dups}  bad ${S.malformed}  |  log ${Log.entries.length}`);
+}
+$("btnResetStats").addEventListener("click", () => { resetStats(); updateIntegrity.lastGap = -1; $("gapList").innerHTML = ""; updateIntegrity(); });
+
+// ---- event log view ----
+const LogView = {
+  on: new Set(LOG_CATS.map(([k]) => k).filter((k) => k !== "beat" && k !== "pulse")), text: "", pending: [], max: 400,
+  matches(e) { return this.on.has(e.cat) && (!this.text || e.msg.toLowerCase().includes(this.text)); },
+  row(e) {
+    const li = document.createElement("li"); li.className = e.cat;
+    li.innerHTML = `<span class="t">${clock(e.wall)}${e.devT !== null ? " " + e.devT.toFixed(2).padStart(7) + "s" : ""}</span> <span class="c">${e.cat}</span> <span class="m"></span>`;
+    li.lastChild.textContent = e.msg; return li;
+  },
+  rebuild() {
+    const list = $("logList"); list.textContent = "";
+    const sel = Log.entries.filter((e) => this.matches(e)).slice(-this.max).reverse();
+    const fr = document.createDocumentFragment(); sel.forEach((e) => fr.appendChild(this.row(e))); list.appendChild(fr);
+    this.pending.length = 0;
+  },
+  flush() {
+    if (!this.pending.length) return;
+    const list = $("logList"), fr = document.createDocumentFragment();
+    for (let i = this.pending.length - 1; i >= 0; i--) fr.appendChild(this.row(this.pending[i]));
+    list.insertBefore(fr, list.firstChild);
+    while (list.childNodes.length > this.max) list.removeChild(list.lastChild);
+    this.pending.length = 0;
+  },
+};
+(function buildLogFilters() {
+  const box = $("logFilters");
+  for (const [k, name] of LOG_CATS) {
+    const l = document.createElement("label"), c = document.createElement("input");
+    c.type = "checkbox"; c.checked = LogView.on.has(k);
+    c.addEventListener("change", () => { if (c.checked) LogView.on.add(k); else LogView.on.delete(k); LogView.rebuild(); });
+    l.append(c, name); box.appendChild(l);
+  }
+  const s = document.createElement("input"); s.type = "search"; s.placeholder = "filter text"; s.setAttribute("aria-label", "Filter log text");
+  s.addEventListener("input", () => { LogView.text = s.value.trim().toLowerCase(); LogView.rebuild(); });
+  box.appendChild(s);
+})();
+Log.listeners.push((e) => { if (e === null) LogView.rebuild(); else if (LogView.matches(e)) LogView.pending.push(e); });
+$("btnLogClear").addEventListener("click", () => Log.clear());
+
+// ---- start ----
+(function init() {
+  let theme = params.get("theme");
+  if (!theme) { try { theme = localStorage.getItem("ecgcard.theme"); } catch (_) {} }
+  applyTheme(theme || "auto");
+  strips.push(new Strip($("stripEcg"), "ecg"), new Strip($("stripPpg"), "ppg"), new Strip($("stripCoarse"), "coarse"));
+  App.btProblem = webBluetoothProblem();
+  if (App.btProblem) {
+    const [head, ...rest] = App.btProblem.split(/(?<=\.) /);
+    $("banner").innerHTML = `<b>Web Bluetooth unavailable.</b> ${escapeHtml(head)} Demo works without it.` +
+      (rest.length ? `<details><summary>How to enable</summary>${escapeHtml(rest.join(" "))}</details>` : "");
+    $("banner").hidden = false;
+    $("btnConnect").title = App.btProblem;
+  } else if (navigator.bluetooth.getAvailability) {
+    navigator.bluetooth.getAvailability().then((ok) => {
+      if (!ok) { $("banner").innerHTML = "<b>No Bluetooth adapter available</b> (absent, powered off, or blocked for the browser). Connect will fail until one is available."; $("banner").hidden = false; }
+    }).catch(() => {});
+  }
+  Log.add("info", `ECG Card client ${PAGE_VERSION}; protocol ${C.PROTO_VERSION}; secure context: ${window.isSecureContext}; Web Bluetooth: ${App.btProblem ? "unavailable" : "available"}`);
+  setConn("idle");
+  setLive(true);
+  setInterval(() => { LogView.flush(); updateNumbers(); setText($("logCount"), `${Log.entries.length}`); }, 250);
+  setInterval(() => { tickStats(performance.now()); updateIntegrity(); }, 1000);
+  updateIntegrity();
+  requestAnimationFrame(frame);
+  if (params.get("demo") === "1") startDemo();
+})();
+</script>
+</body>
+</html>
