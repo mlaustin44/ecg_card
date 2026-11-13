@@ -42,7 +42,7 @@ typedef enum {
     PIN_OLED_DC,
     PIN_OLED_CS,      /* active low */
     PIN_OLED_RESET,   /* active low */
-    PIN_RADIO_EN,     /* high = RADIO_VCC on (held low in this build) */
+    PIN_RADIO_EN,     /* high = RADIO_VCC on; use hal_radio_power() (pin order) */
     PIN_RLD_L_EN,
     PIN_RLD_R_EN,
     /* inputs */

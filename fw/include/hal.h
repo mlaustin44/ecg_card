@@ -30,7 +30,8 @@ typedef enum {
  *     internal pull-down), wake enabled on buttons, CHG_PG, CW_ALRT;
  *   - LED_BLANK (PA12) driven high (LEDs off);
  *   - OLED bus detached (SCK, MOSI, DC, CS, RESET low);
- *   - radio off-state: UART TX (PA10) GPIO low, RX (PA11) input pull-down;
+ *   - radio off-state: UART TX (PA10) GPIO low, RX (PA11) input pull-down,
+ *     RADIO_EN low (see hal_radio_power());
  *   - unused pins output low, analog pins analog, PA18 input (never driven);
  *   - MCLK 32 MHz SYSOSC, SysTick 1 ms, RTC on LFOSC, I2C0 400 kHz;
  *   - watchdog started (about 2 s period, no closed window) as its very
@@ -225,6 +226,56 @@ uint16_t hal_adc_read_once(hal_adc_ch_t ch);
 #define HAL_NV_MAX 256u
 void hal_nv_read(void *dst, size_t n);
 hal_status_t hal_nv_write(const void *src, size_t n);
+
+/* ---- Radio link: CH585 on UART0 (ecg-fw.md "Inter-processor link") -------
+ * hal_radio_power(true), in this order:
+ *   1. RADIO_EN (PB18) high;
+ *   2. UART0 on: LINK_BAUD (460800) 8N1, no flow control, rings emptied;
+ *   3. PA11 = UART0_RX (internal pull-up: idle-high until the CH585 drives
+ *      it), PA10 = UART0_TX (idles high).
+ * hal_radio_power(false), in this order:
+ *   1. UART0 off (bytes still in the TX ring or FIFO are discarded);
+ *   2. PA10 GPIO output low, PA11 input with pull-down (the off-state of
+ *      hal_init());
+ *   3. RADIO_EN low.
+ * So no pin is high into the CH585 while its supply is off (brief rule 5).
+ * The brief's step list sets the UART pins before RADIO_EN; doing it the
+ * other way round avoids the idle-high TX pin back-feeding the radio for
+ * the few microseconds in between, and the CH585 boots for milliseconds
+ * before it listens. PB16 (RADIO_IRQ) stays an input with pull-down
+ * throughout (unused in link protocol 1). Both calls are idempotent and take
+ * a few microseconds. The radio must be off before hal_standby().
+ *
+ * hal_uart_write(): non-blocking, all or nothing. Copies n bytes into the
+ * TX ring (HAL_UART_TX_RING, drained by the UART0 TX interrupt at line rate)
+ * and returns n, or returns 0 if they do not fit or the radio is off.
+ * hal_uart_read(): copies up to max received bytes out of the RX ring
+ * (HAL_UART_RX_RING, filled by the UART0 RX interrupt) and returns the count.
+ * No HAL_EV_* bit for received data: the RX interrupt itself ends
+ * hal_idle(), SysTick ends it every 1 ms anyway, and the RX ring holds 5.5 ms
+ * of back-to-back bytes at 460800 baud, so polling once per main-loop pass
+ * is enough.
+ *
+ * Clock switches: hal_clock_fast() waits (bounded, ~0.2 ms) for the TX FIFO
+ * and shifter to go idle, then reprograms the UART0 divider for the new
+ * clock with interrupts masked. TX bytes are never cut; a byte the radio is
+ * sending during the switch may be corrupted (one frame then fails its CRC
+ * on the MCU side). */
+#define HAL_UART_TX_RING 512u
+#define HAL_UART_RX_RING 256u
+void hal_radio_power(bool on);
+bool hal_radio_powered(void);
+size_t hal_uart_write(const uint8_t *buf, size_t n);
+size_t hal_uart_read(uint8_t *buf, size_t max);
+
+typedef struct {
+    uint32_t rx_bytes;    /* received and stored */
+    uint32_t tx_bytes;    /* accepted by hal_uart_write() */
+    uint32_t rx_overruns; /* bytes lost: RX ring full or hardware FIFO overrun */
+    uint32_t rx_errors;   /* framing / parity / break errors (byte kept) */
+} hal_uart_stats_t;
+/* Counters since hal_init(). */
+void hal_uart_stats(hal_uart_stats_t *out);
 
 /* ---- Debug channels (SEGGER RTT compatible, read by the J-Link) ----------
  * Both are non-blocking and drop data when the host is not reading.

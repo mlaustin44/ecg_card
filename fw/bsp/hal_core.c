@@ -307,6 +307,7 @@ void hal_clock_fast(bool fast)
             return;
         }
         pm = hal_irq_lock();
+        bsp_uart_drain_tx();
         /* ULPCLK must stay <= 40 MHz: divide before MCLK goes to 80 MHz. */
         DL_SYSCTL_setULPCLKDivider(DL_SYSCTL_ULPCLK_DIV_2);
         DL_SYSCTL_switchMCLKfromSYSOSCtoHSCLK(DL_SYSCTL_HSCLK_SOURCE_SYSPLL);
@@ -315,10 +316,12 @@ void hal_clock_fast(bool fast)
         bsp_systick_config();
         bsp_spi_retime();
         bsp_i2c_retime();
+        bsp_uart_retime();
         s_fast = true;
         hal_irq_unlock(pm);
     } else {
         pm = hal_irq_lock();
+        bsp_uart_drain_tx();
         DL_SYSCTL_switchMCLKfromHSCLKtoSYSOSC();
         DL_SYSCTL_setULPCLKDivider(DL_SYSCTL_ULPCLK_DIV_1);
         g_mclk_hz = BSP_SYSOSC_HZ;
@@ -326,6 +329,7 @@ void hal_clock_fast(bool fast)
         bsp_systick_config();
         bsp_spi_retime();
         bsp_i2c_retime();
+        bsp_uart_retime();
         s_fast = false;
         hal_irq_unlock(pm);
         DL_SYSCTL_disableSYSPLL();
@@ -632,6 +636,7 @@ uint32_t hal_standby(uint32_t wake_after_s)
 void bsp_safe_state(void)
 {
     /* Everything that powers or connects something: low. LEDs blanked. */
+    bsp_radio_pins_safe(); /* UART0 pins off the CH585 before RADIO_EN drops */
     DL_GPIO_clearPins(GPIOA, A_BOARD_OUT | A_UART_TX);
     DL_GPIO_clearPins(GPIOB, B_BOARD_OUT | B_OLED_BUS);
     DL_GPIO_initDigitalOutput(IOMUX_PINCM25);

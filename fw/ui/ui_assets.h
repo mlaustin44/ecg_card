@@ -30,6 +30,8 @@ extern const ui_icon_t icon_heart_fill;
 extern const ui_icon_t icon_heart_line;
 extern const ui_icon_t icon_bolt;
 extern const ui_icon_t icon_plug;
+extern const ui_icon_t icon_ble;
+extern const ui_icon_t icon_ble_fault;
 extern const ui_icon_t icon_warn;
 extern const ui_icon_t icon_usb_big;
 extern const ui_icon_t icon_thumb;

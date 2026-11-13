@@ -30,6 +30,52 @@ static const char *reset_name(uint8_t c)
     }
 }
 
+static void hello_line(line_t *l, const radio_info_t *r)
+{
+    if (r->hello) {
+        s(l, "CH585 "); s(l, r->fw_str); s(l, " ");
+        x(l, r->addr[2], 2); x(l, r->addr[1], 2); x(l, r->addr[0], 2);
+    } else {
+        s(l, "no HELLO yet");
+    }
+}
+
+static void radio_page(const diag_info_t *d, char out[UI_DIAG_LINES][UI_DIAG_COLS + 1])
+{
+    line_t l;
+    const radio_info_t *r = d->radio;
+    if (!r)
+        return;
+    if (d->radio_program) {
+        l = L(out[0]); s(&l, "RADIO PROGRAM MODE ON");
+        l = L(out[1]); s(&l, "RADIO_EN held: flash");
+        l = L(out[2]); s(&l, "CH585 via WCH-Link,");
+        l = L(out[3]); s(&l, "link silent, no sleep");
+        l = L(out[4]); hello_line(&l, r);
+        l = L(out[5]); s(&l, "B1: end program mode");
+        return;
+    }
+    l = L(out[0]); s(&l, "RADIO "); s(&l, radio_state_name(r->state));
+    if (r->state == RADIO_OFF && r->adv_expired) s(&l, " (adv t/o)");
+    l = L(out[1]); hello_line(&l, r);
+    l = L(out[2]);
+    if (r->state == RADIO_CONNECTED) {
+        s(&l, "MTU "); u(&l, r->mtu); s(&l, " "); u(&l, (uint32_t)r->interval * 5u / 4u);
+        s(&l, "ms sub "); x(&l, r->subs, 2);
+    } else {
+        s(&l, "no phone pwr "); u(&l, r->power_ups); s(&l, " rst "); u(&l, r->restarts);
+    }
+    l = L(out[3]); s(&l, "rx "); u(&l, d->uart.rx_bytes); s(&l, " tx "); u(&l, d->uart.tx_bytes);
+    s(&l, " ovr "); u(&l, d->uart.rx_overruns);
+    l = L(out[4]); s(&l, "crc "); u(&l, r->rx.crc_errors); s(&l, " bad "); u(&l, r->rx.bad_frames);
+    s(&l, " gap "); u(&l, r->rx.seq_gaps);
+    /* dropped: ours (TX ring full) / the radio's (notifications) */
+    l = L(out[5]); s(&l, "drop "); u(&l, d->radio_tx_drops); s(&l, "/"); u(&l, r->radio_dropped);
+    while (l.b < out[5] + 13)
+        s(&l, " ");
+    s(&l, " B1=prog");
+}
+
 void diag_format(uint8_t page, const diag_info_t *d, char out[UI_DIAG_LINES][UI_DIAG_COLS + 1])
 {
     for (unsigned i = 0; i < UI_DIAG_LINES; i++)
@@ -79,12 +125,17 @@ void diag_format(uint8_t page, const diag_info_t *d, char out[UI_DIAG_LINES][UI_
         l = L(out[5]); s(&l, "mid "); u(&l, d->mid_code); s(&l, d->gain_hi ? " 1098x " : " 558x ");
         u(&l, d->notch_hz); s(&l, "Hz");
         break;
+    case DIAG_PAGE_RADIO:
+        radio_page(d, out);
+        break;
     default:
         l = L(out[0]); s(&l, "FIRMWARE");
         l = L(out[1]); s(&l, "ECG Card "); s(&l, d->fw_version);
         l = L(out[2]); s(&l, __DATE__);
         l = L(out[3]); s(&l, __TIME__); s(&l, " MSPM0G3507");
-        l = L(out[4]); s(&l, "Radio: off (no BLE)");
+        l = L(out[4]); s(&l, "Radio ");
+        if (d->radio && d->radio->hello) { s(&l, d->radio->fw_str); s(&l, " "); s(&l, d->radio->id_str); }
+        else s(&l, "n/a (no HELLO)");
         l = L(out[5]); s(&l, "NV ");
         s(&l, d->settings_status == 0 ? "ok" : d->settings_status == 1 ? "blank" : "corrupt");
         s(&l, " writes "); u(&l, d->settings_writes);

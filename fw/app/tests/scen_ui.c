@@ -113,7 +113,7 @@ TEST(settings_persist)
 TEST(corrupt_nv)
 {
     scen_boot(false);
-    settings_t s = {GAIN_HI, NOTCH_50, RLD_OFF, LED_LIMIT_10MA, SWEEP_6S};
+    settings_t s = {GAIN_HI, NOTCH_50, RLD_OFF, LED_LIMIT_10MA, SWEEP_6S, BLE_ON};
     uint8_t b[SETTINGS_BLOB_LEN];
     settings_encode(&s, b);
     sim_nv_set(b, sizeof b);
@@ -160,6 +160,10 @@ TEST(diagnostics)
     scen_run_ms(300);
     CHECK(strstr(scen_m()->diag[0], "FIRMWARE") != NULL);
     scen_shot("diag5_fw");
+    scen_tap(2);
+    scen_run_ms(300);
+    CHECK(strstr(scen_m()->diag[0], "RADIO") != NULL);
+    scen_shot("diag6_radio");
     scen_tap(2);
     scen_tap(2); /* analog again, then leave with BUTTON1 */
     scen_run_ms(400);

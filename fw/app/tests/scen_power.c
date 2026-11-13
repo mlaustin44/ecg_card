@@ -18,7 +18,7 @@ static bool awake(void) { return app_debug()->pwr == APP_PWR_AWAKE; }
 
 static bool all_rails_off(void)
 {
-    return scen_analog_all_off() && !sim_pin(PIN_OLED_EN) && !sim_oled_bus_attached() &&
+    return scen_analog_all_off() && scen_radio_off() && !sim_pin(PIN_OLED_EN) && !sim_oled_bus_attached() &&
            !sim_pin(PIN_OLED_DC) && !sim_pin(PIN_OLED_CS) && !sim_pin(PIN_OLED_RESET);
 }
 

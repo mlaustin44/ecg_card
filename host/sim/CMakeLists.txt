@@ -1,9 +1,9 @@
-add_library(ecg_sim STATIC sim_core.c sim_i2c.c sim_oled.c sim_analog.c)
+add_library(ecg_sim STATIC sim_core.c sim_i2c.c sim_oled.c sim_analog.c sim_radio.c)
 target_include_directories(ecg_sim PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 target_link_libraries(ecg_sim PUBLIC ecg_iface m)
 
 if(NOT ECG_TARGET)
-  foreach(t time_events invariants i2c oled ecg ppg nv_misc)
+  foreach(t time_events invariants i2c oled ecg ppg nv_misc radio)
     ecg_add_test(sim_${t} SOURCES tests/test_${t}.c LIBS ecg_sim)
   endforeach()
 endif()

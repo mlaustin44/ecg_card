@@ -12,14 +12,19 @@ typedef enum { RLD_BOTH, RLD_LEFT, RLD_RIGHT, RLD_OFF, RLD_MODE_COUNT } rld_mode
  * internal 2.048 V reference (full scale 15.2 mA, board.h LED_MAX_MA). */
 typedef enum { LED_LIMIT_5MA, LED_LIMIT_10MA, LED_LIMIT_15MA, LED_LIMIT_COUNT } led_limit_t;
 typedef enum { SWEEP_1S5, SWEEP_3S, SWEEP_6S, SWEEP_COUNT } sweep_t;
+/* Bluetooth: Off, or On = radio powered and advertising while the card is
+ * awake (fw/app/src/radio.h has the full policy). */
+typedef enum { BLE_OFF, BLE_ON, BLE_MODE_COUNT } ble_mode_t;
 
-/* Order of items on the Settings page. */
+/* Order of items on the Settings page. The index is also the item number of
+ * LINK_CMD_SET (link_fmt.h): append only. */
 typedef enum {
     SET_ITEM_GAIN,
     SET_ITEM_NOTCH,
     SET_ITEM_RLD,
     SET_ITEM_LED_LIMIT,
     SET_ITEM_SWEEP,
+    SET_ITEM_BLE,
     SET_ITEM_COUNT
 } settings_item_t;
 
@@ -29,10 +34,11 @@ typedef struct {
     uint8_t rld;       /* rld_mode_t */
     uint8_t led_limit; /* led_limit_t */
     uint8_t sweep;     /* sweep_t */
+    uint8_t ble;       /* ble_mode_t */
 } settings_t;
 
 #define SETTINGS_DEFAULTS \
-    { GAIN_AUTO, NOTCH_AUTO, RLD_BOTH, LED_LIMIT_15MA, SWEEP_3S }
+    { GAIN_AUTO, NOTCH_AUTO, RLD_BOTH, LED_LIMIT_15MA, SWEEP_3S, BLE_ON }
 
 /* Milliseconds for one full sweep across the trace area. */
 static inline uint16_t sweep_ms(uint8_t sweep)

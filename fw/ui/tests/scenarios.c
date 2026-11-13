@@ -183,6 +183,17 @@ SC(home_low) { scen_defaults(m); m->batt_pct = 4; }
 SC(home_batt0) { scen_defaults(m); m->batt_pct = 0; }
 SC(home_unknown) { scen_defaults(m); m->batt_valid = false; m->batt_pct = 0; }
 SC(home_time) { scen_defaults(m); m->time_valid = true; m->hour = 9; m->minute = 41; }
+SC(home_ble_adv) { scen_defaults(m); m->ble_state = UI_BLE_ADVERTISING; }
+SC(home_ble_adv_dark) { scen_defaults(m); m->ble_state = UI_BLE_ADVERTISING; m->now_ms = 100700u; }
+SC(home_ble_conn)
+{
+    scen_defaults(m);
+    m->ble_state = UI_BLE_CONNECTED;
+    m->time_valid = true;
+    m->hour = 10;
+    m->minute = 41;
+}
+SC(home_ble_fault) { scen_defaults(m); m->ble_state = UI_BLE_FAULT; }
 
 SC(card_ecg) { scen_defaults(m); m->screen = UI_SCREEN_ECG_CARD; }
 SC(card_ecg_usb) { scen_defaults(m); m->screen = UI_SCREEN_ECG_CARD; m->usb_present = m->charging = true; }
@@ -190,6 +201,14 @@ SC(card_ecg_low) { scen_defaults(m); m->screen = UI_SCREEN_ECG_CARD; m->batt_pct
 SC(card_ppg) { scen_defaults(m); m->screen = UI_SCREEN_PPG_CARD; }
 SC(card_ppg_usb) { scen_defaults(m); m->screen = UI_SCREEN_PPG_CARD; m->usb_present = true; m->batt_pct = 100; }
 SC(card_both) { scen_defaults(m); m->screen = UI_SCREEN_BOTH_CARD; }
+SC(card_ecg_ble_conn) { scen_defaults(m); m->screen = UI_SCREEN_ECG_CARD; m->ble_state = UI_BLE_CONNECTED; }
+SC(card_ppg_ble_fault_usb)
+{
+    scen_defaults(m);
+    m->screen = UI_SCREEN_PPG_CARD;
+    m->ble_state = UI_BLE_FAULT;
+    m->usb_present = m->charging = true;
+}
 
 static void settings_at(ui_model_t *m, uint8_t cur)
 {
@@ -202,6 +221,8 @@ SC(settings_1) { settings_at(m, 1); }
 SC(settings_2) { settings_at(m, 2); }
 SC(settings_3) { settings_at(m, 3); }
 SC(settings_4) { settings_at(m, 4); }
+SC(settings_5) { settings_at(m, 5); m->ble_state = UI_BLE_ADVERTISING; }
+SC(settings_5_off) { settings_at(m, 5); m->settings.ble = BLE_OFF; }
 SC(settings_alt)
 {
     settings_at(m, 2);
@@ -212,6 +233,14 @@ SC(settings_alt)
     m->settings.sweep = SWEEP_1S5;
 }
 SC(about) { scen_defaults(m); m->screen = UI_SCREEN_ABOUT; }
+SC(about_radio)
+{
+    scen_defaults(m);
+    m->screen = UI_SCREEN_ABOUT;
+    m->ble_state = UI_BLE_CONNECTED;
+    m->radio_fw = "1.2.3";
+    m->ble_id = "E5F6";
+}
 SC(diag)
 {
     static const char *const lines[UI_DIAG_LINES] = {
@@ -362,10 +391,13 @@ SC(ov_fault_null) { scen_defaults(m); m->overlay = UI_OVERLAY_FAULT; }
 #define E(name) {#name, sc_##name}
 const scenario_t scenarios[] = {
     E(home), E(home_charging), E(home_charged), E(home_fault), E(home_low), E(home_batt0),
-    E(home_unknown), E(home_time),
+    E(home_unknown), E(home_time), E(home_ble_adv), E(home_ble_adv_dark), E(home_ble_conn),
+    E(home_ble_fault),
     E(card_ecg), E(card_ecg_usb), E(card_ecg_low), E(card_ppg), E(card_ppg_usb), E(card_both),
-    E(settings_0), E(settings_1), E(settings_2), E(settings_3), E(settings_4), E(settings_alt),
-    E(about), E(diag), E(diag_full),
+    E(card_ecg_ble_conn), E(card_ppg_ble_fault_usb),
+    E(settings_0), E(settings_1), E(settings_2), E(settings_3), E(settings_4), E(settings_5),
+    E(settings_5_off), E(settings_alt),
+    E(about), E(about_radio), E(diag), E(diag_full),
     E(ecg_wait_a), E(ecg_wait_b), E(ecg_wait_c), E(ppg_wait), E(both_wait),
     E(ecg_settling), E(ecg_settling_0), E(ppg_settling),
     E(ecg_usb), E(both_usb), E(ecg_fault), E(ecg_fault_null),

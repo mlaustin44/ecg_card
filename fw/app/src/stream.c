@@ -1,10 +1,13 @@
 #include "stream.h"
 
 #include "hal.h"
-#include "stream_fmt.h"
+#include "link_fmt.h" /* stream_fmt.h + STREAM_EV_CMD_RESULT */
 
 static uint8_t s_seq;
 static uint32_t s_frames, s_drops;
+static stream_tap_t s_tap;
+
+void stream_set_tap(stream_tap_t tap) { s_tap = tap; }
 
 uint16_t crc16_ccitt_false(const uint8_t *p, size_t n, uint16_t crc)
 {
@@ -96,6 +99,8 @@ bool stream_send(uint8_t type, const uint8_t *payload, size_t len)
     /* The sequence advances for every frame produced, so the receiver
      * counts frames dropped here as gaps. */
     s_seq++;
+    if (s_tap)
+        s_tap(type, payload, len);
     if (hal_stream_write(wire, n) != n) {
         s_drops++;
         return false;
@@ -180,5 +185,11 @@ void stream_ev_state(uint8_t mode, uint8_t notch_hz, uint16_t mid_code, uint8_t 
 void stream_ev_button(uint8_t button, uint8_t kind)
 {
     uint8_t b[3] = {STREAM_EV_BUTTON, button, kind};
+    stream_send(STREAM_EVENT, b, sizeof b);
+}
+
+void stream_ev_cmd_result(uint8_t cmd, uint8_t result)
+{
+    uint8_t b[3] = {STREAM_EV_CMD_RESULT, cmd, result};
     stream_send(STREAM_EVENT, b, sizeof b);
 }

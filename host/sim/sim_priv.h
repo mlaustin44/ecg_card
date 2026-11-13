@@ -22,6 +22,8 @@ int sim_soc_override_get(void);
 bool sim_thumbs(void);
 bool sim_finger(void);
 double sim_gauss(void);                /* N(0,1) */
+bool sim_irq_masked(void);             /* inside hal_nv_write(): interrupts masked */
+void sim_radio_pin_write(bool high);   /* RADIO_EN through the checked pin path */
 
 /* ---- analog (sim_analog.c) ---- */
 void an_reset(void);                   /* power-on */
@@ -48,5 +50,15 @@ void oled_mcu_reset(void);
 void oled_pin_changed(board_pin_t p, bool old_level, bool new_level);
 void oled_progress(void);              /* consume async bytes due by now */
 bool oled_dma_active(void);
+
+/* ---- radio link (sim_radio.c) ---- */
+void radio_reset(void);                /* power-on */
+void radio_mcu_reset(void);            /* MCU reset: UART off, radio unpowered */
+uint64_t radio_next_event_us(void);    /* UINT64_MAX if none */
+void radio_run_events(uint64_t t_us);
+void radio_pin_changed(board_pin_t p, bool old_level, bool new_level);
+bool radio_uart_on(void);
+void radio_clock_switch(void);         /* hal_clock_fast() changed MCLK */
+void radio_irq_mask_begin(void);       /* hal_nv_write() masks interrupts */
 
 #endif

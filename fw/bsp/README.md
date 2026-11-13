@@ -10,6 +10,7 @@ script. Builds only when cross-compiling.
 | `bsp_ring.h` | ECG ring index arithmetic as pure functions (no TI headers); host-tested by `fw/bsp/tests/test_bsp_ring.c` (`ctest -R bsp_ring`) |
 | `hal_bus.c` | I2C0 (polled, 10 ms timeout, recovery), SPI1 OLED (blocking + DMA) |
 | `hal_nv.c` | settings blob in the last flash sector |
+| `hal_radio.c` | radio link: RADIO_EN and UART0 (PA10/PA11) power order, interrupt-driven TX/RX rings, divider retime on clock switches |
 | `rtt.c` | SEGGER-RTT-compatible control block (own implementation) |
 | `startup_mspm0g3507.c`, `mspm0g3507.ld` | vectors, reset handler; FLASH = 127 KB, last 1 KB sector reserved (`NVSTORE`, 0x1FC00) |
 | `smoke_main.c` | `ecg_bsp_smoke.elf`; debugger-driven command word `g_smoke_cmd` |
@@ -33,7 +34,8 @@ drops the unused rest.
 | ADC1 | PPG sequence ch8 TIA_OUT, ch1 PPG_HI, avg ×4, 2 µs; one-shots (ch4 VMID etc.) |
 | DMA ch0 (FULL) | ADC0 MEMRES0 → `s_ecg_ring[512]`, repeat-single (circular) |
 | DMA ch3 (BASIC) | buffer → SPI1 TXDATA (OLED frame) |
-| DMA ch1, ch2 (FULL), ch4–6 | free (UART0 RX/TX later) |
+| DMA ch1, ch2 (FULL), ch4–6 | free (UART0 uses interrupts, not DMA: ~3 kB/s) |
+| UART0 (PD0) | radio link, PA10 TX / PA11 RX (pull-up while powered), 460800 8N1, BUSCLK = ULPCLK, 16x oversampling: IBRD 4 FBRD 22 @ 32 MHz (460432 baud, −0.08 %), IBRD 5 FBRD 27 @ 40 MHz (461095, +0.06 %); CH585 side 458823 (−0.43 %), so 0.35 % / 0.49 % apart; recomputed in `hal_clock_fast()` after draining TX. FIFOs on, RX threshold 1 entry, TX threshold ½. RX ring 256 B, TX ring 512 B. Off (power disabled, pins GPIO low / pull-down) whenever the radio is off. |
 | COMP0 | DAC8 only (VDDA, code 19) → OPA0 + |
 | OPA0 / OPA1 / DAC0 | TIA (IN0− PA27, out PA22, chop per `BSP_OPA0_CHOP`, GBW high) / 2nd stage (IN1− PA17, + = DAC12, out PA16, RRI) / offset DAC (VDDA) |
 | GPAMP | forced off at init, never enabled |
@@ -45,7 +47,8 @@ drops the unused rest.
 
 Interrupt priorities (0 = highest): GROUP1/GPIO 0 (CHG_PG drives MEASURE_REQ low in the ISR),
 ADC0 0 (DMAEN re-arm, 250 µs deadline every 128 ms), ADC1 1 (PPG pairs, re-arm
-before the on-trigger 250 µs after dark), SysTick 2, RTC 2. No other IRQs are enabled.
+before the on-trigger 250 µs after dark), SysTick 2, RTC 2, UART0 3 (radio; only while
+the radio is powered). No other IRQs are enabled.
 
 Low-power: `hal_idle()` = SLEEP0 (WFI). `hal_standby()` = **STANDBY0**: PD0
 (GPIO, RTC, WWDT, I2C0) keeps ULPCLK/LFCLK, so the RTC interrupt and GPIO
@@ -63,9 +66,10 @@ back) and returns only on a real wake source or the timed deadline
 | PPG frame ring (32 × 8 B, 320 ms) + frame indices (32 × 4 B) | 384 |
 | RTT up0 1 KB + up1 2 KB + down0 16 B + control block | 3184 |
 | `.ramfunc` (DriverLib flash command loop) | 56 |
+| UART0 rings (TX 512 + RX 256) | 768 |
 | state variables (incl. `bsp_ring_t`) | ~200 |
 | main stack (top of SRAM, linker `__stack_size`) | 2048 |
-| **total** | **≈ 6.9 KB** of 32 KB |
+| **total** | **≈ 7.7 KB** of 32 KB |
 
 ## Not verifiable without hardware (highest risk first)
 
@@ -115,6 +119,16 @@ back) and returns only on a real wake source or the timed deadline
 14. SYSOSC FCL in internal-resistor mode (SysConfig permits it on G3x0x).
 15. Buttons get the internal pull-up (harmless if the board also has one).
 16. J-Link finds `_SEGGER_RTT` (scan or `-RTTAddress` from the ELF).
+17. **UART0 (radio)**: HELLO arrives at 32 MHz (baud, pin mux, RX pull-up,
+    RX interrupt at threshold 1 entry); data still flows at 80 MHz during a
+    session (UART0 BUSCLK really is ULPCLK = 40 MHz: SysConfig says so for
+    UART0 on the G3519; if it were MCLK the divider would be 2.5x off and
+    every frame would fail its CRC during sessions). TX interrupt pattern:
+    prime the FIFO, TXINT at ½ (transition), disable when the ring is empty
+    — a stalled TX shows as "drop" climbing on the RADIO diagnostics page.
+    Order on scope: RADIO_EN rises before PA10 goes high; PA10 low before
+    RADIO_EN falls. Bytes from the radio during a clock switch (session
+    start / stop) can be lost: one frame, counted as crc/bad.
 
 Residual timeline offsets (fixed per session): < 1 tick (250 ns) between the
 two prescalers; ADC latency ≈ +5 µs for ECG and TIA_OUT, ≈ +15 µs for PPG_HI;

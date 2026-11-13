@@ -4,7 +4,8 @@
  *   carousel  HOME -> ECG_CARD -> PPG_CARD -> BOTH_CARD -> SETTINGS -> ABOUT -> HOME
  *   BUTTON1 short  card: start that mode; Settings: change the selected value;
  *                  live screen: end the measurement; Summary: back to the card;
- *                  Diagnostics: leave (About)
+ *                  Diagnostics: leave (About); on the RADIO page the app turns
+ *                  NAV_DIAG_LEAVE into "toggle program mode" (app.c)
  *   BUTTON2 short  next page; Settings: next item, after the last the next
  *                  page; Summary: back to the card; Diagnostics: next page
  *   BUTTON2 long   Home from anywhere (a measurement ends without summary)

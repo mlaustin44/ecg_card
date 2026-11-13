@@ -49,6 +49,7 @@
 
 #include "board.h"
 #include "hal.h"
+#include "link_fmt.h"
 
 /* ======================= lifecycle and time ============================== */
 
@@ -122,7 +123,8 @@ typedef enum {
     SIM_V_OLED_SPI_UNPOWERED,     /* SPI write while OLED_EN low */
     SIM_V_OLED_SPI_DETACHED,      /* SPI write while bus not attached */
     SIM_V_OLED_DMA_MISUSE,        /* buffer changed during DMA, detach/blocking write during DMA */
-    SIM_V_RADIO_EN,               /* RADIO_EN driven high */
+    SIM_V_RADIO_BACKFEED,         /* UART0 on (PA10 idle-high) while RADIO_EN is low, either order */
+    SIM_V_UART_RADIO_OFF,         /* hal_uart_write() while the radio is off */
     SIM_V_STANDBY_PRECOND,        /* hal_standby() preconditions not met */
     SIM_V_STANDBY_DEADLOCK,       /* hal_standby() with no possible wake source (no exit hook) */
     SIM_V_CLOCK_WHILE_ACQ,        /* hal_clock_fast() while acquisition runs */
@@ -403,5 +405,118 @@ void sim_acq_set_ring_model(sim_ring_model_t model);
  * advances, no data is stored (BSP: a result that landed while the ADC's
  * DMAEN was off at a lap end; a missed ADC1 trigger). 0 = never. */
 void sim_acq_set_missed(uint32_t ecg_every, uint32_t ppg_every);
+
+/* ======================= radio link: UART0 + fake CH585 ================= */
+
+/* UART0 model: hal_radio_power() / hal_uart_*() on a byte-timed line at
+ * LINK_BAUD (10 bits per byte, 21.7 us), both directions. MCU rings as in
+ * the BSP (HAL_UART_TX_RING / HAL_UART_RX_RING). While interrupts are
+ * masked (hal_nv_write) the TX line stops after the 4-byte FIFO and the
+ * shifter, and received bytes beyond the 4-byte RX FIFO are lost
+ * (rx_overruns). A byte arriving while hal_clock_fast() switches the clock
+ * is corrupted (rx_errors), as on the part.
+ *
+ * Invariants (violations): SIM_V_RADIO_BACKFEED - UART0 enabled (PA10
+ * idle-high) while RADIO_EN is low, in either order; SIM_V_UART_RADIO_OFF -
+ * hal_uart_write() with the radio off; hal_standby() with RADIO_EN high or
+ * UART0 on is SIM_V_STANDBY_PRECOND. RADIO_EN high by itself is fine. */
+bool sim_uart_enabled(void);
+bool sim_radio_tx_pin(void);          /* PA10 level */
+#define SIM_UART_BYTE_NS (10u * 1000000000u / 460800u) /* 21701 ns */
+
+/* Ordered record of RADIO_EN and UART0 transitions since sim_reset(). */
+typedef enum { SIM_RT_RADIO_EN_HIGH, SIM_RT_RADIO_EN_LOW, SIM_RT_UART_ON, SIM_RT_UART_OFF } sim_rt_t;
+size_t sim_radio_trace_count(void);
+sim_rt_t sim_radio_trace_get(size_t i, uint64_t *t_us);
+
+/* Fake CH585, powered by RADIO_EN. It speaks fw/include/link_fmt.h with its
+ * own codec (no app code). After power-up it sends LINK_HELLO after
+ * hello_delay_ms and then boot_log as STREAM_LOG; it ACKs every
+ * LINK_RADIO_CTRL after ack_delay_us, runs the advertising schedule (fast
+ * for LINK_ADV_FAST_SECONDS, then slow) and sends LINK_CONN_STATE on every
+ * change. After LINK_RC_SHUTDOWN (ACK) it sends nothing more. Matches the
+ * CH585 firmware: ADV_START while connected -> BUSY, while advertising ->
+ * OK without restarting the schedule; extra bytes on an argument-less op ->
+ * BAD_ARG; SET_INFO text kept to 20 bytes; mtu 0 when not connected; after
+ * a disconnect it advertises (fast) again by itself unless the last
+ * advertising command was ADV_STOP. */
+typedef struct {
+    bool present;            /* false: never sends anything (dead / unflashed radio) */
+    uint32_t hello_delay_ms; /* power-up to HELLO, default 20 */
+    uint32_t silent_boots;   /* the next n power-ups send no HELLO; UINT32_MAX = never */
+    uint8_t proto;           /* HELLO proto, default LINK_PROTO_VERSION */
+    uint8_t fw[3];           /* default 1.2.3 */
+    uint8_t addr[6];         /* BLE address, least significant byte first */
+    uint8_t reset_reason;
+    const char *boot_log;    /* STREAM_LOG after HELLO; NULL = none */
+    uint32_t ack_delay_us;   /* default 300 */
+    bool ack_shutdown;       /* false: LINK_RC_SHUTDOWN is never ACKed */
+    bool reading;            /* false: the radio ignores everything from the MCU */
+} sim_radio_cfg_t;
+sim_radio_cfg_t sim_radio_defaults(void);
+void sim_radio_config(const sim_radio_cfg_t *cfg); /* default restored by sim_reset() */
+
+typedef struct {
+    bool powered, hello_sent, shut_down;   /* shut_down: LINK_RC_SHUTDOWN received */
+    uint8_t conn_state;                    /* LINK_CS_* */
+    uint16_t mtu, interval;
+    uint8_t subs;                          /* LINK_SUB_* */
+    uint32_t power_ups, hellos;
+    /* MCU -> radio */
+    uint32_t frames, crc_errors, seq_gaps, unknown_types;
+    uint32_t by_type[256];
+    uint32_t ctrl_ops[8];                  /* LINK_RADIO_CTRL by op (index < 8) */
+    uint32_t ecg_blocks, ppg_blocks, ecg_gaps, ppg_gaps, ecg_runs, ppg_runs;
+    uint64_t ecg_first_us, ecg_last_us, ppg_first_us, ppg_last_us;
+    uint32_t events, events_by_kind[8];
+    uint32_t unsolicited;                  /* data / events with no matching subscription */
+    uint32_t oversize_notify;              /* ECG / PPG / EVENT payloads > 32 bytes (CH585 limit) */
+    uint32_t after_shutdown;               /* frames received after the SHUTDOWN */
+    uint32_t status_frames;
+    uint8_t last_status[LINK_STATUS_LEN];
+    char mcu_info[40];                     /* LINK_RC_SET_INFO text */
+    /* shutdown checks */
+    uint32_t shutdowns;                    /* LINK_RC_SHUTDOWN received */
+    uint32_t clean_offs;                   /* power cut after SHUTDOWN, within 50 ms */
+    uint32_t unclean_offs;                 /* cut after HELLO without SHUTDOWN, or > 50 ms after it */
+    uint64_t last_shutdown_wait_us;        /* SHUTDOWN received -> power cut */
+    uint64_t max_shutdown_wait_us;
+} sim_radio_info_t;
+const sim_radio_info_t *sim_radio_info(void);
+
+/* Frames the MCU sent (all types except ECG / PPG blocks), last 128. */
+typedef struct {
+    uint64_t t_us;
+    uint8_t type, seq;
+    uint16_t len;
+    uint8_t p[32];                         /* first 32 payload bytes */
+} sim_link_frame_t;
+size_t sim_radio_log_count(void);
+const sim_link_frame_t *sim_radio_log_get(size_t i);
+/* Most recent LINK_ACK the MCU sent for the radio frame with this seq. */
+bool sim_radio_ack_of(uint8_t seq, uint8_t *result);
+/* Most recent STREAM_EV_CMD_RESULT for cmd (any subscription). */
+bool sim_radio_cmd_result(uint8_t cmd, uint8_t *result);
+
+/* The phone. connect: only while advertising (returns false otherwise). */
+bool sim_phone_connect(uint16_t mtu, uint16_t interval, uint8_t subs);
+void sim_phone_subscribe(uint8_t subs);
+void sim_phone_disconnect(void);
+/* A Control write: the radio sends LINK_CMD with this payload. Returns the
+ * frame's seq, or -1 when no phone is connected. */
+int sim_phone_command(const uint8_t *payload, size_t n);
+
+/* Injection on the radio -> MCU line. */
+void sim_radio_send_frame(uint8_t type, const uint8_t *payload, size_t n); /* radio seq, any state */
+void sim_radio_send_raw(const uint8_t *bytes, size_t n);                    /* as-is */
+void sim_radio_log(const char *text);                                       /* STREAM_LOG */
+void sim_radio_corrupt_to_mcu(uint32_t n, uint8_t xor_mask); /* next n bytes on the wire */
+void sim_radio_drop_to_mcu(uint32_t n);                      /* next n bytes vanish */
+void sim_radio_corrupt_to_radio(uint32_t n, uint8_t xor_mask);
+/* Freeze the MCU -> radio line (bytes stay in the MCU TX ring), e.g. to
+ * build a TX backlog; false resumes. Cleared by sim_reset(). */
+void sim_uart_stall_tx(bool stall);
+/* The radio resets by itself (watchdog): state lost, HELLO again. */
+void sim_radio_self_reset(void);
 
 #endif

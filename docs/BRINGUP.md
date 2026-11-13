@@ -6,9 +6,11 @@ tests and rendered screens). Everything below that the code or brief cannot prov
 **(unverified)**. Sources: `ecg-fw.md`, `README.md`, `scripts/`, `fw/bsp/README.md`,
 `fw/app/`, `fw/acq/`, `fw/include/board.h`, `tools/README.md`, `small_oled_datasheet.pdf`.
 
-Scope: this firmware has no radio. `RADIO_EN` is held low (`board.h`), so brief steps 11
-(radio) and the BLE part of step 12 are not covered; "stream to a phone" becomes "stream
-over RTT to the laptop".
+Scope: the radio link (MSPM0 side) is implemented but has only run against a simulated
+CH585; stage 17 covers it (unverified). With Bluetooth On (the default) `RADIO_EN` is high
+whenever the card is awake. For the stages before 17, turn Bluetooth Off in Settings if no
+radio firmware is flashed yet (otherwise the log shows `ble: radio FAULT` after 1 s; harmless,
+the card works without the radio).
 
 Test-point and net names: only TP8 (`VLED`), TP12/TP13 (`ISNS1`/`ISNS2`) and TP15
 (`BODY_EN`) are named in the brief. For other nets probe the pull-down resistor pad from the
@@ -181,13 +183,13 @@ application. Stages 5 to 16 use `ecg_fw.elf`. The first lines of the log use `[<
 ### Hidden diagnostics pages (application)
 
 Home, BUTTON2 (next) to the About page (HOME, ECG, Pulse, ECG+Pulse cards, Settings with its
-5 items, About), then **hold both buttons 2 s on About** (`BTN_LONG_MS`). Footer shows
-`Diagnostics n/5`. Refresh 250 ms.
+6 items, About), then **hold both buttons 2 s on About** (`BTN_LONG_MS`). Footer shows
+`Diagnostics n/6`. Refresh 250 ms.
 
 | In diagnostics | Action |
 |---|---|
-| BUTTON2 short | next page (5 wraps to 1). Entering page 2 switches `ANA_EN` on |
-| BUTTON1 short | back to About (page 2 first calls `rails_off()`) |
+| BUTTON2 short | next page (6 wraps to 1). Entering page 2 switches `ANA_EN` on |
+| BUTTON1 short | back to About (page 2 first calls `rails_off()`); **on page 6: toggles radio program mode** |
 | BUTTON2 long (2 s) | Home. BUTTON1 long = power off |
 
 | Page | Lines (21 columns; exact text from `diag.c`) |
@@ -196,7 +198,8 @@ Home, BUTTON2 (next) to the About page (HOME, ECG, Pulse, ECG+Pulse cards, Setti
 | 2 `ANALOG  ANA_EN on` | `settling...` for the first 300 ms, then `VMID <code> <mV>mV`, `(1650mV +-30)`, `ECG  <code> <mV>mV`, `TIA  <code> <mV>mV`, `PPGHI <code> <mV>mV`. mV = code x 0.8057 at the pin. DAC12 offset set for TIA 304 codes; `MEASURE_REQ`, `VLED_EN` stay low |
 | 3 I2C | `I2C 60:ACK 62:ACK` (or `--`); `CW2015 ver 0x73 ok` (` ?` if not 0x73, ` FAIL` if gauge init failed); `VCELL <mV>mV` (refreshed every 10 s); `SOC <gauge>% use <shown>%` (`use --` while the gauge reading is not ready or invalid); `MCP4728 EEPROM set` (written this boot) / `EEPROM ok` / `FAIL`; `I2C errors <n>` |
 | 4 `LAST SESSION` | `lost ECG <n> PPG <n>` (HAL overruns, last session); `drop <drops>/<frames>` (RTT stream frames not accepted / sent, since boot, counted even with no logger attached); `loop <ms>ms i2c err <n>` (longest main-loop gap while acquiring); `LED <code> DAC12 <code>`; `mid <code> 558x/1098x <50/60>Hz`. Shows `LAST SESSION: none` until a session has ended |
-| 5 `FIRMWARE` | `ECG Card 0.1.0`, build date, build time, `Radio: off (no BLE)`, `NV ok/blank/corrupt writes <n>` |
+| 5 `FIRMWARE` | `ECG Card 0.1.0`, build date, build time, `Radio <fw> <name tail>` (or `n/a (no HELLO)`), `NV ok/blank/corrupt writes <n>` |
+| 6 `RADIO <state>` | state `off`/`powering`/`retry`/`advertising`/`connected`/`shutdown`/`FAULT` (` (adv t/o)` after the 2 min advertising timeout); `CH585 <fw> <last 3 address bytes>` or `no HELLO yet`; `MTU <n> <interval>ms sub <hex>` when connected, else `no phone  pwr <power-ups>`; `rx <bytes> tx <bytes> ovr <RX overruns>`; `crc <n> bad <n> gap <n>` (frames from the radio); `drop <ours>/<radio's>` and `B1=prog`. **Program mode** (BUTTON1): `RADIO PROGRAM MODE ON`, `RADIO_EN` held high, the MCU sends nothing and waits for nothing, no display-off or standby; BUTTON1 again, BUTTON2 (next page), leaving diagnostics or power-off ends it with the normal shutdown |
 
 ### Log lines (RTT channel 0, application)
 
@@ -214,6 +217,12 @@ gain=558|gain=1098`; `session: vmid=<mV> mV mid=<code> tol=+-30` (ECG start, onc
 `usb: plugged|removed`; `power: off requested | display off | standby | wake`;
 `batt: critical mv= pct=`, `batt: low: measurement stopped`;
 `fault: Button 1|2 stuck down: it is ignored`. The RLD mode is not logged.
+Radio: `ble: radio power on`; `ble: HELLO fw <x.y.z> proto <n> addr <AA:..:FF> reset <n> name "ECG Card XXXX"`;
+`radio: <text>` (every log line the CH585 sends); `ble: no HELLO: power-cycling the radio once`;
+`ble: radio FAULT: <why>`; `ble: connected mtu <n> interval <ms> ms sub 0x<hex>`;
+`ble: disconnected: advertising again`; `ble: cmd <n> -> <LINK_RES>`; `ble: shutdown (<why>)`,
+`ble: no ACK to SHUTDOWN: power cut after 50 ms`, `ble: radio off`; `ble: program mode ON...|off`;
+`time: set HH:MM (UTC+<min> min)`.
 
 While a session is armed, one evidence line per second per signal (values of the last second
 unless "so far"; under 110 characters, about 100 B/s each, so the 1 KB channel 0 buffer keeps
@@ -398,7 +407,7 @@ application tests the display itself in stage 5.
 - Action: Home. Hold BUTTON1 2 s: `Power off` overlay with a progress bar from 300 ms, then `Release the button`, then standby. Log `power: off requested` then `power: standby`. Disconnect the J-Link (unverified: a debugger may keep the debug domain awake) and measure the supply current in a series DMM/µA range, averaged over several seconds.
 - Pass: current below 80 uA from the cell (brief: TPS63001 about 40 uA, CW2015 about 15 uA, charger leakage <= 6.5 uA); all switched rails 0 V; display dark. Note the CPU wakes every 1 s (RTC tick) and every 600 s for a battery check (`STANDBY_BATT_WAKE_S`, no log line), so average rather than peak.
 - Wake: press BUTTON1 (the wake press itself does nothing): log `power: wake`, Home reappears. USB plug or unplug also wakes. Fail: no wake or dead display after wake: STANDBY0 wake path and SPI1 re-init (BSP items 9 and 14). Current high: a rail left on (`rails_off()` runs first), pins driven into an off rail, or the MCP4728 internal reference left on (about +45 uA, IPD_INT 45 uA typ; every powered-down channel must select VDD, `mcp4728.c`).
-- Timeouts: leave the card idle on Home. Log `power: display off` after 60 s (`UI_DISPLAY_TIMEOUT_S`); `OLED_EN` falls after a 100 ms power-down sequence (SCK/MOSI/DC/CS/RESET low first). Any button then wakes the display without acting. `power: standby` 300 s after the last input (`UI_STANDBY_TIMEOUT_S`). Measuring or an overlay suspends the timeouts.
+- Timeouts: leave the card idle on Home. Log `power: display off` after 60 s (`UI_DISPLAY_TIMEOUT_S`); `OLED_EN` falls after a 100 ms power-down sequence (SCK/MOSI/DC/CS/RESET low first). Any button then wakes the display without acting. `power: standby` 300 s after the last input (`UI_STANDBY_TIMEOUT_S`; a phone command also counts as input for this one). Measuring, an overlay or radio program mode suspends the timeouts. Before standby the radio gets `ble: shutdown (standby)` and is unpowered.
 
 ### Stage 15: low battery, if practical
 
@@ -410,6 +419,30 @@ application tests the display itself in stage 5.
 
 - Action: record PPG noise (rms of the fine signal or of `TIA_OUT` on the scope) with a fixed finger or a fixed reflector on three builds: default (display on); display off by the 60 s timeout is not possible mid-session, so build with `-DAPP_PPG_BLANK_DISPLAY=ON`; and with OPA0 chopping off (`-DBSP_OPA0_CHOP=0`, section 1.3). Keep the same LED current (limit 5 mA).
 - Pass: no number in the brief; compare, and decide whether blanking the display during PPG is worth keeping.
+
+### Stage 17: radio (CH585), unverified
+
+Needs the CH585 firmware (MounRiver project under `CH585F/`), a WCH-LinkE on J3 set **not** to
+supply 3.3 V (brief "Programming"), and the browser client `tools/ble_client.html`.
+
+- Program: Settings `Bluetooth On`. Diagnostics page 6 (`RADIO`), BUTTON1: `RADIO PROGRAM MODE
+  ON`, log `ble: program mode ON`. `RADIO_VCC` (DMM) 3.3 V. Flash the CH585 from MounRiver
+  through the WCH-LinkE. The card does not sleep while the page shows program mode.
+- Look: after the flash the CH585 restarts: log `ble: HELLO fw ... name "ECG Card XXXX"` and
+  `radio: ...` lines (still in program mode), page 6 line 5 shows the radio version.
+- BUTTON1 again: `ble: shutdown (program mode off)`, `ble: radio off`, then `ble: radio power on`,
+  `ble: HELLO ...`; page 6 `RADIO advertising`; About shows `ECG Card XXXX` and the radio firmware.
+  Fail: `ble: no HELLO: power-cycling` then `ble: radio FAULT`: no `RADIO_VCC`, radio firmware
+  not running, or the UART (baud, pins PA10/PA11 vs CH585 PB12/PB13, CH585 UART1 remap).
+- Advertising: a phone scanner (or the browser client) lists `ECG Card XXXX`. Connect with
+  `tools/ble_client.html`: log `ble: connected ...`, Home shows the steady Bluetooth rune
+  (blinking = advertising, rune with `!` = fault). Start ECG from the client: the card shows
+  the ECG screen; data, events and the status arrive in the client. Page 6 `drop` and `crc`
+  should stay 0 (`drop <ours>/<radio's>`).
+- Scope (optional): `RADIO_EN` (R67 pad) rises before PA10 (pin 18) goes high, and PA10 is
+  low before `RADIO_EN` falls (STANDBY, Bluetooth Off, 2 min advertising timeout).
+- Not covered: the CH585's sleep / wake handshake (protocol 1 keeps it awake while powered)
+  and BSL over the radio.
 
 ## 4. Firmware assumptions to verify on first hardware
 
@@ -441,6 +474,7 @@ the BSP README number.
 | 21 | CW2015: no battery profile loaded (`cw2015.c`, `cw2015.h`) | 6, 15 | SOC wrong; voltage-curve fallback used |
 | 22 | Timing constants: 400 ms VMID wait, 10 ms VLED wait, 30 ms `FAST_RESTORE`, 150 us TIA settle, 2.5 s ECG settle, finger thresholds 250/150 codes, TIA bias `PPG_TIA_BIAS_CODE` 304 | 8, 11, 12 | start failures, PPG sample before settling, false finger |
 | 23 | Debug: timers free-run through a core halt (`DL_TIMER_CORE_HALT_FREE_RUN`, `hal_acq.c:175`) | all | none expected on `LED_BLANK`; samples lost and `MEASURE_REQ` unchanged during a halt (section 2) |
+| 24 | UART0 to the radio (item 17): 460800 from ULPCLK at 32 and 40 MHz, pin mux, interrupt-driven TX/RX, divider retime at session start/stop | 17 | no HELLO (fault), or `crc`/`bad` climbing on page 6 during sessions only (80 MHz divider) |
 
 ## 5. Measurements to record
 
@@ -462,6 +496,7 @@ the BSP README number.
 | PPG noise: display on / `APP_PPG_BLANK_DISPLAY=ON` / OPA0 chopping off (`BSP_OPA0_CHOP=0`) | stage 16 | |
 | PAT mean and scatter | stage 13 | |
 | Time from `OLED_EN` rise to a stable image | stage 5 | |
+| Current: radio advertising, connected idle, connected streaming ECG+Pulse | stage 17 | |
 
 ## 6. Open hardware questions that bring-up answers
 
@@ -470,11 +505,11 @@ the BSP README number.
 | 1 | TS-1075S pads 3/4 joined? | 5 | buttons read `down` permanently if not |
 | 2 | PA31 wake from SHUTDOWN? | not answered | the firmware only uses STANDBY0 and never SHUTDOWN |
 | 3 | OPA0 non-inverting from COMP0 DAC8; OPA0 noise as TIA | 7, 12, 16 | TIA level and noise, `BSP_OPA0_CHOP` 0 vs 1 |
-| 4 | BSL pins on PA10/PA11 | not answered | no radio or BSL code in this build |
-| 5 | CH585 `PB22` bootloader | not answered | no radio |
+| 4 | BSL pins on PA10/PA11 | not answered | no BSL bridge in this build |
+| 5 | CH585 `PB22` bootloader | not answered | programming uses 2-wire debug (stage 17) |
 | 6 | CW2015 battery profile | 6, 15 | the driver loads none; observe SOC vs `VCELL` |
-| 7 | CH585 crystal loads | not answered | no radio |
-| 8 | UART baud error at 460800 | not answered | no UART use in this build |
+| 7 | CH585 crystal loads | 17 | advertising found, connection stable |
+| 8 | UART baud error at 460800 | 17 | MSPM0 side −0.08 % (32 MHz) / +0.06 % (40 MHz ULPCLK); CH585 firmware reports 458823 (−0.43 %): 0.35 % / 0.49 % apart; measure both |
 | 9 | D8 ESD diode drift | 10 | swap-thumbs drift comparison (one lead only) |
 | 10 | OLED noise into the PPG | 16 | display on/off, plus the 3.3 V supply question in section 2 |
-| 11 | Radio sleep while streaming | not answered | no radio |
+| 11 | Radio sleep while streaming | not answered | protocol 1: the radio stays awake while powered |

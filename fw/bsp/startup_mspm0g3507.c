@@ -23,6 +23,7 @@ void GROUP1_IRQHandler(void);
 void ADC0_IRQHandler(void);
 void ADC1_IRQHandler(void);
 void RTC_IRQHandler(void);
+void UART0_IRQHandler(void);
 
 typedef void (*vector_t)(void);
 
@@ -53,7 +54,7 @@ const vector_t g_vectors[16 + 32] = {
     0, 0,              /* 11, 12 reserved */
     U,                 /* 13 UART1 */
     U,                 /* 14 UART2 */
-    U,                 /* 15 UART0 */
+    UART0_IRQHandler,  /* 15 UART0 */
     U,                 /* 16 TIMG0 */
     U,                 /* 17 TIMG6 */
     U,                 /* 18 TIMA0 */
