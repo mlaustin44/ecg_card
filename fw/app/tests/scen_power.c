@@ -3,6 +3,8 @@
 
 #include "acq.h"
 #include "buttons.h"
+#include "gfx.h"
+#include "radio.h"
 #include "scen.h"
 
 static bool in_standby(void) { return app_debug()->pwr == APP_PWR_STANDBY; }
@@ -62,11 +64,17 @@ TEST(timeouts_and_wake)
     CHECK(dt >= UI_STANDBY_TIMEOUT_S * 1000 - 500 && dt <= UI_STANDBY_TIMEOUT_S * 1000 + 300);
     CHECK(all_rails_off());
     CHECK_EQ(sim_facts()->standby_entries, 1);
-    /* wake by BUTTON2: Home, and the press does not move to the ECG card */
+    CHECK_EQ(scen.power_down_frames, 0); /* no power-down screen on a timeout */
+    uint32_t boot_frames = scen.boot_frames;
+    /* wake by BUTTON2: the boot screen, then Home; the press does not move
+     * to the ECG card */
     scen_run_ms(5000);
     scen_tap(2);
     scen_run_ms(400);
     CHECK(awake());
+    CHECK_EQ(scen_screen(), UI_SCREEN_BOOT);
+    CHECK(scen.boot_frames > boot_frames);
+    scen_run_ms(1800);
     CHECK_EQ(scen_screen(), UI_SCREEN_HOME);
     CHECK(scen_lit_pixels() > 100);
     scen_shot("wake_home");
@@ -107,8 +115,12 @@ TEST(power_off_long_press)
     CHECK(awake());                       /* waits for the release */
     CHECK_EQ(scen_m()->hold_progress, 100);
     scen_shot("power_off_release");
+    /* released: the power-down screen, then STANDBY */
     scen_run_until(t + 2800);
-    CHECK(in_standby());
+    CHECK(awake());
+    CHECK_EQ(scen_screen(), UI_SCREEN_POWER_DOWN);
+    CHECK(scen_analog_all_off());
+    CHECK(scen_run_cond(in_standby, 2000));
     CHECK(all_rails_off());
     CHECK(!sim_mcp_int_ref_on()); /* channel A was on the internal reference */
     /* the release edge did not wake it again */
@@ -117,6 +129,75 @@ TEST(power_off_long_press)
     CHECK_EQ(app_debug()->wakes, 0);
     check_vref_off();
     sim_set_finger(false);
+}
+
+static bool radio_advertising(void) { return radio_state() == RADIO_ADVERTISING; }
+static bool on_power_down(void) { return scen_screen() == UI_SCREEN_POWER_DOWN; }
+
+/* BUTTON1 long, released: the power-down screen with the designer's name for
+ * ~1.5 s (buttons ignored, every rail but the display and radio already off),
+ * then the usual STANDBY entry: radio handshake, display power-down. */
+TEST(power_down_screen)
+{
+    scen_boot(false);
+    testsrc_cfg_t tc = testsrc_defaults();
+    testsrc_install(&tc);
+    CHECK(scen_run_cond(radio_advertising, 1000));
+    CHECK(sim_phone_connect(185, 24, LINK_SUB_STATUS));
+    scen_run_ms(300);
+    CHECK_EQ(radio_state(), RADIO_CONNECTED);
+    /* in the middle of an ECG measurement */
+    scen_tap(2);
+    scen_tap(1);
+    sim_set_thumbs(true);
+    scen_run_ms(6000);
+    CHECK(acq_active());
+    uint32_t names = scen.name_runs;
+    uint64_t t = sim_now_ms() + 1;
+    sim_at_button(t, 1, true);
+    sim_at_button(t + 2500, 1, false);
+    scen_run_until(t + 2400);
+    CHECK_EQ(scen_m()->overlay, UI_OVERLAY_POWER_OFF); /* "Release the button" */
+    CHECK(!acq_active());
+    CHECK_EQ(scen.power_down_frames, 0);
+    CHECK(scen_run_cond(on_power_down, 200));
+    uint64_t t_screen = sim_now_ms();
+    CHECK(t_screen - (t + 2500) <= 40); /* at the (debounced) release */
+    CHECK_EQ(scen_m()->overlay, UI_OVERLAY_NONE);
+    CHECK(scen.name_runs > names);
+    CHECK_EQ(scen.name_h, FONTMED_H);
+    CHECK(scen_analog_all_off());
+    CHECK(!sim_rail(SIM_RAIL_BODY_EN));
+    CHECK(awake());
+    CHECK(sim_oled_info().powered);
+    CHECK_EQ(sim_radio_info()->shutdowns, 0); /* the handshake comes at the end */
+    scen_run_ms(700);
+    CHECK(on_power_down());
+    scen_shot("power_down");
+    /* buttons are ignored on it */
+    scen_tap(2);
+    CHECK(on_power_down());
+    scen_tap(1);
+    CHECK(on_power_down() || in_standby());
+    CHECK_EQ(app_debug()->sessions, 1);
+    CHECK(scen_run_cond(in_standby, 1500));
+    uint64_t dt = sim_now_ms() - t_screen;
+    printf("  power-down screen for %llu ms\n", (unsigned long long)dt);
+    CHECK(dt >= 1500 && dt <= 1700); /* + the display power-down (~100 ms) */
+    CHECK(scen.power_down_frames >= 10);
+    CHECK(all_rails_off());
+    CHECK_EQ(sim_oled_info().dirty_power_offs, 0);
+    CHECK_EQ(sim_radio_info()->shutdowns, 1);
+    CHECK_EQ(sim_radio_info()->clean_offs, 1);
+    CHECK_EQ(sim_radio_info()->unclean_offs, 0);
+    CHECK_EQ(sim_violation_count(), 0);
+    CHECK_EQ(scen.body_en_outside_session, 0);
+    CHECK_EQ(scen.analog_outside, 0);
+    scen_run_ms(20000);
+    CHECK(in_standby());
+    CHECK_EQ(app_debug()->wakes, 0);
+    check_vref_off();
+    sim_set_thumbs(false);
 }
 
 static bool ppg_running(void) { return acq_active() && acq_status()->phase == ACQ_ON; }
@@ -145,6 +226,7 @@ TEST(mcp4728_reference_off)
         sim_mcp_eeprom_get(ch, NULL, &vref, &pd, NULL);
         CHECK(!vref && pd == 1);
     }
+    scen_skip_boot_screen();
     testsrc_cfg_t tc = testsrc_defaults();
     testsrc_install(&tc);
     scen_run_ms(300);
@@ -180,15 +262,17 @@ TEST(periodic_battery_wake)
 {
     scen_boot(false);
     scen_run_ms(300);
-    scen_press(1, 2200);
+    scen_power_off();
     scen_run_ms(200);
     CHECK(in_standby());
     uint32_t xfers = sim_facts()->i2c_xfers;
+    uint32_t frames = app_debug()->frames_drawn, boot_frames = scen.boot_frames;
     scen_run_ms(25ull * 60 * 1000); /* 25 minutes */
     CHECK(in_standby());
     CHECK(app_debug()->timed_wakes >= 2 && app_debug()->timed_wakes <= 3);
     CHECK(!sim_oled_info().powered);
     CHECK_EQ(sim_oled_info().power_ups, 1);
+    CHECK_EQ(app_debug()->frames_drawn, frames); /* timed wakes: display stays off */
     uint32_t per_wake = (sim_facts()->i2c_xfers - xfers) / app_debug()->timed_wakes;
     CHECK(per_wake <= 2); /* cheap: one gauge read */
     /* battery fell while asleep: the next timed wake sees it */
@@ -196,12 +280,21 @@ TEST(periodic_battery_wake)
     scen_run_ms(11ull * 60 * 1000);
     CHECK_EQ(app_debug()->batt_mv / 10, 359);
     CHECK(in_standby());
-    /* USB plugged wakes to Home */
+    /* USB plugged wakes to Home, without the boot screen */
     sim_set_usb(true);
     scen_run_ms(500);
     CHECK(awake());
     CHECK_EQ(scen_screen(), UI_SCREEN_HOME);
     CHECK(scen_m()->usb_present);
+    CHECK_EQ(scen.boot_frames, boot_frames);
+    /* ... and unplugged: the same */
+    scen_power_off();
+    CHECK(in_standby());
+    sim_set_usb(false);
+    scen_run_ms(500);
+    CHECK(awake());
+    CHECK_EQ(scen_screen(), UI_SCREEN_HOME);
+    CHECK_EQ(scen.boot_frames, boot_frames);
 }
 
 static void set_batt(uint16_t mv)
@@ -281,11 +374,13 @@ TEST(critical_battery)
         scen_shot("batt_critical");
     CHECK(scen_run_cond(in_standby, 5000));
     CHECK(all_rails_off());
+    CHECK_EQ(scen.power_down_frames, 0); /* its own overlay, not the power-down screen */
     /* a button wake with the battery still empty goes straight back */
     scen_tap(2);
     scen_run_ms(500);
     CHECK_EQ(scen_m()->overlay, UI_OVERLAY_BATT_CRITICAL);
     CHECK(scen_run_cond(in_standby, 5000));
+    CHECK_EQ(scen.power_down_frames, 0);
     /* CW_ALRT (gauge alert at ATHD) is read and cleared */
     CHECK(!sim_cw_alert_flag());
 }
@@ -416,7 +511,7 @@ TEST(standby_unhandled_event_no_spin)
 {
     scen_boot(false);
     scen_run_ms(300);
-    scen_press(1, 2200);
+    scen_power_off();
     scen_run_ms(200);
     CHECK(in_standby());
     uint32_t entries = sim_facts()->standby_entries;
@@ -441,6 +536,7 @@ int main(void)
 {
     RUN(timeouts_and_wake);
     RUN(power_off_long_press);
+    RUN(power_down_screen);
     RUN(mcp4728_reference_off);
     RUN(periodic_battery_wake);
     RUN(low_battery);

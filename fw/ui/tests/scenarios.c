@@ -388,6 +388,22 @@ SC(ov_fault)
 SC(ov_fault_short) { sc_both_run(m); m->overlay = UI_OVERLAY_FAULT; m->fault_text = "PPG LED open"; }
 SC(ov_fault_null) { scen_defaults(m); m->overlay = UI_OVERLAY_FAULT; }
 
+static void splash(ui_model_t *m, ui_screen_t s, uint16_t ms)
+{
+    scen_defaults(m);
+    m->screen = s;
+    m->screen_ms = ms;
+    m->now_ms += ms;
+}
+SC(boot) { splash(m, UI_SCREEN_BOOT, 1500); }
+SC(boot_t0) { splash(m, UI_SCREEN_BOOT, 0); }
+SC(boot_t250) { splash(m, UI_SCREEN_BOOT, 250); }
+SC(boot_t500) { splash(m, UI_SCREEN_BOOT, 500); }
+SC(boot_t750) { splash(m, UI_SCREEN_BOOT, 750); }
+SC(boot_nover) { splash(m, UI_SCREEN_BOOT, 1500); m->fw_version = NULL; }
+SC(power_down) { splash(m, UI_SCREEN_POWER_DOWN, 0); }
+SC(power_down_end) { splash(m, UI_SCREEN_POWER_DOWN, 1400); }
+
 #define E(name) {#name, sc_##name}
 const scenario_t scenarios[] = {
     E(home), E(home_charging), E(home_charged), E(home_fault), E(home_low), E(home_batt0),
@@ -408,6 +424,8 @@ const scenario_t scenarios[] = {
     E(sum_invalid),
     E(ov_usb), E(ov_lowbatt), E(ov_critical), E(ov_power_0), E(ov_power_50), E(ov_power_100),
     E(ov_fault), E(ov_fault_short), E(ov_fault_null),
+    E(boot), E(boot_t0), E(boot_t250), E(boot_t500), E(boot_t750), E(boot_nover),
+    E(power_down), E(power_down_end),
 };
 const int n_scenarios = (int)(sizeof scenarios / sizeof scenarios[0]);
 

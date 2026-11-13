@@ -152,10 +152,13 @@ TEST(stuck_button)
     memset(&scen, 0, sizeof scen);
     sim_set_button(1, true); /* held from power-up */
     app_init();
-    scen_run_ms(4000);
+    scen_run_ms(1500);
+    CHECK_EQ(scen_screen(), UI_SCREEN_BOOT); /* the held button does not skip it */
+    scen_run_ms(2500);
+    CHECK_EQ(scen_screen(), UI_SCREEN_HOME);
     CHECK_EQ(scen_m()->overlay, UI_OVERLAY_NONE); /* not yet, and no power-off */
     scen_run_ms(1500);
-    CHECK_EQ(scen_m()->overlay, UI_OVERLAY_FAULT);
+    CHECK_EQ(scen_m()->overlay, UI_OVERLAY_FAULT); /* after the boot screen */
     CHECK(scen_m()->fault_text && strstr(scen_m()->fault_text, "Button 1") != NULL);
     scen_shot("stuck_button");
     scen_run_ms(3500);

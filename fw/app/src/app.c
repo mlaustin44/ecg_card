@@ -12,6 +12,15 @@
  *   9. watchdog kick, hal_idle()
  * In the off state a pass is one hal_standby() plus its wake handling.
  *
+ * Boot and power-down screens (UI_SCREEN_BOOT / UI_SCREEN_POWER_DOWN) credit
+ * the designer. BOOT shows for BOOT_SCREEN_MS after a reset and after a
+ * button wake from STANDBY (not after a USB or timed wake); everything boots
+ * underneath it, a new button press skips it to Home and does nothing else,
+ * and faults found at boot are shown after it. POWER_DOWN shows for
+ * POWER_DOWN_SCREEN_MS after BUTTON1 long is released (acquisition and
+ * analog rails already off; buttons ignored), then enter_standby() runs as
+ * before (radio handshake, settings, display power-down).
+ *
  * Nothing here blocks for more than a few ms while acquisition runs: the
  * display power-off (100 ms) and flash writes happen only with acquisition
  * stopped. The radio path never waits (radio.h); only STANDBY entry runs the
@@ -83,6 +92,8 @@
 #define OVERLAY_BATT_MS       3000u
 #define OVERLAY_FAULT_MS      3000u
 #define POWER_HOLD_SHOW_MS    300u
+#define BOOT_SCREEN_MS        2000u  /* designer credit after reset / button wake */
+#define POWER_DOWN_SCREEN_MS  1500u  /* ... and before STANDBY */
 #define FRAME_FAST_MS         (1000u / UI_MAX_FPS)
 #define FRAME_SLOW_MS         100u
 #define SETTINGS_SAVE_IDLE_MS 3000u
@@ -97,7 +108,8 @@ static struct {
     app_debug_t dbg;
     uint32_t now, prev_step_ms;
     uint32_t last_input_ms;
-    bool power_off_pending;
+    bool power_off_pending;  /* BUTTON1 long: POWER_DOWN screen, then STANDBY */
+    uint32_t splash_ms;      /* when UI_SCREEN_BOOT / POWER_DOWN was entered */
 
     /* navigation */
     ui_screen_t screen;
@@ -226,6 +238,17 @@ static void go_screen(ui_screen_t s)
     if (s != UI_SCREEN_SETTINGS)
         S.cursor = 0;
     redraw();
+}
+
+static bool splash_on(void)
+{
+    return S.screen == UI_SCREEN_BOOT || S.screen == UI_SCREEN_POWER_DOWN;
+}
+
+static void show_splash(ui_screen_t s)
+{
+    go_screen(s);
+    S.splash_ms = S.now;
 }
 
 static uint8_t stream_mode(void)
@@ -734,8 +757,8 @@ static void overlay_update(void)
 
 static void battery_policy(void)
 {
-    if (S.overlay == UI_OVERLAY_BATT_CRITICAL)
-        return;
+    if (S.overlay == UI_OVERLAY_BATT_CRITICAL || S.screen == UI_SCREEN_POWER_DOWN)
+        return; /* (powering down anyway) */
     if (batt_critical()) {
         log_begin("batt");
         log_s(" critical mv=");
@@ -786,8 +809,8 @@ static void on_usb(uint32_t ev)
         } else if (S.ses == SES_NONE || S.ses == SES_FAULT) {
             S.ses = SES_NONE;
             display_wake();
-            if (S.overlay == UI_OVERLAY_NONE)
-                go_screen(UI_SCREEN_HOME);
+            if (S.overlay == UI_OVERLAY_NONE && !S.power_off_pending)
+                go_screen(UI_SCREEN_HOME); /* also ends the boot screen */
         } else {
             display_wake(); /* PPG may run on USB */
         }
@@ -799,7 +822,7 @@ static void on_usb(uint32_t ev)
             start_session(S.mode); /* the user is on the ECG screen: arm it */
         } else if (S.ses == SES_NONE) {
             display_wake();
-            if (S.overlay == UI_OVERLAY_NONE)
+            if (S.overlay == UI_OVERLAY_NONE && !S.power_off_pending)
                 go_screen(UI_SCREEN_HOME);
         } else {
             display_wake();
@@ -895,6 +918,22 @@ static void do_action(const nav_result_t *r)
     }
 }
 
+/* Boot screen: Home after BOOT_SCREEN_MS, or at once on a new press, which
+ * then does nothing else (ignored until released). The press that woke the
+ * card, or one held since reset, is already ignored: no hold time. */
+static void boot_screen_update(void)
+{
+    if (S.screen != UI_SCREEN_BOOT)
+        return;
+    bool press = buttons_hold_ms(BTN_1) != 0 || buttons_hold_ms(BTN_2) != 0;
+    if (press)
+        buttons_ignore_until_release();
+    if (press || S.now - S.splash_ms >= BOOT_SCREEN_MS) {
+        S.last_input_ms = S.now; /* the display timeout counts from Home */
+        go_screen(UI_SCREEN_HOME);
+    }
+}
+
 static void handle_buttons(void)
 {
     btn_event_t e;
@@ -905,7 +944,7 @@ static void handle_buttons(void)
             e == BTN_EV_BTN2_LONG)
             stream_ev_button(e == BTN_EV_BTN1_SHORT || e == BTN_EV_BTN1_LONG ? 1u : 2u,
                              e == BTN_EV_BTN1_LONG || e == BTN_EV_BTN2_LONG ? 1u : 0u);
-        if (S.power_off_pending || S.dbg.pwr != APP_PWR_AWAKE)
+        if (S.power_off_pending || S.dbg.pwr != APP_PWR_AWAKE || splash_on())
             continue;
         if (S.overlay != UI_OVERLAY_NONE) {
             if (S.overlay_modal)
@@ -921,7 +960,7 @@ static void handle_buttons(void)
     }
     if (buttons_any_down())
         S.last_input_ms = S.now;
-    if (buttons_fault() && !S.btn_fault_shown) {
+    if (buttons_fault() && !S.btn_fault_shown && !splash_on()) { /* after the boot screen */
         S.btn_fault_shown = true;
         S.overlay_text = !hal_pin_read(PIN_BUTTON1) ? "Button 1 stuck down: it is ignored"
                                                     : "Button 2 stuck down: it is ignored";
@@ -948,8 +987,18 @@ static void display_off(void)
 static void power_policy(void)
 {
     if (S.power_off_pending) {
-        if (!buttons_any_down())
-            enter_standby();
+        if (S.screen != UI_SCREEN_POWER_DOWN) {
+            /* the long press is released: the power-down screen */
+            if (!buttons_any_down()) {
+                rails_off(); /* already off (end_session); never on past here */
+                S.overlay = UI_OVERLAY_NONE;
+                S.then = THEN_NONE;
+                show_splash(UI_SCREEN_POWER_DOWN);
+                log_line("power", "power-down screen");
+            }
+        } else if (S.now - S.splash_ms >= POWER_DOWN_SCREEN_MS && !buttons_any_down()) {
+            enter_standby(); /* a press during the screen: standby at its release */
+        }
         return;
     }
     if (acq_active() || S.overlay != UI_OVERLAY_NONE || radio_program_mode()) {
@@ -1023,7 +1072,11 @@ static void wake_up(uint32_t cause)
     radio_rearm(); /* a fresh advertising window (and a retry after a fault) */
     ssd1306_power_on();
     S.blanked = false;
-    S.screen = UI_SCREEN_HOME;
+    /* a button wake is the user's "power on": the boot screen; USB goes
+     * straight to Home (on_usb()) */
+    bool usb = (cause & (HAL_EV_USB_PLUGGED | HAL_EV_USB_REMOVED)) != 0;
+    S.screen = (cause & HAL_EV_BUTTON) && !usb ? UI_SCREEN_BOOT : UI_SCREEN_HOME;
+    S.splash_ms = S.now;
     S.cursor = 0;
     S.overlay = UI_OVERLAY_NONE;
     S.last_input_ms = S.now;
@@ -1258,6 +1311,10 @@ static void build_model(void)
     memset(&M, 0, sizeof M);
     M.screen = S.screen;
     M.now_ms = S.now;
+    if (splash_on()) {
+        uint32_t t = S.now - S.splash_ms;
+        M.screen_ms = (uint16_t)(t > UINT16_MAX ? UINT16_MAX : t);
+    }
     M.batt_pct = S.dbg.batt_pct;
     M.batt_valid = S.dbg.batt_valid;
     M.batt_mv = S.dbg.batt_valid ? S.dbg.batt_mv : 0u;
@@ -1307,8 +1364,10 @@ static void build_model(void)
     if (S.overlay == UI_OVERLAY_BATT_CRITICAL) {
         M.overlay = S.overlay;
     } else if (S.power_off_pending) {
-        M.overlay = UI_OVERLAY_POWER_OFF;
-        M.hold_progress = 100;
+        if (S.screen != UI_SCREEN_POWER_DOWN) { /* "Release the button" */
+            M.overlay = UI_OVERLAY_POWER_OFF;
+            M.hold_progress = 100;
+        }
     } else if (hold >= POWER_HOLD_SHOW_MS && !combo) {
         M.overlay = UI_OVERLAY_POWER_OFF;
         uint32_t p = hold * 100u / BTN_LONG_MS;
@@ -1402,7 +1461,7 @@ static void display_update(void)
         return;
 #endif
     bool fast = nav_is_live(S.screen) || S.overlay != UI_OVERLAY_NONE || S.power_off_pending ||
-                buttons_hold_ms(BTN_1) != 0;
+                splash_on() || buttons_hold_ms(BTN_1) != 0;
     uint32_t period = fast ? FRAME_FAST_MS : FRAME_SLOW_MS;
     if (!S.force_draw && S.now - S.frame_ms < period)
         return;
@@ -1466,7 +1525,8 @@ void app_init(void)
     ui_init();
     ssd1306_power_on();
     S.now = hal_millis();
-    S.screen = UI_SCREEN_HOME;
+    S.screen = UI_SCREEN_BOOT; /* Home after BOOT_SCREEN_MS */
+    S.splash_ms = S.now;
     S.last_input_ms = S.now;
     S.prev_step_ms = S.now;
     S.dbg.pwr = APP_PWR_AWAKE;
@@ -1506,6 +1566,7 @@ void app_step(void)
     acq_poll(S.now);
 
     buttons_tick(S.now);
+    boot_screen_update(); /* before the events: a skipping press is swallowed */
     if (charger_tick(S.now))
         redraw();
     if (ev & HAL_EV_CW_ALRT) {

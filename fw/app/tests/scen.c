@@ -4,6 +4,7 @@
 #include <string.h>
 
 #include "acq.h"
+#include "gfx.h"
 #include "rails.h"
 #include "stream.h"
 #include "stream_fmt.h"
@@ -30,7 +31,23 @@ static void check_step(void)
         scen.max_led_ma = ma;
 }
 
-void scen_boot(bool keep_nv)
+#define CREDIT "Matthew Austin"
+static void text_hook(const char *s, int n, int x, int y, int w, int h)
+{
+    (void)x;
+    (void)y;
+    (void)w;
+    size_t len = sizeof CREDIT - 1;
+    /* (n may be the cap of a buffer without a terminator) */
+    bool hit = n > (int)len ? strncmp(s, CREDIT, len + 1) == 0
+                            : n == (int)len && strncmp(s, CREDIT, len) == 0;
+    if (hit) {
+        scen.name_runs++;
+        scen.name_h = h;
+    }
+}
+
+void scen_boot_splash(bool keep_nv)
 {
     static uint8_t nv[HAL_NV_MAX];
     if (keep_nv)
@@ -40,13 +57,39 @@ void scen_boot(bool keep_nv)
     if (keep_nv)
         sim_nv_set(nv, sizeof nv);
     memset(&scen, 0, sizeof scen);
+    gfx_text_hook = text_hook;
     app_init();
+}
+
+void scen_reboot_splash(void)
+{
+    sim_reboot();
+    gfx_text_hook = text_hook;
+    app_init();
+}
+
+static bool drew_frame(void) { return app_debug()->frames_drawn > 0; }
+
+bool scen_skip_boot_screen(void)
+{
+    if (!scen_run_cond(drew_frame, 100)) /* app_model() is that of a frame */
+        return false;
+    if (scen_screen() != UI_SCREEN_BOOT)
+        return false;
+    scen_tap(2);
+    return true;
+}
+
+void scen_boot(bool keep_nv)
+{
+    scen_boot_splash(keep_nv);
+    scen_skip_boot_screen();
 }
 
 void scen_reboot(void)
 {
-    sim_reboot();
-    app_init();
+    scen_reboot_splash();
+    scen_skip_boot_screen();
 }
 
 static void step(void)
@@ -54,8 +97,15 @@ static void step(void)
     bool awake = app_debug()->pwr != APP_PWR_STANDBY;
     bool acq = acq_active();
     uint64_t t0 = sim_now_us();
+    uint32_t frames = app_debug()->frames_drawn;
     app_step();
     uint64_t dt = sim_now_us() - t0;
+    if (app_debug()->frames_drawn != frames) {
+        if (app_model()->screen == UI_SCREEN_BOOT)
+            scen.boot_frames++;
+        else if (app_model()->screen == UI_SCREEN_POWER_DOWN)
+            scen.power_down_frames++;
+    }
     if (awake && app_debug()->pwr != APP_PWR_STANDBY) {
         if (dt > scen.max_step_us)
             scen.max_step_us = dt;
@@ -109,6 +159,14 @@ void scen_press_both(uint64_t hold_ms)
     sim_at_button(t + hold_ms, 1, false);
     sim_at_button(t + hold_ms + 5, 2, false);
     scen_run_until(t + hold_ms + 70);
+}
+
+static bool standby_now(void) { return app_debug()->pwr == APP_PWR_STANDBY; }
+
+void scen_power_off(void)
+{
+    scen_press(1, 2200);
+    scen_run_cond(standby_now, 2500);
 }
 
 const ui_model_t *scen_m(void) { return app_model(); }

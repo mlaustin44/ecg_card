@@ -197,6 +197,38 @@ TEST(big_digits)
     CHECK_EQ(count(), 0);
 }
 
+TEST(medium_font)
+{
+    begin();
+    gfx_text_clipped = 0;
+    int w = gfx_med(OLED_W / 2, 10, "Matthew Austin", TXT_CENTER);
+    CHECK_EQ(w, gfx_med_width("Matthew Austin"));
+    CHECK(w > 90 && w < OLED_W);
+    CHECK_EQ(gfx_text_clipped, 0);
+    int n = count();
+    CHECK(n > 300);
+    /* every lit pixel inside the run's box */
+    int x0 = OLED_W / 2 - w / 2, lit_in = 0;
+    for (int y = 10; y < 10 + FONTMED_H; y++)
+        for (int x = x0; x < x0 + w; x++)
+            lit_in += px(x, y);
+    CHECK_EQ(lit_in, n);
+    /* a character without a glyph draws nothing and is counted */
+    begin();
+    CHECK_EQ(gfx_med(0, 0, "Q?", TXT_LEFT), 0);
+    CHECK_EQ(count(), 0);
+    CHECK_EQ(gfx_text_clipped, 2);
+    /* off-screen: clipped and counted, nothing written outside */
+    begin();
+    gfx_text_clipped = 0;
+    gfx_med(-20, 58, "ECG Card", TXT_LEFT);
+    gfx_med(OLED_W - 5, -6, "ECG Card", TXT_LEFT);
+    CHECK_EQ(gfx_text_clipped, 2);
+    CHECK(guards_ok());
+    CHECK_EQ(gfx_med(0, 0, NULL, TXT_LEFT), 0);
+    CHECK_EQ(gfx_med_width(""), 0);
+}
+
 TEST(wrap)
 {
     begin();
@@ -254,6 +286,7 @@ int main(void)
     RUN(text_measure_and_align);
     RUN(text_clipping);
     RUN(big_digits);
+    RUN(medium_font);
     RUN(wrap);
     RUN(number_formatting);
     return TEST_RESULT();

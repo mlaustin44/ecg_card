@@ -21,4 +21,7 @@ static const golden_t golden[] = {
     {"sum_both", 0x83AC6C04u},
     {"ov_power_50", 0x34AF89F1u},
     {"ov_fault", 0xAEC639F2u},
+    {"boot", 0xDBEC4A39u},       /* designer credit after reset / button wake */
+    {"boot_t500", 0x76F7F6CAu},  /* trace half drawn */
+    {"power_down", 0x82B88BCBu}, /* designer credit before STANDBY */
 };

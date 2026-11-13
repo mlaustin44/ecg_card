@@ -1,6 +1,8 @@
-/* Boot, carousel, settings persistence, corrupted NV, diagnostics. */
+/* Boot (and its designer credit screen), carousel, settings persistence,
+ * corrupted NV, diagnostics. */
 #include <string.h>
 
+#include "gfx.h"
 #include "scen.h"
 #include "settings_store.h"
 #include "ssd1306.h"
@@ -30,6 +32,98 @@ TEST(boot_home)
     scen_run_ms(300);
     CHECK_EQ(sim_facts()->mcp_eeprom_writes, 4);
     CHECK(scen_lit_pixels() > 200);
+}
+
+static bool on_home(void) { return scen_screen() == UI_SCREEN_HOME; }
+
+/* Reset: the boot screen with the designer's name for ~2 s, everything
+ * starting underneath it, then Home. */
+TEST(boot_screen)
+{
+    scen_boot_splash(false);
+    scen_run_ms(30);
+    CHECK_EQ(scen_screen(), UI_SCREEN_BOOT);
+    CHECK(scen.name_runs > 0);
+    CHECK_EQ(scen.name_h, FONTMED_H);
+    CHECK_EQ(scen_m()->overlay, UI_OVERLAY_NONE);
+    /* the boot work is not held up: gauge read, panel up, radio advertising */
+    scen_run_ms(1170);
+    CHECK_EQ(scen_screen(), UI_SCREEN_BOOT);
+    CHECK(scen_m()->screen_ms >= 1100 && scen_m()->screen_ms <= 1200);
+    CHECK(scen_m()->batt_valid);
+    CHECK(sim_oled_info().init_complete);
+    CHECK_EQ(scen_m()->ble_state, UI_BLE_ADVERTISING);
+    CHECK_EQ(sim_facts()->mcp_eeprom_writes, 4);
+    CHECK(scen_analog_all_off());
+    CHECK(scen_lit_pixels() > 600);
+    scen_shot("boot_splash");
+    uint32_t boot_frames = scen.boot_frames;
+    CHECK(boot_frames >= 25); /* the trace animates (25 fps) */
+    CHECK(scen_run_cond(on_home, 1500));
+    uint64_t t_home = sim_now_ms();
+    printf("  boot screen until %llu ms\n", (unsigned long long)t_home);
+    CHECK(t_home >= 2000 && t_home <= 2100);
+    CHECK(scen_lit_pixels() > 200);
+    /* and the display timeout counts from Home */
+    scen_run_until(t_home + UI_DISPLAY_TIMEOUT_S * 1000 - 200);
+    CHECK_EQ(app_debug()->pwr, APP_PWR_AWAKE);
+    scen_run_ms(400);
+    CHECK_EQ(app_debug()->pwr, APP_PWR_DISPLAY_OFF);
+    CHECK_EQ(scen.power_down_frames, 0);
+    CHECK_EQ(sim_violation_count(), 0);
+    /* a warm reset shows it again */
+    uint32_t names = scen.name_runs;
+    scen_reboot_splash();
+    scen_run_ms(500);
+    CHECK_EQ(scen_screen(), UI_SCREEN_BOOT);
+    CHECK(scen.name_runs > names);
+    CHECK(scen_run_cond(on_home, 2000));
+}
+
+/* A press skips it to Home and does nothing else (no navigation, no event,
+ * no power-off when held); the next press navigates as usual. */
+TEST(boot_screen_skip)
+{
+    scen_boot_splash(false);
+    scen_run_ms(500);
+    CHECK_EQ(scen_screen(), UI_SCREEN_BOOT);
+    uint64_t t = sim_now_ms() + 1;
+    sim_at_button(t, 2, true);
+    sim_at_button(t + 100, 2, false);
+    scen_run_until(t + 40);
+    CHECK_EQ(scen_screen(), UI_SCREEN_HOME); /* on the press, not the release */
+    scen_run_until(t + 300);
+    CHECK_EQ(scen_screen(), UI_SCREEN_HOME); /* not the ECG card */
+    scen_tap(2);
+    CHECK_EQ(scen_screen(), UI_SCREEN_ECG_CARD);
+    /* BUTTON1 held through: skips, and is no power-off */
+    scen_reboot_splash();
+    scen_run_ms(300);
+    CHECK_EQ(scen_screen(), UI_SCREEN_BOOT);
+    scen_press(1, 3000);
+    scen_run_ms(2500);
+    CHECK_EQ(app_debug()->pwr, APP_PWR_AWAKE);
+    CHECK_EQ(scen_screen(), UI_SCREEN_HOME);
+    CHECK_EQ(scen_m()->overlay, UI_OVERLAY_NONE);
+    CHECK_EQ(scen.power_down_frames, 0);
+    CHECK_EQ(app_debug()->sessions, 0);
+    /* BUTTON1 short on the boot screen: no measurement either */
+    scen_reboot_splash();
+    scen_run_ms(300);
+    uint32_t ev0 = scen_decode_stream().buttons;
+    scen_tap(1);
+    CHECK_EQ(scen_screen(), UI_SCREEN_HOME);
+    CHECK_EQ(scen_decode_stream().buttons, ev0); /* no button event on the stream */
+    scen_tap(2);
+    CHECK_EQ(scen_decode_stream().buttons, ev0 + 1);
+    scen_tap(1); /* the ECG card: this one starts */
+    scen_run_ms(200);
+    CHECK_EQ(scen_screen(), UI_SCREEN_ECG);
+    CHECK_EQ(app_debug()->sessions, 1);
+    scen_tap(1);
+    scen_run_ms(200);
+    CHECK(scen_analog_all_off());
+    CHECK_EQ(sim_violation_count(), 0);
 }
 
 TEST(carousel)
@@ -177,6 +271,8 @@ TEST(diagnostics)
 
 int main(void)
 {
+    RUN(boot_screen);
+    RUN(boot_screen_skip);
     RUN(boot_home);
     RUN(carousel);
     RUN(settings_persist);

@@ -160,6 +160,7 @@ TEST(hello_missing_retry_fault)
     testsrc_cfg_t tc = testsrc_defaults();
     testsrc_install(&tc);
     app_init();
+    scen_skip_boot_screen();
     scen_run_ms(2000);
     CHECK_EQ(radio_state(), RADIO_FAULT);
     CHECK_EQ(sim_radio_info()->power_ups, 2);
@@ -191,7 +192,7 @@ TEST(hello_missing_retry_fault)
     CHECK_EQ(radio_state(), RADIO_FAULT); /* buttons do not retry a fault */
     CHECK_EQ(sim_radio_info()->power_ups, 2);
     /* standby and a wake: one more try (two power-ups) */
-    scen_press(1, 2200);
+    scen_power_off();
     scen_run_ms(300);
     CHECK(in_standby());
     scen_tap(2);
@@ -371,7 +372,7 @@ TEST(phone_commands)
     CHECK(sim_radio_info()->last_status[4] & LINK_ST_TIME_VALID);
     scen_shot("radio_home_time_connected");
     /* the clock survives STANDBY (RTC) */
-    scen_press(1, 2200);
+    scen_power_off();
     scen_run_ms(300);
     CHECK(in_standby());
     CHECK(scen_radio_off());
@@ -506,9 +507,10 @@ TEST(usb_during_phone_session)
 
 TEST(advertising_timeout_and_button)
 {
-    scen_boot(false);
+    scen_boot_splash(false);
     CHECK(scen_run_cond(advertising, 1000));
     uint64_t t0 = sim_now_ms();
+    scen_skip_boot_screen(); /* the skipping press leaves the radio alone */
     CHECK(scen_run_cond(radio_off, LINK_ADV_TOTAL_SECONDS * 1000 + 2000));
     uint64_t dt = sim_now_ms() - t0;
     printf("  advertising stopped after %llu ms\n", (unsigned long long)dt);
@@ -591,7 +593,7 @@ TEST(standby_handshake)
         CHECK(scen_run_cond(advertising, 1000));
         CHECK(sim_phone_connect(247, 16, SUB_ALL));
         scen_run_ms(100);
-        scen_press(1, 2200); /* power off: standby */
+        scen_power_off();
         scen_run_ms(200);
         CHECK(in_standby());
         CHECK(scen_radio_off());
@@ -798,7 +800,7 @@ TEST(program_mode)
     scen_tap(1);
     scen_run_ms(100);
     CHECK(radio_program_mode());
-    scen_press(1, 2200);
+    scen_power_off();
     scen_run_ms(300);
     CHECK(in_standby());
     CHECK(scen_radio_off());

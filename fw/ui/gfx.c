@@ -4,6 +4,7 @@
 
 static uint8_t *fb_;
 uint16_t gfx_text_clipped;
+gfx_text_hook_t gfx_text_hook;
 
 void gfx_begin(uint8_t *fb)
 {
@@ -246,6 +247,8 @@ int gfx_text_n(int x, int y, const char *s, int max_chars, uint8_t flags)
     else if ((flags & TXT_ALIGN) == TXT_RIGHT)
         x -= w;
     uint8_t mode = (flags & TXT_CLR) ? GFX_CLR : GFX_SET;
+    if (gfx_text_hook)
+        gfx_text_hook(s, max_chars, x, y, w, FONT5_CAP);
     if (y >= OLED_H || y + FONT5_H <= 0) {
         if (w)
             gfx_text_clipped++;
@@ -301,6 +304,62 @@ int gfx_big(int x, int y, const char *s, uint8_t flags)
         gfx_text_clipped++;
     for (; *s; s++, x += BIG_ADV)
         gfx_bitmap(x, y, fontbig_bits[big_index(*s)], FONTBIG_W, FONTBIG_H, mode);
+    return w;
+}
+
+/* ---- medium font -------------------------------------------------------- */
+
+/* Glyph of c: index into FONTMED_CHARS and its first byte, or -1. */
+static int med_glyph(char c, const uint8_t **bits)
+{
+    static const char k_chars[] = FONTMED_CHARS;
+    unsigned off = 0;
+    for (int i = 0; i < FONTMED_COUNT; i++) {
+        if (k_chars[i] == c) {
+            *bits = fontmed_bits + off;
+            return i;
+        }
+        off += 2u * fontmed_width[i];
+    }
+    return -1;
+}
+
+int gfx_med_width(const char *s)
+{
+    int w = 0;
+    const uint8_t *bits;
+    for (; s && *s; s++) {
+        int i = med_glyph(*s, &bits);
+        if (i >= 0)
+            w += fontmed_width[i] + MED_GAP;
+    }
+    return w ? w - MED_GAP : 0;
+}
+
+int gfx_med(int x, int y, const char *s, uint8_t flags)
+{
+    if (!s)
+        return 0;
+    int w = gfx_med_width(s);
+    if ((flags & TXT_ALIGN) == TXT_CENTER)
+        x -= w / 2;
+    else if ((flags & TXT_ALIGN) == TXT_RIGHT)
+        x -= w;
+    uint8_t mode = (flags & TXT_CLR) ? GFX_CLR : GFX_SET;
+    if (gfx_text_hook)
+        gfx_text_hook(s, 0x7FFF, x, y, w, FONTMED_H);
+    if (y < 0 || y + FONTMED_H > OLED_H || x < 0 || x + w > OLED_W)
+        gfx_text_clipped++;
+    for (; *s; s++) {
+        const uint8_t *bits;
+        int i = med_glyph(*s, &bits);
+        if (i < 0) {
+            gfx_text_clipped++; /* no glyph: add it in gen_assets.py */
+            continue;
+        }
+        gfx_bitmap(x, y, bits, fontmed_width[i], FONTMED_H, mode);
+        x += fontmed_width[i] + MED_GAP;
+    }
     return w;
 }
 

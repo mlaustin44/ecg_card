@@ -25,6 +25,15 @@ extern const uint8_t font5_width[FONT5_COUNT];
 #define FONTBIG_H 14
 extern const uint8_t fontbig_bits[12][18];
 
+/* Medium font, 11 rows, only the glyphs in FONTMED_CHARS (boot and
+ * power-down screens). Glyph i: fontmed_width[i] columns, 2 pages,
+ * page-major, starting after the glyphs before it in fontmed_bits. */
+#define FONTMED_H 11
+#define FONTMED_CHARS " ACEGMadehinrstuw"
+#define FONTMED_COUNT 17
+extern const uint8_t fontmed_width[FONTMED_COUNT];
+extern const uint8_t fontmed_bits[258];
+
 typedef struct { uint8_t w, h; const uint8_t *bits; } ui_icon_t;
 extern const ui_icon_t icon_heart_fill;
 extern const ui_icon_t icon_heart_line;

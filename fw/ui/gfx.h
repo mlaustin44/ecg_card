@@ -26,8 +26,13 @@ enum { GFX_SET = 0, GFX_CLR = 1, GFX_INV = 2 };
 
 void gfx_begin(uint8_t *fb); /* sets the target and clears it */
 
-/* Count of text runs drawn partly off-screen (layout check for tests). */
+/* Count of text runs drawn partly off-screen, and of characters a font has
+ * no glyph for (layout check for tests). */
 extern uint16_t gfx_text_clipped;
+/* Test hook (NULL = off): every text run gfx_text_n() / gfx_med() draws,
+ * with its left edge after alignment, width and glyph height in rows. */
+typedef void (*gfx_text_hook_t)(const char *s, int n, int x, int y, int w, int h);
+extern gfx_text_hook_t gfx_text_hook;
 uint8_t *gfx_fb(void);
 
 void gfx_pixel(int x, int y, uint8_t mode);
@@ -54,6 +59,13 @@ int gfx_char_width(char c, uint8_t flags);
 #define BIG_ADV (FONTBIG_W + 2)
 int gfx_big(int x, int y, const char *s, uint8_t flags);
 int gfx_big_width(const char *s);
+
+/* Medium font (FONTMED_H rows, 2-px stems): only the glyphs listed in
+ * FONTMED_CHARS (ui_assets.h); others draw nothing and count in
+ * gfx_text_clipped. Flags: alignment, TXT_CLR. Returns the drawn width. */
+#define MED_GAP 1 /* columns between glyphs */
+int gfx_med(int x, int y, const char *s, uint8_t flags);
+int gfx_med_width(const char *s);
 
 /* Horizontal progress bar with 1 px border; pct 0..100. */
 void gfx_progress(int x, int y, int w, int h, unsigned pct);

@@ -1,6 +1,7 @@
 /* Every screen x state x overlay renders inside the buffer (ASan: the frame
  * buffer is an exact-size heap block), no text is clipped in the reference
- * scenarios, and random models never crash. */
+ * scenarios, and random models never crash. The boot and power-down screens
+ * credit the designer legibly (gfx_text_hook sees every text run). */
 #include <stdlib.h>
 #include <string.h>
 
@@ -206,6 +207,158 @@ TEST(heart_blinks_on_beat)
     CHECK_EQ(lit(fb), idle);
 }
 
+/* ---- boot / power-down credit -------------------------------------------- */
+
+#define NAME "Matthew Austin"
+typedef struct {
+    char s[32];
+    int x, y, w, h;
+} run_t;
+static run_t runs[32];
+static int nruns;
+
+static void record(const char *s, int n, int x, int y, int w, int h)
+{
+    if (nruns >= 32)
+        return;
+    run_t *r = &runs[nruns++];
+    int k = 0;
+    while (k < n && k < 31 && s[k]) {
+        r->s[k] = s[k];
+        k++;
+    }
+    r->s[k] = '\0';
+    r->x = x;
+    r->y = y;
+    r->w = w;
+    r->h = h;
+}
+
+static const run_t *find_run(const char *s)
+{
+    for (int i = 0; i < nruns; i++)
+        if (strcmp(runs[i].s, s) == 0)
+            return &runs[i];
+    return NULL;
+}
+
+static void render_runs(const ui_model_t *m)
+{
+    nruns = 0;
+    gfx_text_hook = record;
+    ui_render(m, fb);
+    gfx_text_hook = NULL;
+}
+
+/* The name and the product name in the medium font, centred, on screen,
+ * above and below the small "Designed & built by" line. */
+static void check_credit(void)
+{
+    const run_t *title = find_run("ECG Card"), *by = find_run("Designed & built by");
+    const run_t *name = find_run(NAME);
+    CHECK(title && by && name);
+    if (!title || !by || !name)
+        return;
+    CHECK_EQ(name->h, FONTMED_H);
+    CHECK_EQ(title->h, FONTMED_H);
+    CHECK(name->h > by->h);
+    CHECK(name->x >= 2 && name->x + name->w <= OLED_W - 2);
+    CHECK(abs(2 * name->x + name->w - OLED_W) <= 1); /* centred */
+    CHECK(abs(2 * title->x + title->w - OLED_W) <= 1);
+    CHECK(title->y + FONTMED_H < by->y && by->y + FONT5_H <= name->y);
+    CHECK(name->y + FONTMED_H <= OLED_H);
+    CHECK_EQ(gfx_med_width(NAME), name->w);
+}
+
+TEST(boot_screen_credit)
+{
+    static const uint16_t t[] = {0, 1, 250, 999, 1000, 1999, 2500, 65535};
+    for (size_t i = 0; i < sizeof t / sizeof t[0]; i++) {
+        ui_model_t m;
+        scen_defaults(&m);
+        m.screen = UI_SCREEN_BOOT;
+        m.screen_ms = t[i];
+        gfx_text_clipped = 0;
+        render_runs(&m);
+        CHECK_EQ(gfx_text_clipped, 0);
+        check_credit();
+        CHECK(find_run("0.1.0") != NULL);           /* firmware version, small */
+        CHECK(find_run("Powering off") == NULL);
+    }
+}
+
+TEST(power_down_screen_credit)
+{
+    static const uint16_t t[] = {0, 400, 800, 1499, 3000, 65535};
+    for (size_t i = 0; i < sizeof t / sizeof t[0]; i++) {
+        ui_model_t m;
+        scen_defaults(&m);
+        m.screen = UI_SCREEN_POWER_DOWN;
+        m.screen_ms = t[i];
+        gfx_text_clipped = 0;
+        render_runs(&m);
+        CHECK_EQ(gfx_text_clipped, 0);
+        check_credit();
+        CHECK(find_run("Powering off") != NULL);
+    }
+}
+
+/* Lit pixels in rows y0..y1. */
+static int lit_rows(int y0, int y1)
+{
+    int n = 0;
+    for (int y = y0; y <= y1; y++)
+        for (int x = 0; x < OLED_W; x++)
+            n += px(fb, x, y);
+    return n;
+}
+
+/* The trace draws itself across in the first second; the text never moves. */
+TEST(boot_trace_animation)
+{
+    ui_model_t m;
+    scen_defaults(&m);
+    m.screen = UI_SCREEN_BOOT;
+    static uint8_t first[OLED_FB_BYTES];
+    int prev = -1, full = 0;
+    for (unsigned ms = 0; ms <= 1600; ms += 40) {
+        m.screen_ms = (uint16_t)ms;
+        ui_render(&m, fb);
+        if (ms == 0)
+            memcpy(first, fb, sizeof first);
+        int tr = lit_rows(13, 28);
+        CHECK(tr >= prev);
+        prev = tr;
+        if (ms >= 1000) {
+            if (!full)
+                full = tr;
+            CHECK_EQ(tr, full); /* drawn completely after 1 s */
+        }
+        CHECK(region_equal(fb, first, 0, 0, OLED_W - 1, 12));  /* title */
+        CHECK(region_equal(fb, first, 0, 29, OLED_W - 1, 63)); /* credit, version */
+    }
+    CHECK(full > 100);
+    m.screen_ms = 500;
+    ui_render(&m, fb);
+    int half = lit_rows(13, 28);
+    CHECK(half > 20 && half < full);
+}
+
+/* The credit is only on the boot and power-down screens. */
+TEST(name_only_on_splash_screens)
+{
+    for (int i = 0; i < n_scenarios; i++) {
+        ui_model_t m;
+        scenarios[i].setup(&m);
+        render_runs(&m);
+        bool splash = m.overlay == UI_OVERLAY_NONE &&
+                      (m.screen == UI_SCREEN_BOOT || m.screen == UI_SCREEN_POWER_DOWN);
+        if ((find_run(NAME) != NULL) != splash)
+            printf("  %s: name %s\n", scenarios[i].name, splash ? "missing" : "unexpected");
+        CHECK_EQ(find_run(NAME) != NULL, splash);
+    }
+}
+
 int main(void)
 {
     fb = malloc(OLED_FB_BYTES);
@@ -215,6 +368,10 @@ int main(void)
     RUN(page_dots_track_the_page);
     RUN(heart_rate_digits);
     RUN(heart_blinks_on_beat);
+    RUN(boot_screen_credit);
+    RUN(power_down_screen_credit);
+    RUN(boot_trace_animation);
+    RUN(name_only_on_splash_screens);
     free(fb);
     return TEST_RESULT();
 }

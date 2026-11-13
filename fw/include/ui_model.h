@@ -10,6 +10,8 @@
  *   BUTTON1 long   power off (2 s)
  *   both, on About: Diagnostics
  *   Diagnostics RADIO page: BUTTON1 short toggles radio program mode
+ *   Boot screen: any press skips it to Home (and does nothing else);
+ *   power-down screen: buttons ignored
  * The thumbs cannot reach the buttons during a measurement, so measurement
  * screens are hands-free: they start on contact and end when thumbs lift. */
 #ifndef UI_MODEL_H
@@ -35,6 +37,9 @@ typedef enum {
     UI_SCREEN_BOTH,         /* live ECG + PPG */
     UI_SCREEN_SUMMARY,      /* after a measurement */
     UI_SCREEN_DIAG,         /* hidden bring-up page */
+    /* shown by the app for a fixed time, no buttons (screen_ms animates) */
+    UI_SCREEN_BOOT,         /* after reset and after a button wake from STANDBY */
+    UI_SCREEN_POWER_DOWN,   /* after BUTTON1 long, before STANDBY */
     UI_SCREEN_COUNT
 } ui_screen_t;
 
@@ -104,6 +109,7 @@ typedef struct {
     uint8_t hold_progress;   /* UI_OVERLAY_POWER_OFF */
     const char *fault_text;  /* UI_OVERLAY_FAULT / UI_MEAS_FAULT; may be NULL */
     uint32_t now_ms;         /* hal_millis(), for animations */
+    uint16_t screen_ms;      /* UI_SCREEN_BOOT / POWER_DOWN: ms since it was entered */
 
     /* status bar */
     uint8_t batt_pct;        /* 0..100 */
@@ -125,7 +131,7 @@ typedef struct {
     settings_t settings;
     uint8_t settings_cursor; /* settings_item_t */
 
-    /* UI_SCREEN_ABOUT */
+    /* UI_SCREEN_ABOUT, UI_SCREEN_BOOT */
     const char *fw_version;  /* e.g. "0.1.0" */
     const char *radio_fw;    /* radio firmware "1.2.3" once a HELLO arrived; NULL = n/a */
     const char *ble_id;      /* last 4 hex digits of the BLE address ("ECG Card XXXX"); NULL = unknown */

@@ -698,6 +698,64 @@ static void screen_summary(const ui_model_t *m)
     }
 }
 
+/* ---- boot / power-down: who designed and built the card ------------------- */
+
+#define SPLASH_NAME     "Matthew Austin"
+#define SPLASH_BY       "Designed & built by"
+#define SPLASH_TITLE_Y  1
+#define SPLASH_TRACE_Y  24 /* baseline; the R wave peaks 10 rows higher */
+#define SPLASH_BY_Y     30
+#define SPLASH_NAME_Y   41
+#define SPLASH_FOOT_Y   56
+#define SPLASH_X0       6  /* trace from here ... */
+#define SPLASH_X1       (OLED_W - 7) /* ... to here */
+#define BOOT_DRAW_MS    1000u /* the trace draws itself across */
+#define BYE_DOT_MS      400u  /* "Powering off" gains a dot every 0.4 s */
+
+/* A flat line with one heartbeat in the middle, drawn left of column reveal. */
+static void splash_trace(int reveal)
+{
+    const int bx = (OLED_W - BEAT_PX) / 2, y = SPLASH_TRACE_Y;
+    gfx_hline(SPLASH_X0, bx, y, GFX_SET);
+    for (int i = 1; i < NPTS(ecg_beat); i++) /* 1 px: a crisp spike */
+        gfx_line(bx + ecg_beat[i - 1].x, y + ecg_beat[i - 1].y * 5 / 8, bx + ecg_beat[i].x,
+                 y + ecg_beat[i].y * 5 / 8, GFX_SET);
+    gfx_hline(bx + BEAT_PX, SPLASH_X1, y, GFX_SET);
+    gfx_fill(reveal, y - 11, OLED_W, 16, GFX_CLR);
+}
+
+static void splash_credit(void)
+{
+    gfx_med(OLED_W / 2, SPLASH_TITLE_Y, "ECG Card", TXT_CENTER);
+    gfx_text(OLED_W / 2, SPLASH_BY_Y, SPLASH_BY, TXT_CENTER);
+    gfx_med(OLED_W / 2, SPLASH_NAME_Y, SPLASH_NAME, TXT_CENTER);
+}
+
+static void screen_boot(const ui_model_t *m)
+{
+    splash_credit();
+    unsigned t = m->screen_ms < BOOT_DRAW_MS ? m->screen_ms : BOOT_DRAW_MS;
+    splash_trace(SPLASH_X0 + (int)(t * (unsigned)(SPLASH_X1 + 2 - SPLASH_X0) / BOOT_DRAW_MS));
+    if (m->fw_version) {
+        /* "v0.1.0" without copying a string of unknown length */
+        int wv = gfx_text_width("v", 0) + 1;
+        int x = OLED_W / 2 - (wv + gfx_text_width(m->fw_version, 0)) / 2;
+        gfx_text(x, SPLASH_FOOT_Y, "v", TXT_LEFT);
+        gfx_text(x + wv, SPLASH_FOOT_Y, m->fw_version, TXT_LEFT);
+    }
+}
+
+static void screen_power_down(const ui_model_t *m)
+{
+    splash_credit();
+    splash_trace(OLED_W);
+    /* the words stay put while the dots appear */
+    int x = OLED_W / 2 - gfx_text_width("Powering off...", 0) / 2;
+    x += gfx_text(x, SPLASH_FOOT_Y, "Powering off", TXT_LEFT) + 1;
+    unsigned dots = 1u + m->screen_ms / BYE_DOT_MS;
+    gfx_text_n(x, SPLASH_FOOT_Y, "...", (int)(dots < 3u ? dots : 3u), TXT_LEFT);
+}
+
 /* ---- overlays: full-screen, framed ---------------------------------------- */
 
 static void overlay(const ui_model_t *m)
@@ -769,6 +827,8 @@ void ui_render(const ui_model_t *m, uint8_t fb[OLED_FB_BYTES])
     case UI_SCREEN_BOTH: screen_live(m); break;
     case UI_SCREEN_SUMMARY: screen_summary(m); break;
     case UI_SCREEN_DIAG: screen_diag(m); break;
+    case UI_SCREEN_BOOT: screen_boot(m); break;
+    case UI_SCREEN_POWER_DOWN: screen_power_down(m); break;
     default: screen_home(m); break;
     }
 }

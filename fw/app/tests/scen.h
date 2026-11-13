@@ -22,15 +22,28 @@ typedef struct {
     double max_led_ma;                 /* largest LED current seen lit */
     uint32_t vref_outside_ppg;         /* MCP4728 internal reference on with no PPG session */
     uint32_t violations_seen;
+    /* frames drawn per screen kind, and the designer's name (gfx_text_hook) */
+    uint32_t boot_frames, power_down_frames;
+    uint32_t name_runs;                /* "Matthew Austin" drawn */
+    int name_h;                        /* ... in a font this many rows tall */
 } scen_stats_t;
 
 extern scen_stats_t scen;
 
 /* Fresh world (sim_reset, ABORT mode) then app_init(). keep_nv: keep the
- * flash content of the previous test. */
+ * flash content of the previous test. Then scen_skip_boot_screen(): the
+ * card is on Home ~160 ms after the reset. */
 void scen_boot(bool keep_nv);
-/* MCU reset (sim_reboot) then app_init(); the world keeps its state. */
+/* MCU reset (sim_reboot) then app_init() and scen_skip_boot_screen(); the
+ * world keeps its state. */
 void scen_reboot(void);
+/* The same without skipping: the boot screen is up (no step run yet). */
+void scen_boot_splash(bool keep_nv);
+void scen_reboot_splash(void);
+/* Boot screen showing (after one main-loop pass): skip it the way a user
+ * does, with a BUTTON2 tap (swallowed: no event, no navigation). Returns
+ * whether it was showing. */
+bool scen_skip_boot_screen(void);
 
 /* Run the main loop until absolute sim time t_ms (or sim_should_stop()). */
 void scen_run_until(uint64_t t_ms);
@@ -43,6 +56,10 @@ void scen_press(int button, uint64_t hold_ms);
 void scen_tap(int button);
 /* Both buttons together for hold_ms. */
 void scen_press_both(uint64_t hold_ms);
+
+/* BUTTON1 long (2.2 s) and release: the power-down screen, then STANDBY.
+ * Returns once in STANDBY (at most 2.5 s after the release). */
+void scen_power_off(void);
 
 /* Model of the last frame drawn, and helpers on it. */
 const ui_model_t *scen_m(void);
