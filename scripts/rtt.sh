@@ -39,12 +39,23 @@ if [ -n "$elf" ] && [ -f "$elf" ]; then
 fi
 
 pids=()
-cleanup() { for p in "${pids[@]}"; do kill "$p" 2>/dev/null || true; done; }
+cleanup() {
+    for p in "${pids[@]}"; do kill "$p" 2>/dev/null || true; done
+    pkill -P $$ 2>/dev/null || true
+}
 trap cleanup EXIT INT TERM
 
-# JLinkRTTLogger quits on any key press: give it a stdin that never sends one.
+# JLinkRTTLogger is an interactive tool that quits on any key press, and it
+# shuts down at once when its stdin is not a terminal. Run it on a
+# pseudo-terminal (util-linux "script") whose input never sends anything.
 run_logger() { # channel file
-    sleep infinity | "$LOGGER" "${common[@]}" -RTTChannel "$1" "$2" &
+    if command -v script >/dev/null 2>&1; then
+        local cmd
+        printf -v cmd '%q ' "$LOGGER" "${common[@]}" -RTTChannel "$1" "$2"
+        sleep infinity | script -qfec "$cmd" /dev/null &
+    else
+        sleep infinity | "$LOGGER" "${common[@]}" -RTTChannel "$1" "$2" &
+    fi
     pids+=("$!")
 }
 
@@ -70,7 +81,8 @@ log)
     ;;
 capture)
     [ -n "$out" ] || usage
-    sleep infinity | "$LOGGER" "${common[@]}" -RTTChannel 1 "$out"
+    run_logger 1 "$out"
+    wait
     ;;
 both)
     [ -n "$out" ] || usage

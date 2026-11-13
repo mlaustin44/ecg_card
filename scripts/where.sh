@@ -30,11 +30,11 @@ rtt="$("$NM" "$elf" | awk '$3 == "_SEGGER_RTT" { print "0x" $1 }')"
 tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT
 {
+    # "h" prints the registers itself. Three samples 200 ms apart show
+    # whether the PC is moving.
     echo "h"
-    echo "regs"
-    # Two more samples 200 ms apart show whether the PC is moving.
-    echo "g"; echo "sleep 200"; echo "h"; echo "regs"
-    echo "g"; echo "sleep 200"; echo "h"; echo "regs"
+    echo "g"; echo "sleep 200"; echo "h"
+    echo "g"; echo "sleep 200"; echo "h"
     if [ -n "$rtt" ]; then echo "mem32 $rtt, 12"; fi
     echo "g"
     echo "qc"
@@ -69,4 +69,6 @@ esac
 if [ -n "$rtt" ]; then
     echo "RTT block at $rtt: first words should read 47474553 52205245 00005454 ('SEGGER RTT');"
     echo "all zero means hal_init() has not reached (or keeps restarting before) RTT init."
+    echo "Channel 0 is the 7th-11th words: name, buffer, size, WrOff, RdOff. WrOff moving"
+    echo "means the firmware is logging; RdOff stuck at 0 means no host is reading."
 fi
