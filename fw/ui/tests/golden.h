@@ -4,8 +4,8 @@ static const golden_t golden[] = {
     {"card_ecg", 0xA97519D0u},
     {"card_both", 0xA81F321Eu},
     {"settings_2", 0xD60729B9u}, /* scroll arrow: Settings has 6 rows */
-    {"about", 0x0D028659u},
-    {"about_radio", 0x54E6FE38u},
+    {"about", 0x4AE6F624u},
+    {"about_radio", 0x28B7B439u},
     {"settings_5", 0x07FF11B1u},
     {"home_ble_adv", 0xD5BF89BAu},
     {"home_ble_conn", 0x025A0DD4u},

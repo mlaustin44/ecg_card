@@ -345,7 +345,8 @@ TEST(boot_trace_animation)
     CHECK(half > 20 && half < full);
 }
 
-/* The credit is only on the boot and power-down screens and the About page. */
+/* The full name is only on the boot and power-down screens (About shows
+ * the short form "M Austin"). */
 TEST(name_only_on_splash_screens)
 {
     for (int i = 0; i < n_scenarios; i++) {
@@ -353,11 +354,12 @@ TEST(name_only_on_splash_screens)
         scenarios[i].setup(&m);
         render_runs(&m);
         bool splash = m.overlay == UI_OVERLAY_NONE &&
-                      (m.screen == UI_SCREEN_BOOT || m.screen == UI_SCREEN_POWER_DOWN ||
-                       m.screen == UI_SCREEN_ABOUT);
+                      (m.screen == UI_SCREEN_BOOT || m.screen == UI_SCREEN_POWER_DOWN);
         if ((find_run(NAME) != NULL) != splash)
             printf("  %s: name %s\n", scenarios[i].name, splash ? "missing" : "unexpected");
         CHECK_EQ(find_run(NAME) != NULL, splash);
+        if (m.overlay == UI_OVERLAY_NONE && m.screen == UI_SCREEN_ABOUT)
+            CHECK(find_run("Designed by") != NULL && find_run("M Austin") != NULL);
     }
 }
 

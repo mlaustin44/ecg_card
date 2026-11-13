@@ -410,6 +410,7 @@ static void screen_settings(const ui_model_t *m)
 /* Hardware designer credit: boot and power-down screens, About page. */
 #define CREDIT_NAME "Matthew Austin"
 #define CREDIT_YEAR "2026"
+#define CREDIT_SHORT "M Austin"
 
 static void kv_row(int y, const char *k, const char *v)
 {
@@ -446,7 +447,7 @@ static void screen_about(const ui_model_t *m)
         str_cpy(b, "--");
     }
     kv_row(38, "Battery", b);
-    kv_row(47, "Design", CREDIT_NAME);
+    kv_row(47, "Designed by", CREDIT_SHORT);
     hint_row(NULL, NULL, UI_SCREEN_ABOUT);
 }
 
