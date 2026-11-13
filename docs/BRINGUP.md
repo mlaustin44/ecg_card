@@ -32,7 +32,7 @@ into the repo root, or keep it anywhere and pass its path to `setup_toolchain.sh
 |---|---|
 | `cmake` >= 3.20, `ninja`, `curl`, `tar`/`xz`, x86_64 Linux | `CMakePresets.json` (Ninja); toolchain download in `setup_toolchain.sh` |
 | Network on first setup | `setup_toolchain.sh` downloads Arm GNU 14.2.rel1 with `curl` from developer.arm.com |
-| SEGGER J-Link software: `JLinkExe`, `JLinkRTTLogger`, `JLinkGDBServerCLExe` | `flash.sh`, `rtt.sh`, `gdb.sh`. It must know device `MSPM0G3507` (unverified: if J-Link reports an unknown device, update the J-Link software) |
+| SEGGER J-Link software: `JLinkExe`, `JLinkGDBServerCLExe`, and its library used through the Python package `pylink-square` (`.venv/bin/pip install -r tools/requirements.txt`) | `flash.sh`, `gdb.sh`, `where.sh`; `rtt.sh` (wraps `tools/rtt_read.py`). It must know device `MSPM0G3507` (unverified: if J-Link reports an unknown device, update the J-Link software) |
 | `python3` with numpy, scipy, matplotlib | `tools/`. Optional venv below |
 | `clang` | only for the host preset (`cmake --preset host`), not needed to build the target |
 

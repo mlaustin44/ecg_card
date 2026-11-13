@@ -54,21 +54,24 @@ Decoder counters: `bad_crc`,
 
 ## Live capture on the laptop (J-Link, RTT channel 1)
 
-Terminal 1, log RTT channel 1 raw bytes to a file (the target must be running; the
-logger prompts nothing in this form):
+Terminal 1, read RTT through the J-Link: text log to the terminal, channel 1 raw bytes
+to a file (the target must be running; needs `pylink-square`, see `requirements.txt`):
 
-    JLinkRTTLogger -Device MSPM0G3507 -If SWD -Speed 4000 -RTTChannel 1 build/rtt.bin
+    scripts/rtt.sh -e build/target/fw/bsp/ecg_fw.elf both build/rtt.bin
+
+`scripts/rtt.sh` wraps `tools/rtt_read.py`, which takes the control-block address from
+the ELF's `_SEGGER_RTT` symbol.
 
 Terminal 2, decode while it grows:
 
     python3 tools/stream_capture.py --follow build/rtt.bin --raw build/session.bin --npz build/rec.npz
     python3 tools/stream_plot.py    --follow build/rtt.bin --window 8
 
-Ctrl-C ends a capture and writes the `.npz`. If the logger started mid-frame the decoder
+Ctrl-C ends a capture and writes the `.npz`. If the capture started mid-frame the decoder
 resynchronises at the next 0x00 delimiter by itself. For a quick check of a finished log:
 `python3 tools/stream_plot.py --report build/rtt.bin --png build/report.png`.
 
-If `JLinkRTTLogger` cannot find the RTT control block, check your J-Link software's `JLinkRTTLogger` help for an address / search-range option (not verified here) and give it the `_SEGGER_RTT` address from the map file.
+SEGGER's `JLinkRTTLogger` is not used: on the bench laptop it shut down without connecting.
 
 ## `stream_capture.py`
 

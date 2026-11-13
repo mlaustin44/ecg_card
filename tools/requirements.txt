@@ -2,5 +2,6 @@ numpy>=2.0
 scipy>=1.13
 matplotlib>=3.8
 pytest>=8
+pylink-square>=1.2    # J-Link RTT reader (tools/rtt_read.py)
 # optional, for live UART capture:
 # pyserial
