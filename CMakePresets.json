@@ -2,7 +2,7 @@
   "version": 3,
   "configurePresets": [
     { "name": "host", "generator": "Ninja", "binaryDir": "${sourceDir}/build/host",
-      "cacheVariables": { "CMAKE_BUILD_TYPE": "Debug" } },
+      "cacheVariables": { "CMAKE_BUILD_TYPE": "Debug", "CMAKE_C_COMPILER": "clang" } },
     { "name": "target", "generator": "Ninja", "binaryDir": "${sourceDir}/build/target",
       "toolchainFile": "${sourceDir}/cmake/arm-none-eabi.cmake",
       "cacheVariables": { "CMAKE_BUILD_TYPE": "Release" } }

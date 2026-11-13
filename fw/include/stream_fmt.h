@@ -4,7 +4,7 @@
  * On the wire: COBS(frame) followed by one 0x00 delimiter.
  * Decoded frame, little-endian:
  *   u8  type
- *   u8  seq        counter, +1 per frame sent (wraps)
+ *   u8  seq        one counter for all frame types, +1 per frame sent (wraps)
  *   u16 len        payload length, 0..512
  *   u8  payload[len]
  *   u16 crc        CRC-16/CCITT-FALSE (poly 0x1021, init 0xFFFF, no reflect,
@@ -23,8 +23,10 @@
  *                  (AGC or offset step), bit2 no finger
  *   { i16 coarse; i16 fine; } f[2]
  *                  coarse = tia_on - tia_dark (ADC codes, 0.81 nA per code)
- *                  fine   = pulsatile waveform, 81 pA per code, continuous
- *                           across DAC12 offset steps (wraps modulo 2^16)
+ *                  fine   = dsp_ppg_fine(): minus the LED-induced
+ *                           photocurrent in 80.6 pA units, so the systolic
+ *                           upstroke points up; continuous across DAC12
+ *                           offset steps; wraps modulo 2^16
  *
  * STREAM_EVENT (0x12): u8 kind, then kind-specific payload:
  *   EV_R_PEAK    (1): u32 sample index (500 Hz), u16 hr_bpm

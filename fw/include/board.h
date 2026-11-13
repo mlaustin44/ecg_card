@@ -28,7 +28,8 @@
  *   SWDIO PA19 [41], SWCLK PA20 [42]   DAC12 out PA15 [37] analog, unconnected
  * Unused, output low: PA6 [11], PA7 [14], PA21 [46], PA23 [53], PA24 [54],
  *   PA25 [55], PB24 [52].
- * (PINCM indices are to be re-verified against the SDK by the BSP.) */
+ * PINCM indices verified against mspm0g350x.h. ADC1 channel 8 is the A0_7
+ * input on PA22 (datasheet ADC channel mapping table). */
 typedef enum {
     /* outputs, all with board pull-downs: reset state is low */
     PIN_FAST_RESTORE, /* high = short ECG high-pass node to VMID */

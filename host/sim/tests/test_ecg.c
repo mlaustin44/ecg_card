@@ -1,0 +1,322 @@
+#include <math.h>
+#include <string.h>
+
+#include "common.h"
+
+typedef struct { double amp_uv, hz; } sine_t;
+static int32_t sine(uint64_t t_us, void *ctx)
+{
+    const sine_t *s = ctx;
+    return (int32_t)lrint(s->amp_uv * sin(6.283185307179586 * s->hz * (double)t_us * 1e-6));
+}
+
+#define MAXS 20000
+static uint16_t buf[MAXS];
+static size_t nbuf;
+
+/* Run for ms, reading every ms so the ring never overruns. */
+static void collect(unsigned ms)
+{
+    nbuf = 0;
+    for (unsigned i = 0; i < ms; i++) {
+        hal_wdt_kick();
+        hal_delay_ms(1);
+        nbuf += hal_ecg_read(buf + nbuf, MAXS - nbuf);
+    }
+}
+static void run_ms(unsigned ms)
+{
+    while (ms--) {
+        hal_wdt_kick();
+        hal_delay_ms(1);
+    }
+}
+static void stats(size_t from, double *mean, double *half_pp, double *sd)
+{
+    double sum = 0, sq = 0;
+    uint16_t mn = 65535, mx = 0;
+    size_t n = nbuf - from;
+    for (size_t i = from; i < nbuf; i++) {
+        sum += buf[i];
+        sq += (double)buf[i] * buf[i];
+        if (buf[i] < mn) mn = buf[i];
+        if (buf[i] > mx) mx = buf[i];
+    }
+    *mean = sum / (double)n;
+    *half_pp = (mx - mn) / 2.0;
+    *sd = sqrt(sq / (double)n - *mean * *mean);
+}
+
+static void bring_up(bool gain_hi, bool thumbs)
+{
+    ecg_rails_up();
+    if (gain_hi) high(PIN_GAIN_HI);
+    high(PIN_RLD_L_EN);
+    high(PIN_RLD_R_EN);
+    high(PIN_MEASURE_REQ);
+    sim_set_thumbs(thumbs);
+    hal_clock_fast(true);
+    hal_acq_start(HAL_ACQ_ECG);
+}
+
+TEST(vmid_settles_with_50ms_tau)
+{
+    fresh();
+    CHECK_EQ(hal_adc_read_once(HAL_ADC_VMID), 0);
+    high(PIN_ANA_EN);
+    hal_delay_ms(50);
+    unsigned c = hal_adc_read_once(HAL_ADC_VMID);
+    CHECK_NEAR(c, 2048.0 * (1.0 - exp(-1.0)), 8); /* ~1 tau */
+    hal_delay_ms(250);
+    c = hal_adc_read_once(HAL_ADC_VMID);
+    CHECK_NEAR(c, 2048, 12); /* within 10 mV after 300 ms */
+    CHECK_NEAR(sim_vmid_mv(), 1650, 5);
+    /* configurable error for fault tests */
+    sim_ecg_set_vmid_error_mv(100);
+    hal_delay_ms(500);
+    c = hal_adc_read_once(HAL_ADC_VMID);
+    CHECK_NEAR(c, (1650 + 100) / 3300.0 * 4096.0, 2);
+    /* rail off: decays */
+    sim_ecg_set_vmid_error_mv(0);
+    low(PIN_ANA_EN);
+    hal_delay_ms(500);
+    CHECK(hal_adc_read_once(HAL_ADC_VMID) < 5);
+    CHECK_EQ(sim_violation_count(), 0);
+}
+
+TEST(sine_amplitude_both_gains)
+{
+    const double gains[2] = {ECG_GAIN_LO, ECG_GAIN_HI};
+    for (int g = 0; g < 2; g++) {
+        fresh();
+        sine_t s = {1000.0, 10.0};
+        sim_set_ecg_source(sine, &s);
+        sim_ecg_set_contact_offset_uv(0);
+        sim_ecg_set_contact_transient_uv(0);
+        bring_up(g == 1, true);
+        collect(1500);
+        double mean, hpp, sd;
+        stats(nbuf - 2000, &mean, &hpp, &sd); /* last 0.5 s = 5 cycles */
+        double expect = gains[g] * 1e-3 / 3.3 * 4096.0;
+        CHECK_NEAR(mean, 2048, 3);
+        CHECK_NEAR(hpp, expect * 0.996, 3.0);
+        CHECK_EQ(hal_ecg_overruns(), 0);
+        CHECK_EQ(sim_violation_count(), 0);
+        /* uV conversion the firmware will use: (code - mid) * 805.7 / gain */
+        CHECK_NEAR(hpp * 805.7 / gains[g], 1000.0, 8.0);
+    }
+}
+
+TEST(sample_timing_exactly_4khz)
+{
+    fresh();
+    ecg_rails_up();
+    hal_clock_fast(true);
+    hal_acq_start(HAL_ACQ_ECG);
+    uint16_t tmp[300];
+    size_t n = hal_ecg_read(tmp, 300);
+    CHECK_EQ(n, 1); /* sample 0 at t = 0 */
+    hal_delay_us(249);
+    CHECK_EQ(hal_ecg_read(tmp, 300), 0);
+    hal_delay_us(1);
+    CHECK_EQ(hal_ecg_read(tmp, 300), 1);
+    hal_delay_ms(10);
+    CHECK_EQ(hal_ecg_read(tmp, 300), 40);
+    CHECK_EQ(sim_facts()->ecg_samples, 42);
+    hal_acq_stop();
+    hal_delay_ms(10);
+    CHECK_EQ(hal_ecg_read(tmp, 300), 0);
+    CHECK_EQ(hal_acq_running(), 0);
+    /* restart: indices restart, sample 0 immediately */
+    hal_acq_start(HAL_ACQ_ECG);
+    CHECK_EQ(hal_ecg_read(tmp, 300), 1);
+}
+
+TEST(overrun_counting)
+{
+    fresh();
+    ecg_rails_up();
+    hal_clock_fast(true);
+    hal_acq_start(HAL_ACQ_ECG);
+    hal_delay_ms(100); /* samples 0..400 = 401 */
+    CHECK_EQ(sim_facts()->ecg_samples, 401);
+    CHECK_EQ(hal_ecg_overruns(), 401 - SIM_ECG_RING_SAMPLES);
+    uint16_t tmp[512];
+    CHECK_EQ(hal_ecg_read(tmp, 512), SIM_ECG_RING_SAMPLES);
+    CHECK_EQ(hal_ecg_read(tmp, 512), 0);
+    /* partial reads keep order and nothing is lost */
+    hal_delay_ms(10);
+    CHECK_EQ(hal_ecg_read(tmp, 10), 10);
+    CHECK_EQ(hal_ecg_read(tmp, 512), 40 - 10);
+    CHECK_EQ(hal_ecg_overruns(), 401 - SIM_ECG_RING_SAMPLES);
+}
+
+TEST(lead_off_railing)
+{
+    fresh();
+    bring_up(false, false); /* thumbs off */
+    collect(300);
+    double mean, hpp, sd;
+    stats(0, &mean, &hpp, &sd);
+    CHECK(mean > 4096 * 0.95 || mean < 4096 * 0.05);
+    CHECK(hpp < 100);
+    /* thumbs on but BODY_EN low (MEASURE_REQ low) is just as railed */
+    low(PIN_MEASURE_REQ);
+    sim_set_thumbs(true);
+    collect(100);
+    stats(0, &mean, &hpp, &sd);
+    CHECK(mean > 4096 * 0.95);
+    /* USB present also disconnects the electrodes */
+    high(PIN_MEASURE_REQ);
+    sim_ecg_set_contact_offset_uv(0);
+        sim_ecg_set_contact_transient_uv(0);
+    collect(200);
+    stats(nbuf - 100, &mean, &hpp, &sd);
+    CHECK_NEAR(mean, 2048, 5);
+    sim_set_usb(true);
+    CHECK(!sim_rail(SIM_RAIL_BODY_EN));
+    collect(100);
+    stats(nbuf - 50, &mean, &hpp, &sd);
+    CHECK(mean > 4096 * 0.95);
+    CHECK_EQ(sim_violation_count_of(SIM_V_GUARDED_PIN_ANA_LOW), 0);
+    /* low rail variant */
+    sim_ecg_set_float_high(false);
+    collect(50);
+    stats(nbuf - 20, &mean, &hpp, &sd);
+    CHECK(mean < 4096 * 0.05);
+}
+
+/* Time (ms) after contact after which |code - mid| stays below 25 % of full scale. */
+static int settle_ms(bool pulse_fr, double *first_code)
+{
+    fresh();
+    bring_up(false, false);
+    collect(50);
+    sim_set_thumbs(true); /* contact: large offset step */
+    int last_bad = -1;
+    for (int ms = 0; ms < 6000; ms++) {
+        hal_wdt_kick();
+        if (pulse_fr && ms == 40) high(PIN_FAST_RESTORE);
+        if (pulse_fr && ms == 70) low(PIN_FAST_RESTORE);
+        hal_delay_ms(1);
+        uint16_t c[8];
+        size_t n = hal_ecg_read(c, 8);
+        if (ms == 5) *first_code = c[n - 1];
+        if (fabs((double)c[n - 1] - 2048.0) >= 1024.0) last_bad = ms;
+    }
+    return last_bad + 1;
+}
+
+TEST(contact_step_and_fast_restore)
+{
+    double first;
+    int t_plain = settle_ms(false, &first);
+    CHECK(first > 3891 || first < 205); /* railed right after contact */
+    (void)0;
+    CHECK(t_plain > 300 && t_plain < 1500);
+    double first2;
+    int t_fr = settle_ms(true, &first2);
+
+    CHECK(t_fr > 0);
+    CHECK(t_fr < t_plain);
+    CHECK(t_plain - t_fr > 200);
+    CHECK(t_fr < 150); /* FR at 40..70 ms removes the offset; only the small first-stage tail is left */
+    /* during the pulse the output sits at mid */
+    fresh();
+    bring_up(false, true);
+    hal_delay_ms(40);
+    high(PIN_FAST_RESTORE);
+    hal_delay_ms(30);
+    uint16_t c[300];
+    size_t n = hal_ecg_read(c, 300);
+    CHECK_NEAR(c[n - 1], 2048, 6);
+    CHECK_EQ(sim_violation_count(), 0);
+    /* with a small offset (no saturation) the HP node settling is observable at the output:
+       an offset of 0.5 mV settles from <1 V swing; after FR + 3 s residual < 25 codes */
+    fresh();
+    sim_ecg_set_contact_offset_uv(500);
+    bring_up(false, false);
+    hal_delay_ms(20);
+    sim_set_thumbs(true);
+    hal_delay_ms(10);
+    high(PIN_FAST_RESTORE);
+    hal_delay_ms(30);
+    low(PIN_FAST_RESTORE);
+    run_ms(3000);
+    n = hal_ecg_read(c, 300);
+    CHECK(fabs((double)c[n - 1] - 2048.0) < 25);
+}
+
+TEST(gain_and_rld_changes_inject_steps)
+{
+    fresh();
+    sim_ecg_set_contact_offset_uv(0);
+        sim_ecg_set_contact_transient_uv(0);
+    ecg_rails_up();
+    high(PIN_MEASURE_REQ);
+    sim_set_thumbs(true);
+    hal_delay_ms(100);
+    double before = hal_adc_read_once(HAL_ADC_ECG);
+    CHECK_NEAR(before, 2048, 2);
+    high(PIN_GAIN_HI);
+    run_ms(5);
+    double after = hal_adc_read_once(HAL_ADC_ECG);
+    double expect = 15.0 / 3300.0 * 4096.0;
+    CHECK_NEAR(after - before, expect, 3);
+    CHECK_NEAR(hal_adc_read_once(HAL_ADC_ECG) - before, 0.0, 30.0); /* before the 1 ms LP moves */
+    run_ms(3000);
+    CHECK_NEAR(hal_adc_read_once(HAL_ADC_ECG), 2048, 2); /* decays away */
+    high(PIN_RLD_L_EN);
+    run_ms(5);
+    CHECK_NEAR(hal_adc_read_once(HAL_ADC_ECG) - 2048.0, 8.0 / 3300.0 * 4096.0, 3);
+    CHECK_EQ(sim_violation_count(), 0);
+}
+
+TEST(mains_and_noise)
+{
+    double amp[2];
+    for (int r = 0; r < 2; r++) {
+        fresh();
+        sim_ecg_set_contact_offset_uv(0);
+        sim_ecg_set_contact_transient_uv(0);
+        sim_ecg_set_mains(50.0, 20.0);
+        ecg_rails_up();
+        if (r == 0) {
+            high(PIN_RLD_L_EN);
+            high(PIN_RLD_R_EN);
+        }
+        high(PIN_MEASURE_REQ);
+        sim_set_thumbs(true);
+        hal_clock_fast(true);
+        hal_acq_start(HAL_ACQ_ECG);
+        collect(1500);
+        double mean, hpp, sd;
+        stats(nbuf - 2000, &mean, &hpp, &sd);
+        amp[r] = hpp;
+    }
+    CHECK_NEAR(amp[0], 558.0 * 20e-6 / 3.3 * 4096.0, 2.0);
+    CHECK_NEAR(amp[1] / amp[0], 10.0, 0.5);
+
+    fresh();
+    sim_ecg_set_contact_offset_uv(0);
+        sim_ecg_set_contact_transient_uv(0);
+    sim_ecg_set_noise_uv(100.0);
+    bring_up(false, true);
+    collect(1000);
+    double mean, hpp, sd;
+    stats(nbuf - 2000, &mean, &hpp, &sd);
+    CHECK(sd > 5.0 && sd < 100.0);
+}
+
+int main(void)
+{
+    RUN(vmid_settles_with_50ms_tau);
+    RUN(sine_amplitude_both_gains);
+    RUN(sample_timing_exactly_4khz);
+    RUN(overrun_counting);
+    RUN(lead_off_railing);
+    RUN(contact_step_and_fast_restore);
+    RUN(gain_and_rld_changes_inject_steps);
+    RUN(mains_and_noise);
+    return TEST_RESULT();
+}

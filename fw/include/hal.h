@@ -59,7 +59,7 @@ void hal_irq_unlock(uint32_t state);
  * keeps counting through STANDBY. */
 uint32_t hal_millis(void); /* ISR-safe */
 uint32_t hal_rtc_seconds(void);
-void hal_delay_ms(uint32_t ms); /* busy/sleep wait; kicks nothing */
+void hal_delay_ms(uint32_t ms); /* busy/sleep wait; kicks nothing; main loop only */
 void hal_delay_us(uint32_t us);
 
 /* MCLK: true = 80 MHz SYSPLL (acquisition), false = 32 MHz SYSOSC.
@@ -95,12 +95,15 @@ void hal_idle(void);
 /* Enter STANDBY. Preconditions (caller's job): acquisition stopped, every
  * switched rail off, OLED bus detached, MCLK slow. SysTick stops. Returns
  * the HAL_EV_* bits that caused the wake (they also stay latched).
- * wake_after_s = 0 means no timed wake. */
+ * wake_after_s = 0 means no timed wake; the timed wake has 1 s granularity.
+ * A stale HAL_EV_RTC is discarded on entry (the 1 Hz tick is not a wake
+ * source); any other event already pending makes the call return at once. */
 uint32_t hal_standby(uint32_t wake_after_s);
 
 /* ---- I2C0 (400 kHz controller) -------------------------------------------
  * Write wn bytes, then (repeated start) read rn bytes. Either may be 0.
- * Blocking with an internal timeout of about 10 ms. */
+ * Blocking with an internal timeout of about 10 ms. wn = rn = 0 is an
+ * address-only probe (HAL_OK if the device acknowledges). */
 hal_status_t hal_i2c_xfer(uint8_t addr, const uint8_t *w, size_t wn,
                           uint8_t *r, size_t rn);
 /* Bus-hang recovery: 9 clock pulses, STOP, re-init. */
@@ -112,7 +115,8 @@ void hal_i2c_recover(void);
  * attach(false): SCK and MOSI driven low as GPIO (the driver separately
  * drives DC, CS and RESET low). Required before OLED_EN goes low. */
 void hal_oled_bus_attach(bool attached);
-/* Blocking write; returns after the last bit has left the shifter. */
+/* Blocking write; returns after the last bit has left the shifter. Must not
+ * be called while an async write is busy. */
 void hal_oled_write(const uint8_t *buf, size_t n);
 /* DMA write. buf must stay valid and unchanged until hal_oled_busy() is
  * false. Returns false if a transfer is already running. */
@@ -125,6 +129,7 @@ bool hal_oled_busy(void);
  *   ECG raw sample n is taken at        t = n * 250 us
  *   PPG frame k: dark sample at         t = k * 10 ms + PPG_T_DARK_US
  *                LED on (LED_BLANK low) t = k * 10 ms + PPG_T_LED_ON_US
+ *                                       (until one timer tick before frame end)
  *                on sample at           t = k * 10 ms + PPG_T_ON_SAMPLE_US
  * hal_acq_start() requires that no stream is running; to change the set of
  * streams, stop everything and start again. Sample/frame indices restart
@@ -140,8 +145,10 @@ unsigned hal_acq_running(void);
 
 /* ECG: raw 12-bit ADC0 codes (hardware-averaged x4) at ECG_RAW_HZ, in order.
  * Returns the number of samples copied (0..max). The internal buffer holds
- * at least 64 ms; if the reader falls behind, the oldest data is lost and
- * hal_ecg_overruns() increments by the number of samples dropped. */
+ * at least 64 ms; if the reader falls behind, the oldest data is lost.
+ * hal_ecg_overruns() counts every sample lost for any reason (slow reader or
+ * a missed conversion), cumulatively since hal_init(), so the index of the
+ * next sample returned = samples read + overruns counted since the start. */
 size_t hal_ecg_read(uint16_t *dst, size_t max);
 uint32_t hal_ecg_overruns(void);
 
@@ -153,10 +160,12 @@ typedef struct {
     uint16_t hi_on;    /* PPG_HI, LEDs on */
 } hal_ppg_frame_t;
 size_t hal_ppg_read(hal_ppg_frame_t *dst, size_t max);
-uint32_t hal_ppg_overruns(void);
+uint32_t hal_ppg_overruns(void); /* lost frames; same rule as the ECG counter */
 
 /* PPG on-chip analog: COMP0 DAC8 photodiode bias, OPA0 (TIA), DAC12, OPA1.
- * The GPAMP is never enabled. */
+ * The GPAMP is never enabled. The DAC12 offset is undefined after
+ * hal_ppg_analog(true) until hal_ppg_set_offset() is called. Must not be
+ * turned off while the PPG stream is running. */
 void hal_ppg_analog(bool on);
 /* DAC12 offset code (0..4095, VDDA reference). Takes effect immediately;
  * call right after hal_ppg_read() returned a frame so the step lands in the
@@ -164,7 +173,8 @@ void hal_ppg_analog(bool on);
 void hal_ppg_set_offset(uint16_t dac12_code);
 
 /* One-shot conversions for start-up checks and diagnostics: 16-sample
- * average, 12-bit code. Only valid while no acquisition stream is running. */
+ * average, 12-bit code. Only valid while no acquisition stream is running
+ * (returns 0 otherwise). */
 typedef enum {
     HAL_ADC_ECG,     /* PA14 */
     HAL_ADC_TIA,     /* PA22 */
@@ -176,7 +186,10 @@ uint16_t hal_adc_read_once(hal_adc_ch_t ch);
 
 /* ---- Non-volatile settings blob (last flash sector) ----------------------
  * A single blob of up to HAL_NV_MAX bytes. Integrity (CRC, versioning) is
- * the caller's job. hal_nv_read() of never-written storage yields 0xFF. */
+ * the caller's job. hal_nv_read() of never-written storage yields 0xFF.
+ * hal_nv_write() blocks for tens of ms with interrupts masked, so it must not
+ * be called during acquisition. Errors: HAL_ERR_PARAM (n too large),
+ * HAL_ERR_TIMEOUT (erase/program failed), HAL_ERR_BUS (verify mismatch). */
 #define HAL_NV_MAX 256u
 void hal_nv_read(void *dst, size_t n);
 hal_status_t hal_nv_write(const void *src, size_t n);
