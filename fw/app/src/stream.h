@@ -1,4 +1,4 @@
-/* Stream output (RTT channel 1, later the radio UART): COBS + CRC-16/
+/* Stream output (RTT channel 1; a tap forwards to the radio link): COBS + CRC-16/
  * CCITT-FALSE framing per fw/include/stream_fmt.h, one global sequence
  * counter, typed emitters. Frames that hal_stream_write() does not accept
  * are counted as dropped, never retried and never waited for. */
@@ -30,6 +30,11 @@ size_t stream_build(uint8_t type, uint8_t seq, const uint8_t *payload, size_t le
 
 /* ---- output ---- */
 void stream_init(void);
+/* Tap: called with every frame stream_send() produces (whether or not RTT
+ * took it), before it is written. The radio link uses it to forward data to
+ * a connected phone. stream_init() keeps the tap; NULL removes it. */
+typedef void (*stream_tap_t)(uint8_t type, const uint8_t *payload, size_t len);
+void stream_set_tap(stream_tap_t tap);
 bool stream_send(uint8_t type, const uint8_t *payload, size_t len);
 uint32_t stream_frames(void);  /* accepted */
 uint32_t stream_drops(void);   /* rejected by hal_stream_write() */
@@ -42,5 +47,7 @@ void stream_ev_lead(bool contact);
 void stream_ev_state(uint8_t mode, uint8_t notch_hz, uint16_t mid_code, uint8_t batt_pct,
                      uint8_t flags);
 void stream_ev_button(uint8_t button, uint8_t kind);
+/* STREAM_EV_CMD_RESULT (link_fmt.h): outcome of a phone command. */
+void stream_ev_cmd_result(uint8_t cmd, uint8_t result);
 
 #endif

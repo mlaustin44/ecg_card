@@ -52,6 +52,7 @@ static struct {
     hal_reset_cause_t boot_cause, latched_cause;
     sim_facts_t facts;
     uint64_t rng;
+    bool irq_masked;
 } S;
 
 static struct {
@@ -183,6 +184,7 @@ int sim_soc_override_get(void) { return S.soc_override; }
 bool sim_thumbs(void) { return S.thumbs; }
 bool sim_finger(void) { return S.finger; }
 bool sim_acq_running_any(void) { return an_running() != 0; }
+bool sim_irq_masked(void) { return S.irq_masked; }
 
 bool sim_body_en(void)
 {
@@ -428,6 +430,8 @@ static void pin_set(board_pin_t pin, bool high)
         if (oled_dma_active())
             sim_viol(SIM_V_OLED_DMA_MISUSE, "OLED_EN fell during a DMA transfer");
     }
+    if (pin == PIN_RADIO_EN && !high && radio_uart_on())
+        sim_viol(SIM_V_RADIO_BACKFEED, "RADIO_EN fell with UART0 still on (PA10 idle-high)");
 
     bool old = S.pin[pin];
     S.pin[pin] = high;
@@ -441,11 +445,10 @@ static void pin_set(board_pin_t pin, bool high)
         if ((pin == PIN_OLED_DC || pin == PIN_OLED_CS || pin == PIN_OLED_RESET) &&
             !S.pin[PIN_OLED_EN])
             sim_viol(SIM_V_OLED_SIGNAL_UNPOWERED, "%s raised while OLED_EN is low", pin_names[pin]);
-        if (pin == PIN_RADIO_EN)
-            sim_viol(SIM_V_RADIO_EN, "RADIO_EN driven high (radio must stay off)");
     }
     an_pin_changed(pin, old, high);
     oled_pin_changed(pin, old, high);
+    radio_pin_changed(pin, old, high);
     if (pin == PIN_VLED_EN) mcp_vref_track();
 }
 
@@ -455,6 +458,8 @@ void hal_pin_write(board_pin_t pin, bool high)
     sim_service();
     pin_set(pin, high);
 }
+
+void sim_radio_pin_write(bool high) { pin_set(PIN_RADIO_EN, high); }
 
 bool hal_pin_read(board_pin_t pin)
 {
@@ -472,6 +477,8 @@ static uint64_t next_internal(void)
     if (S.qn) t = S.q[0].t_us;
     if (S.chg_next_us < t) t = S.chg_next_us;
     if (S.stop_at_us < t) t = S.stop_at_us;
+    uint64_t rd = radio_next_event_us();
+    if (rd < t) t = rd;
     if (!S.in_standby) {
         if (S.rtc_k_next == 0) rtc_resync();
         uint64_t r = rtc_time_of(S.rtc_k_next);
@@ -496,6 +503,7 @@ static void run_events_at(uint64_t tn)
         S.chg_next_us = tn + 250000;
         sim_input_set(PIN_CHG_STAT1, !S.pin[PIN_CHG_STAT1]);
     }
+    if (radio_next_event_us() <= tn) radio_run_events(tn);
     if (!S.in_standby) {
         if (rtc_time_of(S.rtc_k_next) <= tn) {
             S.rtc_k_next++;
@@ -562,6 +570,7 @@ static void mcu_pins_reset(void)
     S.wdt_on = false;
     an_mcu_reset();
     oled_mcu_reset();
+    radio_mcu_reset();
     mcp_vref_track(); /* VLED_EN went low; the MCP4728 keeps its registers */
 }
 
@@ -631,6 +640,8 @@ void hal_clock_fast(bool fast)
 {
     if (an_running())
         sim_viol(SIM_V_CLOCK_WHILE_ACQ, "hal_clock_fast(%d) while acquisition runs", fast);
+    sim_service();
+    if (fast != S.clock_fast) radio_clock_switch();
     S.clock_fast = fast;
 }
 
@@ -660,6 +671,7 @@ uint32_t hal_standby(uint32_t wake_after_s)
     if (S.pin[PIN_OLED_EN]) sim_viol(SIM_V_STANDBY_PRECOND, "standby with OLED_EN on");
     if (S.pin[PIN_VLED_EN]) sim_viol(SIM_V_STANDBY_PRECOND, "standby with VLED_EN on");
     if (S.pin[PIN_RADIO_EN]) sim_viol(SIM_V_STANDBY_PRECOND, "standby with RADIO_EN on");
+    if (radio_uart_on()) sim_viol(SIM_V_STANDBY_PRECOND, "standby with UART0 on");
     if (S.pin[PIN_BUCK_PS_SYNC])
         sim_viol(SIM_V_STANDBY_PRECOND, "standby with BUCK_PS_SYNC high (forced PWM)");
     if (an_running()) sim_viol(SIM_V_STANDBY_PRECOND, "standby with acquisition running");
@@ -748,7 +760,12 @@ hal_status_t hal_nv_write(const void *src, size_t n)
     S.facts.nv_erase_cycles++;
     memset(NV.data, 0xFF, sizeof NV.data);
     if (n) memcpy(NV.data, src, n);
-    advance_to(S.now_us + 15000); /* sector erase + program; CPU stalls */
+    /* sector erase + program; CPU stalls with interrupts masked */
+    radio_irq_mask_begin();
+    S.irq_masked = true;
+    advance_to(S.now_us + 15000);
+    S.irq_masked = false;
+    sim_service(); /* the RX ISR catches up */
     return HAL_OK;
 }
 
@@ -884,5 +901,6 @@ void sim_reset(void)
     i2c_reset();
     oled_reset();
     an_reset();
+    radio_reset();
     cw_power_on();
 }

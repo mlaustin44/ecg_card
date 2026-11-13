@@ -23,6 +23,7 @@ extern volatile uint32_t g_ulpclk_hz; /* current ULPCLK (PD0 BUSCLK: I2C0) */
 #define BSP_PRIO_ADC1    1u  /* PPG frame collection */
 #define BSP_PRIO_SYSTICK 2u
 #define BSP_PRIO_RTC     2u
+#define BSP_PRIO_UART    3u  /* radio UART0: lowest, never delays the ADC re-arm */
 
 /* ---- Event fabric channels (1..11 are 1:1, 12..15 are 1:2 splitters) ---- */
 #define BSP_EVT_CH_ECG   1u  /* TIMG6 CCD0 -> ADC0 trigger */
@@ -65,6 +66,9 @@ void bsp_spi_retime(void);   /* recompute SCK divider for current MCLK */
 void bsp_acq_init(void);     /* power-on configuration of the acquisition blocks */
 void bsp_rtt_init(void);
 void bsp_safe_state(void);   /* fault path: rails/switches off, LEDs blanked */
+void bsp_radio_pins_safe(void); /* PA10 GPIO low, PA11 input pull-down */
+void bsp_uart_drain_tx(void);   /* hal_clock_fast(), IRQs locked, before the switch */
+void bsp_uart_retime(void);     /* hal_clock_fast(), IRQs locked, after the switch */
 /* ECG ring reads where DMASZ and DMADA disagreed (bring-up: shows whether
  * DMADA reads back live in repeat-single mode; DMASZ is the one used). */
 uint32_t bsp_ecg_pos_mismatches(void);

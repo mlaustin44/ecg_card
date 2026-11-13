@@ -5,20 +5,50 @@
  *   2. acq_poll()            drain the ECG / PPG rings, DSP, control loops
  *   3. buttons, charger      debounce, events -> navigation actions
  *   4. session supervisor    contact / settling / timeouts / summary
- *   5. battery, power policy, settings save, diagnostics
- *   6. display               render + DMA flush at <= 25 fps, never while busy
- *   7. watchdog kick, hal_idle()
+ *   5. battery
+ *   6. radio link            UART RX, phone commands, link state machine
+ *   7. power policy, settings save, diagnostics
+ *   8. display               render + DMA flush at <= 25 fps, never while busy
+ *   9. watchdog kick, hal_idle()
  * In the off state a pass is one hal_standby() plus its wake handling.
  *
  * Nothing here blocks for more than a few ms while acquisition runs: the
  * display power-off (100 ms) and flash writes happen only with acquisition
- * stopped. */
+ * stopped. The radio path never waits (radio.h); only STANDBY entry runs the
+ * shutdown handshake inline (<= LINK_SHUTDOWN_WAIT_MS, acquisition stopped).
+ *
+ * Phone commands (LINK_CMD, radio.h) go through the same paths as the
+ * buttons (start_session(), end_session(), the Settings validation and the
+ * deferred flash save). Rules decided here:
+ *   START  refused BUSY while a session is active (no restart: STOP first),
+ *          while an overlay, Diagnostics, program mode or a pending power-off
+ *          is on screen; REFUSED_BATT with a critical battery; otherwise the
+ *          button rules: USB + ECG -> REFUSED_USB (the USB screen is shown,
+ *          as for the button), battery low -> REFUSED_BATT, PPG without the
+ *          LED DAC -> FAULT. OK means armed; a later analog self-check
+ *          failure shows on the card and in LINK_STATUS.meas. The display
+ *          wakes and shows the measurement screen.
+ *   STOP   ends the session like BUTTON1 on the live screen (summary or
+ *          card); OK also when nothing runs.
+ *   SET    the Settings page values; gain, notch, RLD and LED limit are
+ *          refused BUSY while a session is active (they are applied at
+ *          start); sweep and Bluetooth may change any time. Saved to flash
+ *          SETTINGS_SAVE_IDLE_MS after the last change, never during
+ *          acquisition.
+ *   SET_TIME  wall clock = unix + offset; kept through STANDBY on the RTC,
+ *          lost on reset.
+ * Timeouts: a phone command counts as input for the STANDBY timeout (not
+ * for the display timeout): a connected client that polls GET_STATUS keeps
+ * the card awake with the display off; a silent one lets it sleep after
+ * UI_STANDBY_TIMEOUT_S (the shutdown handshake drops the connection). No
+ * timeout fires during a session or in radio program mode. */
 #include "app.h"
 
 #include <string.h>
 
 #include "acq.h"
 #include "applog.h"
+#include "link.h"
 #include "buttons.h"
 #include "charger.h"
 #include "cw2015.h"
@@ -27,6 +57,7 @@
 #include "hal.h"
 #include "mcp4728.h"
 #include "nav.h"
+#include "radio.h"
 #include "rails.h"
 #include "settings_store.h"
 #include "ssd1306.h"
@@ -118,19 +149,27 @@ static struct {
     bool force_draw;
     bool blanked;
     uint32_t state_ev_ms;
+
+    /* phone / radio */
+    uint32_t last_phone_ms;  /* last LINK_CMD (STANDBY timeout input) */
+    bool phone_dirty;        /* settings changed by the phone: deferred save */
+    bool time_valid;
+    uint32_t time_local;     /* local wall-clock seconds at time_rtc */
+    uint32_t time_rtc;       /* hal_rtc_seconds() when set */
 } S;
 
 static ui_model_t M;
 static uint8_t FB[OLED_FB_BYTES];
 static char s_fault_buf[64];
 static diag_info_t s_diag;
+static char s_radio_fw[12], s_ble_id[5];
 
 const app_debug_t *app_debug(void) { return &S.dbg; }
 const ui_model_t *app_model(void) { return &M; }
 const settings_t *app_settings(void) { return &S.settings; }
 
 static void enter_standby(void);
-static void start_session(ui_mode_t mode);
+static uint8_t start_session(ui_mode_t mode);
 
 /* ======================================================================== */
 /* helpers                                                                   */
@@ -175,6 +214,8 @@ static void diag_exit(void)
 {
     if (S.screen == UI_SCREEN_DIAG && S.diag_page == DIAG_PAGE_ANALOG)
         rails_off();
+    if (S.screen == UI_SCREEN_DIAG && S.diag_page == DIAG_PAGE_RADIO)
+        radio_program(false); /* normal power-down (no-op when not held) */
 }
 
 static void go_screen(ui_screen_t s)
@@ -527,7 +568,8 @@ static void log_evidence(const acq_status_t *st)
     }
 }
 
-static void start_session(ui_mode_t mode)
+/* Same rules for a button and a phone START; returns LINK_RES_*. */
+static uint8_t start_session(ui_mode_t mode)
 {
     S.mode = mode;
     S.ever_running = false;
@@ -541,12 +583,12 @@ static void start_session(ui_mode_t mode)
         S.ses = SES_USB_BLOCKED;
         go_screen(nav_live_of(mode));
         log_line("session", "blocked: USB power");
-        return;
+        return LINK_RES_REFUSED_USB;
     }
     if (batt_low()) {
         show_overlay(UI_OVERLAY_LOW_BATTERY, OVERLAY_BATT_MS, THEN_NONE, NULL, false);
         log_line("session", "refused: battery low");
-        return;
+        return LINK_RES_REFUSED_BATT;
     }
     if (mode_has_ppg(mode) && !S.mcp_ok) {
         S.mcp_ok = mcp4728_init() == HAL_OK; /* one more try */
@@ -556,7 +598,7 @@ static void start_session(ui_mode_t mode)
             S.fault_text = "LED driver MCP4728 not answering: pulse disabled";
             go_screen(nav_live_of(mode));
             log_line("session", "refused: MCP4728 absent");
-            return;
+            return LINK_RES_FAULT;
         }
     }
     acq_cfg_t c;
@@ -571,7 +613,7 @@ static void start_session(ui_mode_t mode)
         S.ses = SES_FAULT;
         S.fault_text = "Could not start acquisition";
         go_screen(nav_live_of(mode));
-        return;
+        return LINK_RES_FAULT;
     }
     S.ses = SES_ACTIVE;
     S.dbg.sessions++;
@@ -581,6 +623,7 @@ static void start_session(ui_mode_t mode)
     log_u((uint32_t)mode);
     log_s(c.gain_hi ? " gain=1098" : " gain=558");
     log_end();
+    return LINK_RES_OK;
 }
 
 static const char *fault_text_of(const acq_status_t *st)
@@ -779,6 +822,8 @@ static void diag_next(void)
 {
     if (S.diag_page == DIAG_PAGE_ANALOG)
         rails_off();
+    if (S.diag_page == DIAG_PAGE_RADIO)
+        radio_program(false);
     S.diag_page = (uint8_t)((S.diag_page + 1u) % DIAG_PAGES);
     if (S.diag_page == DIAG_PAGE_ANALOG) {
         /* analog page: ANA_EN on (no MEASURE_REQ, no LEDs), TIA biased */
@@ -800,10 +845,12 @@ static void do_action(const nav_result_t *r)
         go_screen(r->screen);
         break;
     case NAV_START:
-        start_session(r->mode);
+        (void)start_session(r->mode);
         break;
     case NAV_SET_CHANGE:
         settings_cycle(&S.settings, S.cursor);
+        if (S.cursor == SET_ITEM_BLE && S.settings.ble == BLE_ON)
+            radio_rearm(); /* "BLE turned on": a new advertising window */
         S.dirty = true;
         S.dirty_ms = S.now;
         redraw();
@@ -834,7 +881,16 @@ static void do_action(const nav_result_t *r)
         break;
     case NAV_DIAG_ENTER: diag_enter(); break;
     case NAV_DIAG_NEXT: diag_next(); break;
-    case NAV_DIAG_LEAVE: go_screen(UI_SCREEN_ABOUT); break;
+    case NAV_DIAG_LEAVE:
+        if (S.diag_page == DIAG_PAGE_RADIO) {
+            /* RADIO page: BUTTON1 toggles program mode instead of leaving */
+            radio_program(!radio_program_mode());
+            S.diag_ms = 0;
+            redraw();
+        } else {
+            go_screen(UI_SCREEN_ABOUT);
+        }
+        break;
     default: break;
     }
 }
@@ -844,6 +900,7 @@ static void handle_buttons(void)
     btn_event_t e;
     while ((e = buttons_get_event()) != BTN_EV_NONE) {
         S.last_input_ms = S.now;
+        radio_user(); /* a user wake re-arms the radio after an advertising timeout */
         if (e == BTN_EV_BTN1_SHORT || e == BTN_EV_BTN2_SHORT || e == BTN_EV_BTN1_LONG ||
             e == BTN_EV_BTN2_LONG)
             stream_ev_button(e == BTN_EV_BTN1_SHORT || e == BTN_EV_BTN1_LONG ? 1u : 2u,
@@ -895,15 +952,20 @@ static void power_policy(void)
             enter_standby();
         return;
     }
-    if (acq_active() || S.overlay != UI_OVERLAY_NONE) {
-        /* armed with contact (or about to be): no timeouts */
+    if (acq_active() || S.overlay != UI_OVERLAY_NONE || radio_program_mode()) {
+        /* armed with contact (or about to be), or the radio held for
+         * programming: no timeouts */
         S.last_input_ms = S.now;
         return;
     }
     uint32_t idle = S.now - S.last_input_ms;
+    /* phone commands keep the card out of STANDBY (not the display on) */
+    uint32_t idle_sb = idle;
+    if (S.now - S.last_phone_ms < idle_sb)
+        idle_sb = S.now - S.last_phone_ms;
     if (S.dbg.pwr == APP_PWR_AWAKE && idle >= UI_DISPLAY_TIMEOUT_S * 1000u)
         display_off();
-    else if (S.dbg.pwr == APP_PWR_DISPLAY_OFF && idle >= UI_STANDBY_TIMEOUT_S * 1000u)
+    else if (S.dbg.pwr == APP_PWR_DISPLAY_OFF && idle_sb >= UI_STANDBY_TIMEOUT_S * 1000u)
         enter_standby();
 }
 
@@ -911,9 +973,14 @@ static void save_settings_if_needed(bool force)
 {
     if (!S.dirty || acq_active() || rails_analog_is_on())
         return;
-    if (!force && S.screen == UI_SCREEN_SETTINGS && S.now - S.dirty_ms < SETTINGS_SAVE_IDLE_MS)
+    /* on the Settings page, and after a phone SET (a client may send several
+     * in a row, and a flash write masks the UART RX interrupt), wait until
+     * the changes stop */
+    if (!force && (S.screen == UI_SCREEN_SETTINGS || S.phone_dirty) &&
+        S.now - S.dirty_ms < SETTINGS_SAVE_IDLE_MS)
         return;
     S.dirty = false;
+    S.phone_dirty = false;
     if (memcmp(&S.settings, &S.saved, sizeof S.settings) == 0)
         return; /* cycled back to the stored values */
     if (settings_save(&S.settings) == HAL_OK) {
@@ -930,6 +997,7 @@ static void enter_standby(void)
     end_session(END_ABORT);
     diag_exit();
     rails_off();
+    radio_off_now(); /* shutdown handshake: radio unpowered, pins safe */
     save_settings_if_needed(true);
     if (ssd1306_is_powered())
         ssd1306_power_off();
@@ -952,6 +1020,7 @@ static void wake_up(uint32_t cause)
     charger_tick(S.now);
     if (cause & HAL_EV_BUTTON)
         buttons_ignore_until_release(); /* the wake press does nothing */
+    radio_rearm(); /* a fresh advertising window (and a retry after a fault) */
     ssd1306_power_on();
     S.blanked = false;
     S.screen = UI_SCREEN_HOME;
@@ -1002,6 +1071,170 @@ static void standby_step(void)
         (void)cw2015_clear_alert();
 }
 
+
+/* ======================================================================== */
+/* radio link: phone commands, LINK_STATUS, policy                           */
+/* ======================================================================== */
+
+static ui_meas_state_t live_state(const acq_status_t *st);
+
+static void wall_clock(uint8_t *hour, uint8_t *minute)
+{
+    uint32_t t = S.time_local + (hal_rtc_seconds() - S.time_rtc);
+    *hour = (uint8_t)((t / 3600u) % 24u);
+    *minute = (uint8_t)((t / 60u) % 60u);
+}
+
+static uint8_t phone_start(ui_mode_t mode)
+{
+    if (radio_program_mode() || S.power_off_pending || S.screen == UI_SCREEN_DIAG)
+        return LINK_RES_BUSY;
+    if (S.overlay == UI_OVERLAY_BATT_CRITICAL || batt_critical())
+        return LINK_RES_REFUSED_BATT;
+    if (S.overlay != UI_OVERLAY_NONE || S.ses == SES_ACTIVE)
+        return LINK_RES_BUSY;
+    display_wake(); /* the screen follows the phone */
+    S.ses = SES_NONE; /* a USB / fault screen still showing */
+    return start_session(mode);
+}
+
+static uint8_t phone_stop(void)
+{
+    if (radio_program_mode())
+        return LINK_RES_BUSY;
+    if (S.ses == SES_ACTIVE) {
+        display_wake();
+        to_summary_or_card(end_session(END_USER));
+    } else if (S.ses != SES_NONE) {
+        display_wake();
+        S.ses = SES_NONE;
+        go_screen(nav_card_of(S.mode));
+    }
+    return LINK_RES_OK;
+}
+
+static uint8_t phone_set(uint8_t item, uint8_t value)
+{
+    if (radio_program_mode())
+        return LINK_RES_BUSY;
+    bool measuring_item = item == SET_ITEM_GAIN || item == SET_ITEM_NOTCH || item == SET_ITEM_RLD ||
+                          item == SET_ITEM_LED_LIMIT;
+    if (measuring_item && S.ses == SES_ACTIVE)
+        return LINK_RES_BUSY; /* applied at the start of a session */
+    settings_t n = S.settings;
+    if (!settings_set(&n, item, value))
+        return LINK_RES_BAD_ARG;
+    if (memcmp(&n, &S.settings, sizeof n) != 0) {
+        if (item == SET_ITEM_BLE && value == BLE_ON)
+            radio_rearm();
+        S.settings = n;
+        S.dirty = true;
+        S.phone_dirty = true;
+        S.dirty_ms = S.now;
+        redraw();
+    }
+    return LINK_RES_OK;
+}
+
+static void phone_set_time(uint32_t unix_s, int16_t offset_min)
+{
+    S.time_local = (uint32_t)((int32_t)unix_s + (int32_t)offset_min * 60);
+    S.time_rtc = hal_rtc_seconds();
+    S.time_valid = true;
+    uint8_t h, m;
+    wall_clock(&h, &m);
+    log_begin("time");
+    log_s(" set ");
+    log_u(h);
+    log_s(":");
+    log_u(m / 10u);
+    log_u(m % 10u);
+    log_s(" (UTC");
+    log_s(offset_min < 0 ? "-" : "+");
+    log_u((uint32_t)(offset_min < 0 ? -offset_min : offset_min));
+    log_s(" min)");
+    log_end();
+    redraw();
+}
+
+static uint8_t app_command(const link_cmd_t *c)
+{
+    S.last_phone_ms = S.now;
+    S.dbg.phone_cmds++;
+    switch (c->cmd) {
+    case LINK_CMD_START:
+        return phone_start(c->mode == 1u ? UI_MODE_ECG : c->mode == 2u ? UI_MODE_PPG : UI_MODE_BOTH);
+    case LINK_CMD_STOP: return phone_stop();
+    case LINK_CMD_SET: return phone_set(c->item, c->value);
+    case LINK_CMD_SET_TIME: phone_set_time(c->unix_s, c->utc_offset_min); return LINK_RES_OK;
+    case LINK_CMD_GET_STATUS: return LINK_RES_OK; /* radio.c sends LINK_STATUS */
+    default: return LINK_RES_UNKNOWN;
+    }
+}
+
+static void app_status(uint8_t o[LINK_STATUS_LEN])
+{
+    const acq_status_t *st = acq_status();
+    bool ses = S.ses != SES_NONE, act = S.ses == SES_ACTIVE;
+    bool on = act && st->phase == ACQ_ON;
+    memset(o, 0, LINK_STATUS_LEN);
+    o[0] = LINK_PROTO_VERSION;
+    o[1] = ses ? (uint8_t)(S.mode == UI_MODE_ECG ? 1u : S.mode == UI_MODE_PPG ? 2u : 3u) : 0u;
+    o[2] = ses ? (uint8_t)live_state(st) : 0xFFu;
+    o[3] = S.dbg.batt_valid ? S.dbg.batt_pct : 255u;
+    uint8_t f = 0;
+    if (usb_present()) f |= LINK_ST_USB;
+    if (charger_state() == CHARGER_CHARGING) f |= LINK_ST_CHARGING;
+    if (charger_state() == CHARGER_FAULT) f |= LINK_ST_CHARGE_FAULT;
+    if (on && !st->contact) f |= LINK_ST_NO_CONTACT;
+    if (batt_low()) f |= LINK_ST_BATT_LOW;
+    if (on && st->gain_hi) f |= LINK_ST_GAIN_HI;
+    if (S.time_valid) f |= LINK_ST_TIME_VALID;
+    o[4] = f;
+    o[5] = S.settings.gain;
+    o[6] = S.settings.notch;
+    o[7] = S.settings.rld;
+    o[8] = S.settings.led_limit;
+    o[9] = S.settings.sweep;
+    o[10] = on && mode_has_ecg(S.mode) ? st->notch_hz : 0u;
+    uint16_t hr = !act ? 0u : S.mode == UI_MODE_PPG ? st->pulse_bpm : st->hr_bpm;
+    o[11] = (uint8_t)(hr > 255u ? 255u : hr);
+    uint16_t mv = S.dbg.batt_valid ? S.dbg.batt_mv : 0u;
+    o[12] = (uint8_t)mv;
+    o[13] = (uint8_t)(mv >> 8);
+    o[14] = APP_FW_MAJOR;
+    o[15] = APP_FW_MINOR;
+    o[16] = APP_FW_PATCH;
+    uint32_t up = S.now / 60000u;
+    if (up > 0xFFFFu)
+        up = 0xFFFFu;
+    o[18] = (uint8_t)up;
+    o[19] = (uint8_t)(up >> 8);
+}
+
+static const radio_ops_t k_radio_ops = {app_command, app_status};
+
+/* Bluetooth On, card awake, battery not low (program mode overrides in radio.c). */
+static void radio_step(void)
+{
+    bool want = S.settings.ble == BLE_ON && S.dbg.pwr != APP_PWR_STANDBY && !batt_low() &&
+                !batt_critical() && S.overlay != UI_OVERLAY_BATT_CRITICAL;
+    radio_want(want);
+    radio_poll(S.now);
+}
+
+static ui_ble_t ble_ui_state(void)
+{
+    switch (radio_state()) {
+    case RADIO_POWERING:
+    case RADIO_RETRY_GAP:
+    case RADIO_ADVERTISING: return UI_BLE_ADVERTISING;
+    case RADIO_CONNECTED: return UI_BLE_CONNECTED;
+    case RADIO_FAULT: return S.settings.ble == BLE_ON ? UI_BLE_FAULT : UI_BLE_OFF;
+    default: return UI_BLE_OFF;
+    }
+}
+
 /* ======================================================================== */
 /* display                                                                   */
 /* ======================================================================== */
@@ -1035,6 +1268,17 @@ static void build_model(void)
     M.settings_cursor = S.cursor;
     M.fw_version = APP_FW_VERSION;
     M.fault_text = S.fault_text;
+    M.ble_state = ble_ui_state();
+    const radio_info_t *ri = radio_info();
+    if (ri->hello) {
+        memcpy(s_radio_fw, ri->fw_str, sizeof s_radio_fw);
+        memcpy(s_ble_id, ri->id_str, sizeof s_ble_id);
+        M.radio_fw = s_radio_fw;
+        M.ble_id = s_ble_id;
+    }
+    M.time_valid = S.time_valid;
+    if (S.time_valid)
+        wall_clock(&M.hour, &M.minute);
 
     ui_live_t *l = &M.live;
     l->state = live_state(st);
@@ -1129,6 +1373,11 @@ static void diag_update(void)
     d->fw_version = APP_FW_VERSION;
     d->settings_status = S.dbg.settings_status;
     d->settings_writes = S.dbg.settings_writes;
+    d->radio = radio_info();
+    d->radio_program = radio_program_mode();
+    d->radio_tx_frames = link_tx_frames();
+    d->radio_tx_drops = link_tx_drops();
+    hal_uart_stats(&d->uart);
     redraw();
 }
 
@@ -1211,6 +1460,8 @@ void app_init(void)
     charger_tick(S.now);
     buttons_init(S.now);
     stream_init();
+    radio_init(&k_radio_ops);
+    stream_set_tap(radio_tap);
     acq_init(&k_sink);
     ui_init();
     ssd1306_power_on();
@@ -1249,6 +1500,7 @@ void app_step(void)
         /* any button wakes the display without acting */
         buttons_ignore_until_release();
         display_wake();
+        radio_user(); /* a user wake: the radio comes back after an advertising timeout */
     }
 
     acq_poll(S.now);
@@ -1268,6 +1520,7 @@ void app_step(void)
     battery_poll();
     if (S.dbg.pwr == APP_PWR_STANDBY)
         return;
+    radio_step(); /* after the battery: commands and the policy see this pass's reading */
     power_policy();
     if (S.dbg.pwr == APP_PWR_STANDBY)
         return;

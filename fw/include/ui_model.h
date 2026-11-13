@@ -9,6 +9,7 @@
  *   BUTTON2 long   back to Home
  *   BUTTON1 long   power off (2 s)
  *   both, on About: Diagnostics
+ *   Diagnostics RADIO page: BUTTON1 short toggles radio program mode
  * The thumbs cannot reach the buttons during a measurement, so measurement
  * screens are hands-free: they start on contact and end when thumbs lift. */
 #ifndef UI_MODEL_H
@@ -58,6 +59,14 @@ typedef enum {
 
 typedef enum { UI_MODE_ECG, UI_MODE_PPG, UI_MODE_BOTH } ui_mode_t;
 
+/* Bluetooth status icon (Home and the carousel title rows). */
+typedef enum {
+    UI_BLE_OFF,         /* setting Off, or radio off (advertising timeout, low battery): no icon */
+    UI_BLE_ADVERTISING, /* powering up / advertising: blinking rune */
+    UI_BLE_CONNECTED,   /* a phone is connected: steady rune */
+    UI_BLE_FAULT        /* radio did not answer: rune with "!" */
+} ui_ble_t;
+
 /* Live values. 0 means "not available yet" for rates and times. */
 typedef struct {
     ui_meas_state_t state;
@@ -102,8 +111,9 @@ typedef struct {
     bool usb_present;
     bool charging;
     bool charge_fault;
-    bool time_valid;         /* wall clock set (never, in this build) */
+    bool time_valid;         /* wall clock set (by the phone, LINK_CMD_SET_TIME) */
     uint8_t hour, minute;
+    ui_ble_t ble_state;
 
     /* UI_SCREEN_ECG / PPG / BOTH */
     ui_live_t live;
@@ -117,6 +127,8 @@ typedef struct {
 
     /* UI_SCREEN_ABOUT */
     const char *fw_version;  /* e.g. "0.1.0" */
+    const char *radio_fw;    /* radio firmware "1.2.3" once a HELLO arrived; NULL = n/a */
+    const char *ble_id;      /* last 4 hex digits of the BLE address ("ECG Card XXXX"); NULL = unknown */
     uint16_t batt_mv;
 
     /* UI_SCREEN_DIAG: preformatted text, NUL-terminated lines */

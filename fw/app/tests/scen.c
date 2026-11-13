@@ -136,13 +136,19 @@ void scen_shot(const char *name)
 
 bool scen_analog_all_off(void)
 {
+    /* RADIO_EN is not analog: the radio is on whenever the card is awake
+     * (BLE On); see scen_radio_off() */
     static const board_pin_t p[] = {PIN_ANA_EN, PIN_VLED_EN, PIN_BUCK_PS_SYNC, PIN_MEASURE_REQ,
-                                    PIN_FAST_RESTORE, PIN_GAIN_HI, PIN_RLD_L_EN, PIN_RLD_R_EN,
-                                    PIN_RADIO_EN};
+                                    PIN_FAST_RESTORE, PIN_GAIN_HI, PIN_RLD_L_EN, PIN_RLD_R_EN};
     for (size_t i = 0; i < sizeof p / sizeof p[0]; i++)
         if (sim_pin(p[i]))
             return false;
     return sim_led_blank() && sim_led_now_ma() == 0.0 && !hal_acq_running() && !sim_clock_fast();
+}
+
+bool scen_radio_off(void)
+{
+    return !sim_pin(PIN_RADIO_EN) && !sim_uart_enabled() && !sim_radio_tx_pin();
 }
 
 /* ---- stream decode ------------------------------------------------------- */

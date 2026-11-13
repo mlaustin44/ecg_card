@@ -128,6 +128,36 @@ static void title_row(const char *title, const ui_model_t *m, bool batt)
         power_icons(OLED_W, 0, m);
 }
 
+/* Bluetooth state, right-aligned to xr (7 rows from y). Advertising blinks
+ * (0.6 s on, 0.4 s off), connected is steady, a fault adds "!". Returns the
+ * left edge (xr when nothing is drawn). */
+#define BLE_BLINK_MS 1000u
+#define BLE_LIT_MS   600u
+static int ble_icon(int xr, int y, const ui_model_t *m)
+{
+    const ui_icon_t *ic = NULL;
+    switch (m->ble_state) {
+    case UI_BLE_ADVERTISING:
+        if (m->now_ms % BLE_BLINK_MS < BLE_LIT_MS)
+            ic = &icon_ble;
+        else
+            return xr - icon_ble.w; /* keep the space while dark */
+        break;
+    case UI_BLE_CONNECTED: ic = &icon_ble; break;
+    case UI_BLE_FAULT: ic = &icon_ble_fault; break;
+    default: return xr;
+    }
+    gfx_icon(xr - ic->w, y, ic, GFX_SET);
+    return xr - ic->w;
+}
+
+/* Carousel pages: title, Bluetooth, power icons. */
+static void title_row_status(const char *title, const ui_model_t *m)
+{
+    gfx_text(0, 0, title, TXT_BOLD);
+    ble_icon(power_icons(OLED_W, 0, m) - 4, 0, m);
+}
+
 static char *bpm_str(char *b, unsigned bpm)
 {
     if (bpm == 0)
@@ -232,6 +262,7 @@ static void pict_contact(int x, int y, bool left, bool right, uint32_t now)
 static void screen_home(const ui_model_t *m)
 {
     gfx_text(0, 0, "ECG Card", TXT_BOLD);
+    int xr = OLED_W;
     if (m->time_valid) {
         char t[6];
         t[0] = (char)('0' + clamp_u(m->hour, 23) / 10u);
@@ -240,8 +271,9 @@ static void screen_home(const ui_model_t *m)
         t[3] = (char)('0' + clamp_u(m->minute, 59) / 10u);
         t[4] = (char)('0' + clamp_u(m->minute, 59) % 10u);
         t[5] = '\0';
-        gfx_text(OLED_W, 0, t, TXT_RIGHT);
+        xr -= gfx_text(OLED_W, 0, t, TXT_RIGHT) + 4;
     }
+    ble_icon(xr, 0, m);
 
     /* big battery 30 x 16 with % in big digits */
     const int bx = 10, by = 17, bw = 32, bh = 16;
@@ -294,7 +326,7 @@ static void screen_card(const ui_model_t *m)
         title = "ECG + Pulse";
         use = "Both thumbs on the pads";
     }
-    title_row(title, m, true);
+    title_row_status(title, m);
 
     if (m->screen == UI_SCREEN_ECG_CARD) {
         pict_ecg(9, 32, 3, 8);
@@ -325,13 +357,14 @@ static void screen_card(const ui_model_t *m)
 }
 
 static const char *const set_names[SET_ITEM_COUNT] = {
-    "Gain", "Mains notch", "RLD", "LED limit", "Sweep",
+    "Gain", "Mains notch", "RLD", "LED limit", "Sweep", "Bluetooth",
 };
 static const char *const gain_vals[] = {"Auto", "558x", "1098x"};
 static const char *const notch_vals[] = {"Auto", "50Hz", "60Hz"};
 static const char *const rld_vals[] = {"Both", "Left", "Right", "Off"};
 static const char *const led_vals[LED_LIMIT_COUNT] = {"5mA", "10mA", "15mA"};
 static const char *const sweep_vals[] = {"1.5s", "3s", "6s"};
+static const char *const ble_vals[] = {"Off", "On"};
 
 static const char *setting_value(const settings_t *s, unsigned item)
 {
@@ -341,6 +374,7 @@ static const char *setting_value(const settings_t *s, unsigned item)
     case SET_ITEM_RLD: return s->rld < 4 ? rld_vals[s->rld] : "?";
     case SET_ITEM_LED_LIMIT: return s->led_limit < LED_LIMIT_COUNT ? led_vals[s->led_limit] : "?";
     case SET_ITEM_SWEEP: return s->sweep < 3 ? sweep_vals[s->sweep] : "?";
+    case SET_ITEM_BLE: return s->ble < 2 ? ble_vals[s->ble] : "?";
     default: return "?";
     }
 }
@@ -348,11 +382,17 @@ static const char *setting_value(const settings_t *s, unsigned item)
 #define SET_ROWS 5
 static void screen_settings(const ui_model_t *m)
 {
-    title_row("Settings", m, true);
+    title_row_status("Settings", m);
     unsigned cur = m->settings_cursor < SET_ITEM_COUNT ? m->settings_cursor : 0;
     unsigned first = 0;
     if (cur >= SET_ROWS)
         first = cur - SET_ROWS + 1;
+    /* more rows than fit: arrows after the title show where the rest is */
+    int ax = gfx_text_width("Settings", TXT_BOLD) + 4;
+    if (first > 0)
+        gfx_text(ax, 0, G_UP, TXT_LEFT);
+    if (first + SET_ROWS < SET_ITEM_COUNT)
+        gfx_text(ax + 6, 0, G_DOWN, TXT_LEFT);
     for (unsigned r = 0; r < SET_ROWS && first + r < SET_ITEM_COUNT; r++) {
         unsigned it = first + r;
         int y = 10 + (int)r * LINE_H;
@@ -375,11 +415,17 @@ static void kv_row(int y, const char *k, const char *v)
 
 static void screen_about(const ui_model_t *m)
 {
-    title_row("About", m, true);
+    title_row_status("About", m);
     char b[24], *p;
-    kv_row(11, "Device", "ECG Card");
+    /* the device name the phone shows, once the radio reported its address */
+    p = str_cpy(b, "ECG Card");
+    if (m->ble_id) {
+        p = str_cpy(p, " ");
+        str_cpy(p, m->ble_id);
+    }
+    kv_row(11, "Device", b);
     kv_row(20, "Firmware", m->fw_version ? m->fw_version : "?");
-    kv_row(29, "Radio firmware", "n/a");
+    kv_row(29, "Radio firmware", m->radio_fw ? m->radio_fw : "n/a");
     p = str_u(b, m->batt_mv);
     str_cpy(p, " mV");
     kv_row(38, "Battery", m->batt_mv ? b : "--");

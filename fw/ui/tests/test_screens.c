@@ -73,6 +73,10 @@ TEST(every_screen_state_overlay)
                     m.hold_progress = (uint8_t)(v * 30);
                     m.fault_text = v == 0 ? NULL : v & 1 ? long_text : "short";
                     m.fw_version = v == 2 ? NULL : "0.1.0";
+                    m.ble_state = (ui_ble_t)(v % 5); /* incl. one out of range */
+                    m.radio_fw = v & 1 ? "255.255.255" : NULL;
+                    m.ble_id = v & 2 ? "FFFF" : NULL;
+                    m.settings_cursor = (uint8_t)(v % (SET_ITEM_COUNT + 1));
                     m.live.hr_bpm = m.live.pulse_bpm = rates[v];
                     m.live.pat_ms = rates[8 - v];
                     m.live.pi_permille = rates[v];

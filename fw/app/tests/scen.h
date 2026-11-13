@@ -54,8 +54,10 @@ int scen_lit_pixels(void);
 /* build/app_shots/<name>.png at 4x. */
 void scen_shot(const char *name);
 
-/* Every enable / guarded pin low, LEDs dark, OLED may be on. */
+/* Every analog enable / guarded pin low, LEDs dark, OLED and radio may be on. */
 bool scen_analog_all_off(void);
+/* RADIO_EN low, UART0 off, PA10 low. */
+bool scen_radio_off(void);
 
 /* ---- C-side decode of the captured stream (sim_stream_data) ---- */
 typedef struct {

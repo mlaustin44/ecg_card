@@ -352,6 +352,26 @@ ICONS = {
         "#######.#",
         "...#####.",
     ],
+    # Bluetooth rune for the status row (advertising blinks it, connected
+    # shows it steady); with "!" when the radio does not answer.
+    "ble": [
+        "..##.",
+        "#.#.#",
+        ".###.",
+        "..#..",
+        ".###.",
+        "#.#.#",
+        "..##.",
+    ],
+    "ble_fault": [
+        "..##..#",
+        "#.#.#.#",
+        ".###..#",
+        "..#...#",
+        ".###..#",
+        "#.#.#..",
+        "..##..#",
+    ],
     "warn": [
         "......#......",
         ".....###.....",

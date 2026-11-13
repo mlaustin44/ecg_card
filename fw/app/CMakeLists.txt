@@ -6,7 +6,9 @@ add_library(ecg_app STATIC
   src/settings_store.c
   src/stream.c
   src/applog.c
-  src/diag.c)
+  src/diag.c
+  src/link.c
+  src/radio.c)
 target_include_directories(ecg_app PUBLIC include PRIVATE src)
 target_link_libraries(ecg_app PUBLIC ecg_iface ecg_acq ecg_ui ecg_drivers ecg_dsp)
 # Open question 10 of the brief: blank the OLED during PPG captures.
@@ -20,7 +22,7 @@ if(NOT ECG_TARGET)
   file(MAKE_DIRECTORY ${CMAKE_SOURCE_DIR}/build/app_shots)
 
   # Unit tests of the pure pieces.
-  foreach(t stream settings nav)
+  foreach(t stream settings nav link)
     ecg_add_test(app_unit_${t} SOURCES tests/test_${t}.c LIBS ecg_app ecg_sim)
     target_include_directories(app_unit_${t} PRIVATE src)
   endforeach()
@@ -29,14 +31,15 @@ if(NOT ECG_TARGET)
   add_library(ecg_app_scen STATIC tests/scen.c)
   target_include_directories(ecg_app_scen PUBLIC tests src)
   target_link_libraries(ecg_app_scen PUBLIC ecg_app ecg_testsrc ecg_sim ecg_testlib m)
-  foreach(t ui ecg contact usb ppg both power faults)
+  foreach(t ui ecg contact usb ppg both power faults radio)
     ecg_add_test(app_scen_${t} SOURCES tests/scen_${t}.c LIBS ecg_app_scen)
   endforeach()
   set_tests_properties(app_scen_both PROPERTIES FIXTURES_SETUP app_capture)
 
   # The same application built with the display-blanking option.
   add_executable(app_scen_blank tests/scen_blank.c tests/scen.c
-    src/app.c src/nav.c src/settings_store.c src/stream.c src/applog.c src/diag.c)
+    src/app.c src/nav.c src/settings_store.c src/stream.c src/applog.c src/diag.c src/link.c
+    src/radio.c)
   target_compile_definitions(app_scen_blank PRIVATE APP_PPG_BLANK_DISPLAY)
   target_include_directories(app_scen_blank PRIVATE include src tests)
   target_link_libraries(app_scen_blank PRIVATE ecg_acq ecg_ui ecg_drivers ecg_dsp ecg_testsrc

@@ -201,11 +201,24 @@ TEST(oled_dma_misuse)
     CHECK_EQ(sim_violation_count(), 0); if (sim_violation_count()) dump();
 }
 
-TEST(radio_must_stay_off)
+/* RADIO_EN alone is legal since the radio link exists; the rule is that no
+ * pin is high into the unpowered CH585 (UART0 idles PA10 high). */
+TEST(radio_backfeed)
 {
     fresh();
     high(PIN_RADIO_EN);
-    EXPECT_ONE(SIM_V_RADIO_EN);
+    CHECK_EQ(sim_violation_count(), 0);
+    low(PIN_RADIO_EN);
+    hal_radio_power(true);
+    hal_radio_power(false);
+    CHECK_EQ(sim_violation_count(), 0);
+    hal_radio_power(true);
+    low(PIN_RADIO_EN); /* rail cut under a running UART */
+    EXPECT_ONE(SIM_V_RADIO_BACKFEED);
+    fresh();
+    uint8_t b = 0;
+    CHECK_EQ(hal_uart_write(&b, 1), 0);
+    EXPECT_ONE(SIM_V_UART_RADIO_OFF);
 }
 
 TEST(standby_preconditions)
@@ -360,7 +373,7 @@ int main(int argc, char **argv)
     RUN(ana_fall_with_dac_a_driving);
     RUN(oled_rules);
     RUN(oled_dma_misuse);
-    RUN(radio_must_stay_off);
+    RUN(radio_backfeed);
     RUN(standby_preconditions);
     RUN(acquisition_rules);
     RUN(vled_early_start_is_a_fact);

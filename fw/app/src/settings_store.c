@@ -2,7 +2,9 @@
 
 #include "stream.h" /* crc16_ccitt_false */
 
-#define PAYLOAD_LEN 5u
+#define PAYLOAD_LEN    6u
+#define V2_PAYLOAD_LEN 5u
+#define V2_BLOB_LEN    11u
 
 void settings_defaults(settings_t *s)
 {
@@ -10,10 +12,31 @@ void settings_defaults(settings_t *s)
     *s = d;
 }
 
+/* Number of values of each item (Settings page order). */
+static uint8_t item_count(uint8_t item)
+{
+    static const uint8_t n[SET_ITEM_COUNT] = {GAIN_MODE_COUNT, NOTCH_MODE_COUNT, RLD_MODE_COUNT,
+                                              LED_LIMIT_COUNT, SWEEP_COUNT, BLE_MODE_COUNT};
+    return item < SET_ITEM_COUNT ? n[item] : 0u;
+}
+
+static uint8_t *item_ref(settings_t *s, uint8_t item)
+{
+    switch (item) {
+    case SET_ITEM_GAIN: return &s->gain;
+    case SET_ITEM_NOTCH: return &s->notch;
+    case SET_ITEM_RLD: return &s->rld;
+    case SET_ITEM_LED_LIMIT: return &s->led_limit;
+    case SET_ITEM_SWEEP: return &s->sweep;
+    case SET_ITEM_BLE: return &s->ble;
+    default: return 0;
+    }
+}
+
 bool settings_valid(const settings_t *s)
 {
     return s->gain < GAIN_MODE_COUNT && s->notch < NOTCH_MODE_COUNT && s->rld < RLD_MODE_COUNT &&
-           s->led_limit < LED_LIMIT_COUNT && s->sweep < SWEEP_COUNT;
+           s->led_limit < LED_LIMIT_COUNT && s->sweep < SWEEP_COUNT && s->ble < BLE_MODE_COUNT;
 }
 
 void settings_encode(const settings_t *s, uint8_t b[SETTINGS_BLOB_LEN])
@@ -27,9 +50,15 @@ void settings_encode(const settings_t *s, uint8_t b[SETTINGS_BLOB_LEN])
     b[6] = s->rld;
     b[7] = s->led_limit;
     b[8] = s->sweep;
-    uint16_t crc = crc16_ccitt_false(b, 9u, 0xFFFFu);
-    b[9] = (uint8_t)crc;
-    b[10] = (uint8_t)(crc >> 8);
+    b[9] = s->ble;
+    uint16_t crc = crc16_ccitt_false(b, 10u, 0xFFFFu);
+    b[10] = (uint8_t)crc;
+    b[11] = (uint8_t)(crc >> 8);
+}
+
+static bool crc_ok(const uint8_t *b, unsigned n)
+{
+    return (uint16_t)(b[n] | (b[n + 1u] << 8)) == crc16_ccitt_false(b, n, 0xFFFFu);
 }
 
 settings_load_t settings_decode(const uint8_t *b, settings_t *out)
@@ -42,11 +71,17 @@ settings_load_t settings_decode(const uint8_t *b, settings_t *out)
     if (blank)
         return SETTINGS_BLANK;
     uint16_t magic = (uint16_t)(b[0] | (b[1] << 8));
-    uint16_t crc = (uint16_t)(b[9] | (b[10] << 8));
-    if (magic != SETTINGS_MAGIC || b[2] != SETTINGS_VERSION || b[3] != PAYLOAD_LEN ||
-        crc != crc16_ccitt_false(b, 9u, 0xFFFFu))
+    if (magic != SETTINGS_MAGIC)
         return SETTINGS_CORRUPT;
-    settings_t s = {b[4], b[5], b[6], b[7], b[8]};
+    settings_t s;
+    if (b[2] == SETTINGS_VERSION && b[3] == PAYLOAD_LEN && crc_ok(b, 10u)) {
+        s = (settings_t){b[4], b[5], b[6], b[7], b[8], b[9]};
+    } else if (b[2] == 2u && b[3] == V2_PAYLOAD_LEN && crc_ok(b, V2_BLOB_LEN - 2u)) {
+        /* version 2 (before Bluetooth): keep the values, Bluetooth default */
+        s = (settings_t){b[4], b[5], b[6], b[7], b[8], BLE_ON};
+    } else {
+        return SETTINGS_CORRUPT;
+    }
     if (!settings_valid(&s))
         return SETTINGS_CORRUPT;
     *out = s;
@@ -69,12 +104,16 @@ hal_status_t settings_save(const settings_t *s)
 
 void settings_cycle(settings_t *s, uint8_t item)
 {
-    switch (item) {
-    case SET_ITEM_GAIN: s->gain = (uint8_t)((s->gain + 1u) % GAIN_MODE_COUNT); break;
-    case SET_ITEM_NOTCH: s->notch = (uint8_t)((s->notch + 1u) % NOTCH_MODE_COUNT); break;
-    case SET_ITEM_RLD: s->rld = (uint8_t)((s->rld + 1u) % RLD_MODE_COUNT); break;
-    case SET_ITEM_LED_LIMIT: s->led_limit = (uint8_t)((s->led_limit + 1u) % LED_LIMIT_COUNT); break;
-    case SET_ITEM_SWEEP: s->sweep = (uint8_t)((s->sweep + 1u) % SWEEP_COUNT); break;
-    default: break;
-    }
+    uint8_t *v = item_ref(s, item);
+    if (v)
+        *v = (uint8_t)((*v + 1u) % item_count(item));
+}
+
+bool settings_set(settings_t *s, uint8_t item, uint8_t value)
+{
+    uint8_t *v = item_ref(s, item);
+    if (!v || value >= item_count(item))
+        return false;
+    *v = value;
+    return true;
 }

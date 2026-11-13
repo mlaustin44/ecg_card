@@ -31,6 +31,7 @@ add_library(ecg_bsp OBJECT
   hal_bus.c
   hal_acq.c
   hal_nv.c
+  hal_radio.c
   rtt.c)
 target_link_libraries(ecg_bsp
   PUBLIC ecg_iface

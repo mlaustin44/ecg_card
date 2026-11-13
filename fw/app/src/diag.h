@@ -6,17 +6,25 @@
  *   3 I2C      probes 0x60 / 0x62, CW2015 version, VCELL, SOC, MCP4728 EEPROM
  *   4 acq      last session: overruns, stream drops, loop latency, I2C errors,
  *              LED code, DAC12, mid code, gain, notch
- *   5 firmware version, build, settings */
+ *   5 firmware version, build, settings
+ *   6 radio    link state, HELLO (radio firmware, address), connection (MTU,
+ *              interval, subscriptions), UART bytes, CRC / bad / gap / unknown
+ *              counts, dropped frames. BUTTON1 toggles program mode: RADIO_EN
+ *              held on for flashing the CH585 through its own debug port, the
+ *              MCU silent, no timeouts; leaving the page ends it. */
 #ifndef APP_DIAG_H
 #define APP_DIAG_H
 
 #include <stdbool.h>
 #include <stdint.h>
 
+#include "hal.h"
+#include "radio.h"
 #include "ui_model.h"
 
-#define DIAG_PAGES 5u
+#define DIAG_PAGES 6u
 #define DIAG_PAGE_ANALOG 1u
+#define DIAG_PAGE_RADIO 5u
 
 typedef struct {
     /* page 1 */
@@ -49,6 +57,11 @@ typedef struct {
     const char *fw_version;
     uint8_t settings_status; /* settings_load_t */
     uint32_t settings_writes;
+    /* page 6 */
+    const radio_info_t *radio; /* NULL: not gathered yet */
+    bool radio_program;
+    uint32_t radio_tx_frames, radio_tx_drops;
+    hal_uart_stats_t uart;
 } diag_info_t;
 
 void diag_format(uint8_t page, const diag_info_t *d, char out[UI_DIAG_LINES][UI_DIAG_COLS + 1]);
