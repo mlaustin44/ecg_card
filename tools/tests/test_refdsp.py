@@ -78,7 +78,7 @@ def test_ppg_foot_and_pat(sim, name):
     s = sim(name)
     r = np.array(s.truth()["r_peak_times_s"])
     t = np.arange(len(s.ppg.fine)) / 100 + 0.00995
-    feet = refdsp.ppg_feet(t, -s.ppg.fine.astype(float), r)
+    feet = refdsp.ppg_feet(t, s.ppg.fine.astype(float), r)  # firmware fine: systole up as is
     ok = np.isfinite(feet)
     truth_pat = np.array(s.truth()["pat_s"])
     n = len(truth_pat)  # beats whose pulse falls inside the recording

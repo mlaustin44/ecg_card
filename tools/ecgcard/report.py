@@ -9,7 +9,7 @@ from matplotlib.figure import Figure
 
 from . import refdsp
 from .hrv import hrv_stats
-from .record import ECG_HZ, Recording
+from .record import ECG_HZ, Recording, ecg_index, ecg_time
 
 ECG_C, PPG_C, MARK_C, FOOT_C = "#1f6fb2", "#b5481f", "#c0272d", "#2a8a4a"
 
@@ -33,7 +33,8 @@ def amplitude_spectrum(x_uv: np.ndarray, fs: float = ECG_HZ) -> tuple[np.ndarray
 
 
 def r_peaks_of(rec: Recording) -> tuple[np.ndarray, str]:
-    """R-peak times: device events when present, otherwise the reference detector."""
+    """R-peak times on the stream timeline (where the R appears in rec.ecg_t): device events
+    when present, otherwise the reference detector."""
     t = rec.r_peak_times()
     if len(t) >= 2:
         return np.sort(t), "device events"
@@ -42,7 +43,7 @@ def r_peaks_of(rec: Recording) -> tuple[np.ndarray, str]:
     if b - a < 3 * ECG_HZ:
         return np.array([]), "none"
     pk = refdsp.pan_tompkins(uv[a:b])
-    return (pk + a + rec.ecg_offset) / ECG_HZ, "reference detector"
+    return ecg_time(pk + a + rec.ecg_offset).astype(float), "reference detector"
 
 
 def summary_rows(rec: Recording, r_t: np.ndarray, source: str) -> list[tuple[str, str]]:
@@ -87,7 +88,7 @@ def make_report(rec: Recording, png_path: str | Path, title: str = "ECG Card rec
     ax = fig.add_subplot(gs[row, :]); row += 1
     ax.plot(t, uv, lw=0.5, color=ECG_C)
     if len(r_t):
-        idx = np.clip(np.round(r_t * ECG_HZ).astype(int) - rec.ecg_offset, 0, rec.n_ecg - 1)
+        idx = np.clip(np.round(ecg_index(r_t)).astype(int) - rec.ecg_offset, 0, rec.n_ecg - 1)
         ax.plot(r_t, uv[idx], "v", ms=4, color=MARK_C, label="R-peak")
         ax.legend(loc="upper right", fontsize=8)
     ax.set_ylabel("ECG (uV)"); ax.set_xlabel("time (s)"); ax.set_title("ECG, full recording", fontsize=10, loc="left")
@@ -96,16 +97,16 @@ def make_report(rec: Recording, png_path: str | Path, title: str = "ECG Card rec
     # full PPG
     if has_ppg:
         ax = fig.add_subplot(gs[row, :]); row += 1
-        p = rec.ppg_pulse
+        p = rec.ppg_systole_up
         ax.plot(rec.ppg_t, p - np.nanmedian(p), lw=0.7, color=PPG_C)
-        ax.set_ylabel("PPG, systole up\n(81 pA codes)"); ax.set_xlabel("time (s)")
-        ax.set_title("PPG fine channel (sign flipped, offset removed)", fontsize=10, loc="left")
+        ax.set_ylabel("PPG fine, systole up\n(80.6 pA codes)"); ax.set_xlabel("time (s)")
+        ax.set_title("PPG fine channel (-photocurrent, offset removed)", fontsize=10, loc="left")
         ax.grid(alpha=0.3)
 
     # zoom
     ax = fig.add_subplot(gs[row, :]); row += 1
     a, b = longest_valid_run(rec.ecg_valid)
-    z0 = (a + rec.ecg_offset) / ECG_HZ + 0.4 * ((b - a) / ECG_HZ - zoom_s) if b > a else 0.0
+    z0 = float(ecg_time(a + rec.ecg_offset)) + 0.4 * ((b - a) / ECG_HZ - zoom_s) if b > a else 0.0
     z0 = max(z0, 0.0); z1 = z0 + zoom_s
     m = (t >= z0) & (t < z1)
     ax.plot(t[m], uv[m], lw=1.0, color=ECG_C, label="ECG")
@@ -115,7 +116,7 @@ def make_report(rec: Recording, png_path: str | Path, title: str = "ECG Card rec
     ax.set_title(f"Zoom {zoom_s:g} s", fontsize=10, loc="left"); ax.grid(alpha=0.3)
     if has_ppg:
         ax2 = ax.twinx()
-        pt, p = rec.ppg_t, rec.ppg_pulse
+        pt, p = rec.ppg_t, rec.ppg_systole_up
         mp = (pt >= z0) & (pt < z1)
         if mp.any():
             ax2.plot(pt[mp], p[mp] - np.nanmedian(p[mp]), lw=1.0, color=PPG_C, label="PPG")

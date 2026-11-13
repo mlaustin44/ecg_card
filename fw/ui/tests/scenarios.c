@@ -208,7 +208,7 @@ SC(settings_alt)
     m->settings.gain = GAIN_HI;
     m->settings.notch = NOTCH_60;
     m->settings.rld = RLD_RIGHT;
-    m->settings.led_limit = LED_LIMIT_20MA;
+    m->settings.led_limit = LED_LIMIT_5MA;
     m->settings.sweep = SWEEP_1S5;
 }
 SC(about) { scen_defaults(m); m->screen = UI_SCREEN_ABOUT; }

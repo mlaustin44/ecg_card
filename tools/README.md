@@ -20,11 +20,34 @@ needed if pytest or matplotlib are missing.) All scripts run from any directory.
 | `report.py` | offline PNG report (no pyplot, headless) |
 | `siggen.py` | synthetic ECG + PPG with ground truth |
 | `refdsp.py` | reference decimator, display filter, Pan-Tompkins, HRV, PPG foot and PAT |
-| `streamsim.py` | build the byte stream the firmware would send from a simulation |
+| `streamsim.py` | build the byte stream the firmware would send from a simulation (firmware timeline and fine) |
 
-Conventions: ECG sample `i` is at `i/500` s. PPG frame `k` (LED-on sample) is at
-`k*0.01 + 0.00995` s. The PPG "fine" channel is anti-correlated with the pulse (systole
-dims the light), so plots use `-fine` ("systole up"). Decoder counters: `bad_crc`,
+### Conventions (as the firmware, `fw/dsp/README.md` and `fw/dsp/include/dsp_delays.h`)
+
+Times are seconds from the common acquisition start event.
+
+* **ECG timeline.** Stream sample index `m` (ECG_BLOCK `start + i`, the EV_R_PEAK index,
+  and the EV_PULSE foot index, which is in ECG sample units) is the signal at
+  `t = m/500 + ECG_T0_S`, `ECG_T0_S = -0.010` (`DSP_ECG_STREAM_T0_US`: the decimator FIR
+  delay stays in the stream). `record.ecg_time()`, `Recording.ecg_t`, `r_peak_times()` and
+  `pulse_foot_times()` use this. A true R-peak is a further `ECG_ANALOG_DELAY_S = 0.000974`
+  s earlier (`DSP_ECG_ANALOG_DELAY_US`, analog front end): `record.r_true_time()` and
+  `Recording.r_peak_true_times()` remove it, and any PAT the tools compute (streamsim's
+  reference path) is foot minus true R time, as the firmware's `pat_ms`. Constants live in
+  `ecgcard/record.py`. (`refdsp.decimate_8` itself is zero-delay; `streamsim.stream_ecg`
+  moves it onto the stream timeline, so a simulated R at `t_R` is sent at index
+  `round((t_R + 0.000974 + 0.010) * 500)`, within a sample.)
+* **PPG timeline.** Frame `k`'s LED-on sample is at `k*0.01 + 0.00995` s.
+* **PPG fine sign.** `fine = dsp_ppg_fine() = hi_on - 11*dac12 + dark10`, with
+  `dark10 = 11*dac12 - hi_dark` when `hi_dark` is in 16..4079 (then `fine = hi_on - hi_dark`),
+  else `10*tia_dark`; if `hi_on` is outside 16..4079, `fine = -10*coarse`. So fine is
+  **minus** the LED-induced photocurrent in 80.6 pA units: more blood, less light, fine goes
+  **up**. The systolic upstroke points up in the raw stream, and the tools plot and analyse
+  fine as is (`Recording.ppg_fine`, alias `ppg_systole_up`; no negation). It wraps modulo
+  2^16 on the wire and `Recording.ppg_fine` unwraps it. `siggen.fine_from_frames` is the
+  same formula.
+
+Decoder counters: `bad_crc`,
 `bad_length`, `bad_cobs`, `unknown_type`, `seq_gaps` (places where the counter jumped),
 `seq_lost` (frames missing by the counter; a CRC-dropped frame also shows up here),
 `seq_repeats` (duplicate or reordered frames, not counted as loss).
@@ -76,6 +99,20 @@ tachogram, and a table (HR mean/min/max, SDNN, RMSSD, missing samples, lost fram
 CRC errors, PAT). R-peaks come from device events, or from the reference detector if
 the stream has none.
 
+## `check_capture.py`
+
+    check_capture.py FILE [--min-ecg-blocks N] [--min-ppg-blocks N] [--require-events KIND,...] [-q]
+
+Decodes a raw capture (COBS frames + 0x00, as the device writes them) and prints frames,
+per-type counts, `bad_crc`/`bad_length`/`bad_cobs`/`unknown_type`, `seq_lost`, the number
+of ECG_BLOCK (step 10) and PPG_BLOCK (step 2) start-index gaps, event counts, and mean HR,
+pulse rate and PAT from the events. KIND is `r_peak`, `pulse`, `lead`, `state` or
+`button`. Exit 0 if every check passes, 1 if any CRC/length/COBS error occurs, block
+indices are not contiguous within a run (a start index of 0 begins a new run and is
+fine), a minimum is not met or a required event kind is absent, 2 on a usage error or an
+unreadable file. Lost sequence numbers, unknown types and trailing bytes are reported
+only. `-q` prints nothing but `FAIL:` lines (stderr).
+
 ## Fixtures: `make_fixtures.py`
 
     python3 tools/make_fixtures.py [--out build/fixtures] [--only NAME ...] [--list]
@@ -96,8 +133,10 @@ Each fixture `<name>` is three files, readable from C without Python:
   `k * 0.01` s; the dark sample is at +9.70 ms and the on sample at +9.95 ms.
   `TIA_OUT = 0.245 V + I * 1 MOhm`; `PPG_HI = 11 * V_DAC12 - 10 * TIA_OUT`, clipped to
   0..3.3 V (it rails high in the dark phase, as in hardware). Stream values:
-  `coarse = tia_on - tia_dark`; `fine = 11 * dac12 - hi_on - 10 * 0.245 V in codes (3041)`,
-  which is continuous across DAC12 steps (wrap to int16 on the wire).
+  `coarse = tia_on - tia_dark`; `fine` as the firmware computes it (see Conventions:
+  `hi_on - 11 * dac12 + 10 * tia_dark` here, since `hi_dark` rails), which is minus the
+  LED photocurrent in 80.6 pA units (systole up) and continuous across DAC12 steps (wraps
+  to int16 on the wire).
 * `<name>.json`: parameters and ground truth. Keys: `ecg_samples`, `ppg_frames`,
   `ecg_mid_code`, `ecg_gain` (558 or 1098), `uv_per_code`, `ppg_led_code_schedule` and
   `ppg_dac12_schedule` (`[[first_frame, code], ...]`; LED current = code * 3.718 uA),
@@ -109,8 +148,10 @@ Each fixture `<name>` is three files, readable from C without Python:
 
 The generator: P-QRS-T as a sum of Gaussians (R amplitude is input-referred, mains and
 baseline wander are added before the 0.5 Hz / 150 Hz analog band, so the stated amplitudes
-are before that band). Photocurrent = ambient (optional 100/120 Hz flicker, seen by both
-dark and on samples) + LED DC * (1 - PI * pulse), so the pulse lowers the light.
+are before that band; that band shifts the R peak by about 1.07 ms, close to the 0.974 ms
+the firmware assumes). Photocurrent = ambient (optional 100/120 Hz flicker, seen by both
+dark and on samples) + LED DC * (1 - PI * pulse), so the pulse lowers the light and
+raises fine.
 Disturbed flags mark frames where the LED code or DAC12 changed.
 
 ## Reference DSP (`refdsp.py`)
@@ -123,7 +164,8 @@ compared against; accuracy on the fixtures is asserted in `tests/`.
 
 ## Tests
 
-`python3 -m pytest tools/tests -q`: codec (COBS/CRC vectors, boundaries, fuzzing), record
-assembly, generator ground truth, reference DSP accuracy, and an end-to-end run
-(generator -> reference DSP -> byte stream -> capture CLI -> report PNG, plus tail-follow
-and TCP sources).
+`.venv/bin/python -m pytest tools/tests -q`: codec (COBS/CRC vectors, boundaries,
+fuzzing), record assembly and timeline, generator ground truth and the firmware fine
+formula, reference DSP accuracy, `check_capture.py` (good, corrupted, gap, new run,
+minimums), and an end-to-end run (generator -> reference DSP -> byte stream on the
+firmware timeline -> capture CLI -> report PNG, plus tail-follow and TCP sources).

@@ -27,6 +27,8 @@ def decimate_8(codes: np.ndarray, taps: np.ndarray | None = None) -> np.ndarray:
 
     Linear-phase FIR with its group delay removed, so output sample i is aligned with
     input sample 8 i (time i / 500 s). The edges are zero-padded with the first/last value.
+    Note: the firmware stream keeps its decimator delay (stream sample m is at
+    m / 500 - 0.010 s); streamsim.stream_ecg converts this output to that timeline.
     """
     h = decimation_filter() if taps is None else taps
     x = np.asarray(codes, dtype=float)
@@ -105,7 +107,9 @@ def pan_tompkins(ecg: np.ndarray, fs: float = FS) -> np.ndarray:
 def ppg_feet(t: np.ndarray, y: np.ndarray, r_times: np.ndarray, lowpass_hz: float = 10.0) -> np.ndarray:
     """Pulse foot by intersecting tangents, one search per R-peak.
 
-    `y` must have systole pointing UP (use -fine). For each R-peak the steepest rising
+    `y` must have systole pointing UP: the stream fine channel as is (firmware convention,
+    fine = -photocurrent). `t` and `r_times` are on the common timeline; pass true R-peak
+    times (record.r_true_time of stream indices) for PAT. For each R-peak the steepest rising
     point is searched in [R + 0.05 s, R + min(0.6 s, RR - 0.03 s)]; the foot is where
     the tangent there meets the horizontal through the preceding minimum. NaN if absent.
     """

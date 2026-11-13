@@ -208,6 +208,34 @@ static void hook(sim_exit_reason_t r, void *c)
     hook_reason = r;
 }
 
+TEST(standby_ignores_chg_stat_and_clear_stop)
+{
+    fresh();
+    sim_set_usb(true);
+    (void)hal_events_take();
+    sim_set_charge_mode(SIM_CHG_FAULT); /* CHG_STAT1 toggles every 250 ms */
+    uint64_t t0 = sim_now_ms();
+    uint32_t cause = hal_standby(3);
+    CHECK_EQ(cause & HAL_EV_RTC, HAL_EV_RTC); /* not woken by the blink */
+    CHECK(sim_now_ms() - t0 >= 2900);
+    CHECK(hal_events_take() & HAL_EV_CHG_STAT); /* still reported afterwards */
+    /* a pending CHG_STAT alone does not end standby at once either */
+    sim_set_charge_mode(SIM_CHG_CHARGING);
+    (void)hal_events_take();
+    sim_set_charge_mode(SIM_CHG_DONE);
+    t0 = sim_now_ms();
+    CHECK_EQ(hal_standby(2) & HAL_EV_RTC, HAL_EV_RTC);
+    CHECK(sim_now_ms() - t0 >= 1900);
+    /* sim_clear_stop() re-arms the main loop after a stop time */
+    sim_stop_at(sim_now_ms() + 5);
+    while (!sim_should_stop())
+        hal_idle();
+    sim_clear_stop();
+    CHECK(!sim_should_stop());
+    hal_delay_ms(10);
+    CHECK(!sim_should_stop());
+}
+
 TEST(standby_deadlock_fails_loudly)
 {
     fresh();
@@ -298,6 +326,7 @@ int main(void)
     RUN(charger_fault_toggles_at_2hz);
     RUN(rtc_event_and_ppm);
     RUN(standby_wake_causes);
+    RUN(standby_ignores_chg_stat_and_clear_stop);
     RUN(standby_deadlock_fails_loudly);
     RUN(system_reset_and_reboot);
     RUN(watchdog);

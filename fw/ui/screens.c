@@ -330,7 +330,7 @@ static const char *const set_names[SET_ITEM_COUNT] = {
 static const char *const gain_vals[] = {"Auto", "558x", "1098x"};
 static const char *const notch_vals[] = {"Auto", "50Hz", "60Hz"};
 static const char *const rld_vals[] = {"Both", "Left", "Right", "Off"};
-static const char *const led_vals[] = {"5mA", "10mA", "15mA", "20mA"};
+static const char *const led_vals[LED_LIMIT_COUNT] = {"5mA", "10mA", "15mA"};
 static const char *const sweep_vals[] = {"1.5s", "3s", "6s"};
 
 static const char *setting_value(const settings_t *s, unsigned item)
@@ -339,7 +339,7 @@ static const char *setting_value(const settings_t *s, unsigned item)
     case SET_ITEM_GAIN: return s->gain < 3 ? gain_vals[s->gain] : "?";
     case SET_ITEM_NOTCH: return s->notch < 3 ? notch_vals[s->notch] : "?";
     case SET_ITEM_RLD: return s->rld < 4 ? rld_vals[s->rld] : "?";
-    case SET_ITEM_LED_LIMIT: return s->led_limit < 4 ? led_vals[s->led_limit] : "?";
+    case SET_ITEM_LED_LIMIT: return s->led_limit < LED_LIMIT_COUNT ? led_vals[s->led_limit] : "?";
     case SET_ITEM_SWEEP: return s->sweep < 3 ? sweep_vals[s->sweep] : "?";
     default: return "?";
     }

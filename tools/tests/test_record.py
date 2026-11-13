@@ -1,7 +1,8 @@
 import numpy as np
 
 from ecgcard import codec as c
-from ecgcard.record import Recording, RecordingBuilder, assemble, unwrap_int16
+from ecgcard.record import (ECG_ANALOG_DELAY_S, ECG_T0_S, Recording, RecordingBuilder, assemble, ecg_index,
+                            ecg_time, r_true_time, unwrap_int16)
 
 
 def ecg_blocks(n, gain_flag=0, value=lambda i: i):
@@ -18,7 +19,14 @@ def test_placement_gaps_and_scaling():
     assert np.isnan(uv[30:40]).all()
     # 800 stream units at gain 558: 800 / 8 * 805.7 / 558
     assert np.isclose(uv[50] * 8 * 558 / 805.7, 50)
-    assert np.isclose(rec.ecg_t[50], 0.1)
+    assert np.isclose(rec.ecg_t[50], 0.1 + ECG_T0_S)  # stream sample m is at m/500 - 10 ms
+
+
+def test_ecg_timeline_constants():
+    # fw/dsp/include/dsp_delays.h: DSP_ECG_STREAM_T0_US = -10000, DSP_ECG_ANALOG_DELAY_US = 974
+    assert ECG_T0_S == -0.010 and ECG_ANALOG_DELAY_S == 0.000974
+    assert np.isclose(ecg_time(100), 0.19) and np.isclose(ecg_index(0.19), 100)
+    assert np.isclose(r_true_time(100), 0.19 - 0.000974)
 
 
 def test_gain_flag_per_block_and_other_flags():
@@ -84,8 +92,10 @@ def test_events_and_save_load(tmp_path):
             c.RPeakEvent(12, 70), c.PulseEvent(20, 70, 250, 15), c.LeadEvent(1),
             c.StateEvent(3, 50, 2040, 90, 1), c.ButtonEvent(1, 0), c.Log("x")]
     rec = assemble(msgs, {"bad_crc": 3})
-    assert rec.r_peaks[0]["sample"] == 12 and np.isclose(rec.r_peak_times()[0], 0.024)
-    assert rec.pulses[0]["pat_ms"] == 250 and np.isclose(rec.pulse_foot_times()[0], 0.04)
+    assert rec.r_peaks[0]["sample"] == 12 and np.isclose(rec.r_peak_times()[0], 0.014)
+    assert np.isclose(rec.r_peak_true_times()[0], 0.014 - 0.000974)
+    assert rec.pulses[0]["pat_ms"] == 250 and np.isclose(rec.pulse_foot_times()[0], 0.03)
+    assert np.isclose(rec.r_peaks[0]["time_s"], 0.014)
     assert rec.leads[0]["contact"] == 1 and rec.states[0]["mid_code"] == 2040 and rec.buttons[0]["button"] == 1
     p = tmp_path / "r.npz"
     rec.save(p)
@@ -101,8 +111,10 @@ def test_events_and_save_load(tmp_path):
 def test_window_and_recent():
     rec = assemble(ecg_blocks(100) + [c.RPeakEvent(900, 60), c.RPeakEvent(100, 60)])
     w = rec.window(1.0, 2.0)
-    assert w.ecg_offset == 500 and w.n_ecg == 500 and len(w.r_peaks) == 1
+    # t = 1.0 s is sample 505; the data end at sample 999
+    assert w.ecg_offset == 505 and w.n_ecg == 495 and len(w.r_peaks) == 1
+    assert np.isclose(w.ecg_t[0], 1.0)
     b = RecordingBuilder()
     b.add_all(ecg_blocks(100))
     r = b.build(last_s=0.5)
-    assert r.n_ecg == 250 and r.ecg_offset == 750 and np.isclose(r.ecg_t[0], 1.5)
+    assert r.n_ecg == 250 and r.ecg_offset == 750 and np.isclose(r.ecg_t[0], 1.49)

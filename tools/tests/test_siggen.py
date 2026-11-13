@@ -84,9 +84,25 @@ def test_ppg_formulas(sim):
     peak_idx = [int((x + 0.16) * 100) for x in feet[2:10]]
     base_idx = [int((x - 0.1) * 100) for x in feet[2:10]]
     assert np.mean(f[peak_idx, 2]) < np.mean(f[base_idx, 2]) - 10
-    # fine channel (true) rises with light, so it is anti-correlated with the pulse
+    # firmware fine = -photocurrent: it rises with the pulse (systolic upstroke up)
     fine = s.ppg.fine
-    assert np.mean(fine[peak_idx]) < np.mean(fine[base_idx])
+    assert np.mean(fine[peak_idx]) > np.mean(fine[base_idx]) + 100
+    # and it is about -10 x coarse (same photocurrent, 10x finer units)
+    coarse = f[:, 2] - f[:, 0]
+    assert np.median(np.abs(fine + 10 * coarse)) < 30
+
+
+def test_fine_matches_firmware_formula():
+    # dsp_ppg_fine(): hi_on - 11 dac12 + dark10; dark10 = 11 dac12 - hi_dark if hi_dark is in
+    # [16, 4079], else 10 tia_dark; hi_on outside [16, 4079] -> -10 coarse
+    frames = np.array([[300, 4095, 2000, 2048],   # hi_dark railed: dark10 = 10 tia_dark
+                       [300, 2500, 2000, 2048],   # hi_dark in range: fine = hi_on - hi_dark
+                       [300, 4095, 2000, 4080],   # hi_on railed high: -10 coarse
+                       [300, 4095, 2000, 15],     # hi_on railed low
+                       [300, 16, 2000, 16]])      # both exactly at the lower limit (in range)
+    dac = np.array([2100, 2100, 2100, 2100, 2100])
+    got = siggen.fine_from_frames(frames, dac)
+    assert got.tolist() == [2048 - 11 * 2100 + 3000, 2048 - 2500, -17000, -17000, 0]
 
 
 def test_ppg_fine_continuous_across_dac_steps():
@@ -94,7 +110,10 @@ def test_ppg_fine_continuous_across_dac_steps():
     steps = np.flatnonzero(np.diff(s.ppg.dac12.astype(int)))
     assert len(steps) >= 20
     d = np.abs(np.diff(s.ppg.fine))
-    assert np.all(d[steps] < 4 * np.median(d) + 40)  # no jump of order 11 x DAC LSB at the steps
+    # no jump at the steps beyond the frame-to-frame noise (which includes 10 x tia_dark noise,
+    # as in the firmware formula): the step frames look like any other frame
+    other = np.setdiff1d(np.arange(len(d)), steps)
+    assert d[steps].max() <= d[other].max() and np.median(d[steps]) < 1.5 * np.median(d[other])
     assert np.all(s.ppg.disturbed[steps + 1])
 
 

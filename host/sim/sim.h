@@ -97,6 +97,9 @@ void sim_at_battery_mv(uint64_t time_ms, uint16_t mv);
 void sim_stop_at(uint64_t time_ms); /* sim_should_stop() becomes true at this time */
 void sim_stop(void);                /* ... now */
 bool sim_should_stop(void);
+/* Clear the stop flag (after a sim_stop_at() time or sim_stop()) so a test
+ * can keep driving the main loop in phases. */
+void sim_clear_stop(void);
 typedef enum {
     SIM_EXIT_STOP_AT,          /* sim_stop_at() time reached (hook is NOT called for sim_stop()) */
     SIM_EXIT_STANDBY_DEADLOCK, /* hal_standby(): nothing can ever wake the MCU */
@@ -205,6 +208,9 @@ void sim_i2c_fail_next(unsigned n, hal_status_t status);
 /* Stuck bus: every transfer fails with HAL_ERR_BUS (10 ms) until hal_i2c_recover(). */
 void sim_i2c_stick_bus(bool stuck);
 bool sim_i2c_bus_stuck(void);
+/* Remove (false) or refit a device: an absent device NACKs its address
+ * (I2C_ADDR_MCP4728 or I2C_ADDR_CW2015). Default: both present. */
+void sim_i2c_set_present(uint8_t addr, bool present);
 
 typedef struct {
     uint64_t t_us;        /* start time */

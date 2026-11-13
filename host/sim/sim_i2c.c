@@ -35,6 +35,7 @@ static struct {
     unsigned fail_n;
     hal_status_t fail_status;
     bool stuck;
+    bool absent_mcp, absent_cw; /* device not fitted / dead: NACKs its address */
     sim_i2c_txn_t log[1024];
     size_t log_n;
 } I;
@@ -351,6 +352,12 @@ void i2c_reset(void)
 
 void sim_i2c_fail_next(unsigned n, hal_status_t st) { I.fail_n = n; I.fail_status = st; }
 void sim_i2c_stick_bus(bool s) { I.stuck = s; }
+void sim_i2c_set_present(uint8_t addr, bool present)
+{
+    if (addr == I2C_ADDR_MCP4728) I.absent_mcp = !present;
+    else if (addr == I2C_ADDR_CW2015) I.absent_cw = !present;
+    else sim_viol(SIM_V_API, "sim_i2c_set_present: no device at 0x%02X", addr);
+}
 bool sim_i2c_bus_stuck(void) { return I.stuck; }
 size_t sim_i2c_log_count(void) { return I.log_n; }
 const sim_i2c_txn_t *sim_i2c_log_get(size_t i) { return i < I.log_n ? &I.log[i] : NULL; }
@@ -403,7 +410,8 @@ hal_status_t hal_i2c_xfer(uint8_t addr, const uint8_t *w, size_t wn, uint8_t *r,
         sim_advance_us(dur);
         DONE(HAL_OK);
     }
-    if (addr != I2C_ADDR_MCP4728 && addr != I2C_ADDR_CW2015) {
+    if ((addr != I2C_ADDR_MCP4728 && addr != I2C_ADDR_CW2015) ||
+        (addr == I2C_ADDR_MCP4728 && I.absent_mcp) || (addr == I2C_ADDR_CW2015 && I.absent_cw)) {
         sim_advance_us(30);
         DONE(HAL_ERR_NACK);
     }

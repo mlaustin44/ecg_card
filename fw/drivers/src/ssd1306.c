@@ -51,9 +51,14 @@ static void cmd(const uint8_t *c, size_t n)
 
 void ssd1306_power_on(void)
 {
-    if (s_powered) {
+    /* OLED_EN reads back low after an MCU reset (or a host-sim reboot that
+     * keeps this module's statics): then the panel is unpowered whatever
+     * s_powered says, so start from scratch. */
+    if (s_powered && hal_pin_read(PIN_OLED_EN)) {
         return;
     }
+    s_powered = false;
+    s_flushing = false;
     hal_pin_write(PIN_OLED_RESET, false);
     hal_pin_write(PIN_OLED_EN, true);
     hal_delay_ms(6); /* >= 5 ms */

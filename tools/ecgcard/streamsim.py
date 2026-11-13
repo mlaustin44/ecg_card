@@ -2,32 +2,65 @@
 from __future__ import annotations
 
 import numpy as np
+from scipy import signal
 
 from . import refdsp
 from .codec import (
     ECG_FLAG_GAIN_HI, ECG_FLAG_SETTLING, PPG_FLAG_DIST0, PPG_FLAG_DIST1,
     EcgBlock, Log, Message, PpgBlock, PulseEvent, RPeakEvent, StateEvent, StreamEncoder,
 )
+from .record import ECG_HZ, ECG_T0_S, ECG_T0_SAMPLES, ecg_index, ppg_time, r_true_time
 from .siggen import Simulation
+
+
+def stream_ecg(decimated: np.ndarray) -> np.ndarray:
+    """refdsp.decimate_8 output (sample i at raw time 8 i) -> firmware stream timeline.
+
+    The firmware's linear-phase decimator leaves its delay in: stream sample m is the
+    signal at raw time 8 m - 40, i.e. t = m / 500 + ECG_T0_S. So stream[m] = dec[m - 5]
+    (the first 5 samples repeat dec[0]); the length is unchanged.
+    """
+    d = np.asarray(decimated)
+    return np.concatenate((np.full(ECG_T0_SAMPLES, d[0]), d[:len(d) - ECG_T0_SAMPLES]))
+
+
+def refine_peaks(x: np.ndarray, peaks: np.ndarray, half: int = 4) -> np.ndarray:
+    """Sub-sample R-peak positions: maximum of x within +-half samples of each detection,
+    parabolic interpolation (like the firmware's index + frac). Simulated R waves are positive.
+
+    x is first low-passed at 30 Hz with zero phase (no timing bias), so that mains and EMG
+    do not move the maximum (the firmware also refines on a mains-free "clean" signal)."""
+    x = signal.sosfiltfilt(signal.butter(4, 30.0, fs=ECG_HZ, output="sos"), np.asarray(x, float))
+    out = np.empty(len(peaks))
+    for j, pk in enumerate(peaks):
+        lo, hi = max(pk - half, 1), min(pk + half + 1, len(x) - 1)
+        k = lo + int(np.argmax(x[lo:hi]))
+        ym, y0, yp = x[k - 1], x[k], x[k + 1]
+        den = ym - 2 * y0 + yp
+        out[j] = k + (0.5 * (ym - yp) / den if den < 0 else 0.0)
+    return out
 
 
 def sim_messages(sim: Simulation, settle_s: float = 2.5) -> list[Message]:
     """Messages the firmware would emit for a simulation: blocks every 20 ms plus events."""
     ep, pp = sim.ecg_params, sim.ppg
-    dec = refdsp.decimate_8(sim.ecg_codes)
+    dec = stream_ecg(refdsp.decimate_8(sim.ecg_codes))   # on the firmware stream timeline
     s16 = refdsp.to_stream_units(dec, ep.mid_code)
-    peaks = refdsp.pan_tompkins(dec)
-    t_ppg = np.arange(len(pp.fine)) / 100.0 + 0.00995
-    feet = refdsp.ppg_feet(t_ppg, -pp.fine.astype(float), peaks / 500.0)
-    pats = refdsp.pat_from_feet(peaks / 500.0, feet)
+    # stream positions: the R appears at (t_R + analog delay + 0.010) * 500
+    pos = refine_peaks(dec, refdsp.pan_tompkins(dec))
+    peaks = np.round(pos).astype(int)  # EV_R_PEAK index (the firmware drops the fraction too)
+    r_t = r_true_time(pos)             # true R time incl. the fraction, as the firmware's PAT uses
+    t_ppg = ppg_time(np.arange(len(pp.fine)))
+    feet = refdsp.ppg_feet(t_ppg, pp.fine.astype(float), r_t)  # fine is systole-up as is
+    pats = refdsp.pat_from_feet(r_t, feet)
 
     ev: list[tuple[int, Message]] = []  # (emit-at ECG sample, message)
     for i, pk in enumerate(peaks):
-        hr = int(round(60.0 * 500.0 / (pk - peaks[i - 1]))) if i else 0
+        hr = int(round(60.0 * ECG_HZ / (pk - peaks[i - 1]))) if i else 0
         ev.append((pk + 40, RPeakEvent(int(pk), hr)))
         if np.isfinite(feet[i]):
-            ev.append((int(feet[i] * 500) + 80, PulseEvent(int(round(feet[i] * 500)), hr,
-                                                           int(round(pats[i] * 1000)), 20)))
+            foot_idx = int(round(float(ecg_index(feet[i]))))  # EV_PULSE: foot in ECG stream samples
+            ev.append((foot_idx + 80, PulseEvent(foot_idx, hr, int(round(pats[i] * 1000)), 20)))
     ev.sort(key=lambda e: e[0])
 
     gain_flag = ECG_FLAG_GAIN_HI if ep.gain == 1098 else 0
@@ -37,7 +70,7 @@ def sim_messages(sim: Simulation, settle_s: float = 2.5) -> list[Message]:
     k = 0
     for b in range(n_blocks):
         start = b * 10
-        fl = gain_flag | (ECG_FLAG_SETTLING if start / 500.0 < settle_s else 0)
+        fl = gain_flag | (ECG_FLAG_SETTLING if start / ECG_HZ + ECG_T0_S < settle_s else 0)
         msgs.append(EcgBlock(start, fl, s16[start:start + 10]))
         f0 = 2 * b
         dist = (PPG_FLAG_DIST0 if pp.disturbed[f0] else 0) | (PPG_FLAG_DIST1 if pp.disturbed[f0 + 1] else 0)

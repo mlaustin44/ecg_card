@@ -91,7 +91,9 @@ typedef enum {
  * MCP4728 on internal 2.048 V reference, gain x1: full scale 15.2 mA.
  * uA per DAC code (12-bit) = 2048 mV / 4096 * (10/164) / 8.2 ohm = 3.718 uA */
 #define LED_UA_PER_CODE_X1000 3718
-#define LED_MAX_MA            20
+/* Hard ceiling per LED: the internal-reference full scale is 15.2 mA, so the
+ * brief's 20 mA cap cannot be reached; settings offer 5 / 10 / 15 mA. */
+#define LED_MAX_MA            15
 #define LED_START_MA          5
 
 /* ---- Power policy ------------------------------------------------------- */

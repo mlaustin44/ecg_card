@@ -242,6 +242,24 @@ TEST(cw2015_profile_config_alert)
     CHECK_EQ(sim_violation_count(), 0);
 }
 
+TEST(device_absent)
+{
+    fresh();
+    uint8_t r[24];
+    sim_i2c_set_present(I2C_ADDR_MCP4728, false);
+    CHECK_EQ(hal_i2c_xfer(I2C_ADDR_MCP4728, NULL, 0, r, 24), HAL_ERR_NACK);
+    CHECK_EQ(hal_i2c_xfer(I2C_ADDR_CW2015, NULL, 0, NULL, 0), HAL_OK);
+    sim_i2c_set_present(I2C_ADDR_CW2015, false);
+    CHECK_EQ(hal_i2c_xfer(I2C_ADDR_CW2015, NULL, 0, NULL, 0), HAL_ERR_NACK);
+    sim_i2c_set_present(I2C_ADDR_MCP4728, true);
+    CHECK_EQ(hal_i2c_xfer(I2C_ADDR_MCP4728, NULL, 0, r, 24), HAL_OK);
+    sim_reset(); /* back to both present */
+    sim_set_violation_mode(SIM_VIOL_COLLECT);
+    hal_init();
+    CHECK_EQ(hal_i2c_xfer(I2C_ADDR_CW2015, NULL, 0, NULL, 0), HAL_OK);
+    CHECK_EQ(sim_violation_count(), 0);
+}
+
 int main(void)
 {
     RUN(transport_basics);
@@ -250,5 +268,6 @@ int main(void)
     RUN(mcp4728_eeprom_busy_readback_poweron);
     RUN(cw2015_registers);
     RUN(cw2015_profile_config_alert);
+    RUN(device_absent);
     return TEST_RESULT();
 }

@@ -8,8 +8,9 @@
 typedef enum { GAIN_AUTO, GAIN_LO, GAIN_HI, GAIN_MODE_COUNT } gain_mode_t;
 typedef enum { NOTCH_AUTO, NOTCH_50, NOTCH_60, NOTCH_MODE_COUNT } notch_mode_t;
 typedef enum { RLD_BOTH, RLD_LEFT, RLD_RIGHT, RLD_OFF, RLD_MODE_COUNT } rld_mode_t;
-typedef enum { LED_LIMIT_5MA, LED_LIMIT_10MA, LED_LIMIT_15MA, LED_LIMIT_20MA,
-               LED_LIMIT_COUNT } led_limit_t;
+/* LED current limit per LED. 15 mA is the most the MCP4728 can set on its
+ * internal 2.048 V reference (full scale 15.2 mA, board.h LED_MAX_MA). */
+typedef enum { LED_LIMIT_5MA, LED_LIMIT_10MA, LED_LIMIT_15MA, LED_LIMIT_COUNT } led_limit_t;
 typedef enum { SWEEP_1S5, SWEEP_3S, SWEEP_6S, SWEEP_COUNT } sweep_t;
 
 /* Order of items on the Settings page. */

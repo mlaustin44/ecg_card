@@ -279,6 +279,7 @@ void sim_at_battery_mv(uint64_t ms, uint16_t mv) { canned(ms, canned_batt, 0, fa
 
 void sim_stop_at(uint64_t ms) { S.stop_at_us = ms * 1000; }
 void sim_stop(void) { S.stop = true; }
+void sim_clear_stop(void) { S.stop = false; }
 bool sim_should_stop(void) { return S.stop; }
 void sim_set_exit_hook(sim_exit_hook_t h, void *ctx) { S.hook = h; S.hook_ctx = ctx; }
 
@@ -652,7 +653,11 @@ uint32_t hal_standby(uint32_t wake_after_s)
     if (S.clock_fast) sim_viol(SIM_V_STANDBY_PRECOND, "standby with fast MCLK");
 
     S.events &= ~(uint32_t)HAL_EV_RTC; /* periodic awake tick is not a standby wake source */
-    if (S.events) return S.events;
+    /* As in the BSP: CHG_STAT1 is masked in STANDBY (a 2 Hz charger-fault
+     * toggle would keep the MCU awake); an edge stays latched and is
+     * reported with the next real wake. */
+    const uint32_t wake_mask = ~(uint32_t)(HAL_EV_RTC | HAL_EV_CHG_STAT);
+    if (S.events & wake_mask) return S.events;
 
     uint64_t t_enter = S.now_us;
     uint64_t rtc_deadline = NEVER;
@@ -677,7 +682,7 @@ uint32_t hal_standby(uint32_t wake_after_s)
             break;
         }
         advance_to(tn < S.now_us ? S.now_us : tn);
-        if (S.events) {
+        if (S.events & wake_mask) {
             cause = S.events;
             break;
         }

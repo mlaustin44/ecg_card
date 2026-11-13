@@ -97,7 +97,9 @@ void hal_idle(void);
  * the HAL_EV_* bits that caused the wake (they also stay latched).
  * wake_after_s = 0 means no timed wake; the timed wake has 1 s granularity.
  * A stale HAL_EV_RTC is discarded on entry (the 1 Hz tick is not a wake
- * source); any other event already pending makes the call return at once. */
+ * source); any other event already pending makes the call return at once.
+ * HAL_EV_CHG_STAT is not a wake source either (a charger-fault blink would
+ * keep the MCU awake): it is reported on exit if CHG_STAT1 changed. */
 uint32_t hal_standby(uint32_t wake_after_s);
 
 /* ---- I2C0 (400 kHz controller) -------------------------------------------
@@ -147,8 +149,10 @@ unsigned hal_acq_running(void);
  * Returns the number of samples copied (0..max). The internal buffer holds
  * at least 64 ms; if the reader falls behind, the oldest data is lost.
  * hal_ecg_overruns() counts every sample lost for any reason (slow reader or
- * a missed conversion), cumulatively since hal_init(), so the index of the
- * next sample returned = samples read + overruns counted since the start. */
+ * a missed conversion); the index of the next sample returned = samples read
+ * + overruns counted since the start. The BSP restarts the count at
+ * hal_acq_start(), the simulator counts from hal_init(): use the difference
+ * from a value read right after hal_acq_start(). */
 size_t hal_ecg_read(uint16_t *dst, size_t max);
 uint32_t hal_ecg_overruns(void);
 

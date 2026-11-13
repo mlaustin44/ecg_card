@@ -18,6 +18,15 @@ from .codec import (
 ECG_HZ = 500.0
 PPG_HZ = 100.0
 PPG_ON_SAMPLE_S = 0.00995        # LED-on ADC sample within a PPG frame
+# Common timeline (seconds from the acquisition start event, fw/dsp/include/dsp_delays.h):
+# ECG stream sample m (ECG_BLOCK start + i, EV_R_PEAK index, EV_PULSE foot index) is the
+# signal at t = m / 500 + ECG_T0_S: the decimator FIR (95 taps) delays it by 47 raw samples,
+# so m = raw time 8 m - 40 (DSP_ECG_STREAM_T0_US = -10000).
+ECG_T0_S = -0.010
+ECG_T0_SAMPLES = 5               # the same offset in stream samples (-ECG_T0_S * ECG_HZ)
+# A true R-peak is this much earlier than its stream-sample time (analog front end delay,
+# DSP_ECG_ANALOG_DELAY_US = 974). The firmware's PAT already removes both offsets.
+ECG_ANALOG_DELAY_S = 0.000974
 UV_PER_CODE = 805.7
 GAIN_LO, GAIN_HI = 558, 1098
 MAX_INDEX = 500 * 3600 * 24      # reject absurd start indices (corrupt but CRC-valid)
@@ -26,8 +35,23 @@ NA_PER_FINE_CODE = 0.08057
 
 
 def ecg_time(index):
-    """Time in seconds of ECG sample index (scalar or array)."""
-    return np.asarray(index) / ECG_HZ
+    """Time in seconds of ECG stream sample index (scalar or array): index / 500 + ECG_T0_S.
+
+    Also applies to EV_R_PEAK and EV_PULSE indices (where the R-peak / foot is on the
+    stream timeline). For the true R-peak time use r_true_time()."""
+    return np.asarray(index) / ECG_HZ + ECG_T0_S
+
+
+def ecg_index(t):
+    """Inverse of ecg_time (float index)."""
+    return (np.asarray(t) - ECG_T0_S) * ECG_HZ
+
+
+def r_true_time(index):
+    """True R-peak time (s) of an R-peak at stream index: ecg_time(index) - ECG_ANALOG_DELAY_S.
+
+    This is the time PAT is measured from (as the firmware's dsp_pat_r_time_us)."""
+    return ecg_time(index) - ECG_ANALOG_DELAY_S
 
 
 def ppg_time(index):
@@ -107,18 +131,23 @@ class Recording:
 
     @property
     def ecg_t(self) -> np.ndarray:
-        return (np.arange(self.n_ecg) + self.ecg_offset) / ECG_HZ
+        """Time of each ECG sample on the common timeline (index / 500 + ECG_T0_S)."""
+        return ecg_time(np.arange(self.n_ecg) + self.ecg_offset)
 
     # ---- derived PPG
     @property
     def ppg_fine(self) -> np.ndarray:
-        """Fine channel unwrapped modulo 2^16 (81 pA per code), NaN where missing."""
+        """Fine channel unwrapped modulo 2^16 (80.6 pA per code), NaN where missing.
+
+        Firmware convention (dsp_ppg_fine): fine = -(LED-induced photocurrent), so more
+        blood -> less light -> fine goes up: the systolic upstroke points UP as is."""
         return unwrap_int16(self.ppg_fine_raw, self.ppg_valid)
 
     @property
-    def ppg_pulse(self) -> np.ndarray:
-        """Fine channel with the sign flipped so that systole points up (it dims the light)."""
-        return -self.ppg_fine
+    def ppg_systole_up(self) -> np.ndarray:
+        """PPG trace with systole pointing up: the unwrapped fine channel unchanged
+        (the firmware's sign convention already does this; no negation)."""
+        return self.ppg_fine
 
     @property
     def ppg_t(self) -> np.ndarray:
@@ -129,11 +158,21 @@ class Recording:
         return self.ppg_coarse * NA_PER_COARSE_CODE
 
     # ---- events
+    def r_peak_samples(self) -> np.ndarray:
+        """Stream sample indices of the R-peak events."""
+        return np.array([e["sample"] for e in self.r_peaks], dtype=np.int64)
+
     def r_peak_times(self) -> np.ndarray:
-        return np.array([e["sample"] / ECG_HZ for e in self.r_peaks])
+        """R-peak event times on the stream timeline (where the R appears in ecg_t)."""
+        return ecg_time(self.r_peak_samples()).astype(float)
+
+    def r_peak_true_times(self) -> np.ndarray:
+        """R-peak event times with the analog delay removed (the PAT reference)."""
+        return r_true_time(self.r_peak_samples()).astype(float)
 
     def pulse_foot_times(self) -> np.ndarray:
-        return np.array([e["foot_sample"] / ECG_HZ for e in self.pulses])
+        """Pulse foot times (EV_PULSE index is in ECG stream sample units)."""
+        return ecg_time(np.array([e["foot_sample"] for e in self.pulses], dtype=np.int64)).astype(float)
 
     @property
     def duration_s(self) -> float:
@@ -142,8 +181,8 @@ class Recording:
     # ---- windows
     def window(self, t0: float, t1: float) -> "Recording":
         """Slice [t0, t1) seconds (absolute); events are filtered by time."""
-        e0 = max(int(np.floor(t0 * ECG_HZ)) - self.ecg_offset, 0)
-        e1 = max(int(np.ceil(t1 * ECG_HZ)) - self.ecg_offset, 0)
+        e0 = max(int(np.floor(ecg_index(t0) + 1e-9)) - self.ecg_offset, 0)
+        e1 = max(int(np.ceil(ecg_index(t1) - 1e-9)) - self.ecg_offset, 0)
         p0 = max(int(np.floor(t0 * PPG_HZ)) - self.ppg_offset, 0)
         p1 = max(int(np.ceil(t1 * PPG_HZ)) - self.ppg_offset, 0)
         keep = lambda ev: [e for e in ev if t0 <= e["time_s"] < t1]
@@ -187,7 +226,7 @@ class Recording:
             for i in range(self.n_ecg):
                 if self.ecg_valid[i]:
                     fl = int(self.ecg_flags[i])
-                    w.writerow([i + self.ecg_offset, f"{(i + self.ecg_offset) / ECG_HZ:.4f}",
+                    w.writerow([i + self.ecg_offset, f"{ecg_time(i + self.ecg_offset):.4f}",
                                 f"{uv[i]:.2f}", fl & 1, (fl >> 1) & 1, (fl >> 2) & 1])
         fine = self.ppg_fine
         with open(paths[1], "w", newline="") as f:
@@ -261,9 +300,10 @@ class RecordingBuilder:
         elif isinstance(m, PpgBlock):
             self._add_ppg(m)
         elif isinstance(m, RPeakEvent):
-            self.events["r_peaks"].append({"time_s": m.sample / ECG_HZ, "sample": m.sample, "hr_bpm": m.hr_bpm})
+            self.events["r_peaks"].append({"time_s": float(ecg_time(m.sample)), "sample": m.sample,
+                                           "hr_bpm": m.hr_bpm})
         elif isinstance(m, PulseEvent):
-            self.events["pulses"].append({"time_s": m.foot_sample / ECG_HZ, "foot_sample": m.foot_sample,
+            self.events["pulses"].append({"time_s": float(ecg_time(m.foot_sample)), "foot_sample": m.foot_sample,
                                           "pulse_bpm": m.pulse_bpm, "pat_ms": m.pat_ms,
                                           "pi_permille": m.pi_permille})
         elif isinstance(m, LeadEvent):
@@ -294,7 +334,7 @@ class RecordingBuilder:
         for g in (self.ecg_raw, self.ecg_valid, self.ecg_flags):
             g.n = max(g.n, end)
         self.ecg_blocks += 1
-        self._now = max(self._now, end / ECG_HZ)
+        self._now = max(self._now, float(ecg_time(end)))
 
     def _add_ppg(self, b: PpgBlock) -> None:
         if b.start > MAX_INDEX // 5:
@@ -331,7 +371,7 @@ class RecordingBuilder:
             self.ppg_coarse.view(lo_p).copy(), self.ppg_fine.view(lo_p).copy(), self.ppg_valid.view(lo_p).copy(),
             self.ppg_dist.view(lo_p).copy(), self.ppg_nofing.view(lo_p).copy(), self.ppg_led.view(lo_p).copy(),
             ecg_offset=lo_e, ppg_offset=lo_p)
-        t0 = min(lo_e / ECG_HZ, lo_p / PPG_HZ) if last_s is not None else -1.0
+        t0 = min(float(ecg_time(lo_e)), lo_p / PPG_HZ) if last_s is not None else -1.0
         for k, ev in self.events.items():
             setattr(rec, k, [dict(e) for e in ev if e["time_s"] >= t0] if last_s is not None else [dict(e) for e in ev])
         rec.meta = {

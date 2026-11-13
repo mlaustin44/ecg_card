@@ -25,6 +25,8 @@ LED_UA_PER_CODE = 3.718
 T_DARK_S = 0.0097
 T_ON_S = 0.00995
 FIRST_BEAT_S = 1.0
+# PPG_HI codes outside [HI_MIN, HI_MAX] count as railed (fw/dsp/src/ppg.c)
+HI_MIN, HI_MAX = 16, 4079
 
 
 def volts_to_code(v: np.ndarray) -> np.ndarray:
@@ -192,12 +194,29 @@ def pulse_template(fs: float = 2000.0) -> tuple[np.ndarray, float]:
 @dataclass
 class PpgSignal:
     frames: np.ndarray        # uint16 (n, 4): tia_dark, hi_dark, tia_on, hi_on
-    fine: np.ndarray          # int64 true fine value (81 pA units, 10 x TIA code above bias), unwrapped
+    fine: np.ndarray          # int64 fine as the firmware computes it (fine_from_frames), unwrapped
     dac12: np.ndarray         # uint16 per frame
     led_code: np.ndarray      # uint16 per frame
     disturbed: np.ndarray     # bool per frame (LED or DAC12 step)
     foot_times: np.ndarray    # s, one per beat that produced a pulse
     pat_s: np.ndarray         # s per foot
+
+
+def fine_from_frames(frames: np.ndarray, dac12: np.ndarray) -> np.ndarray:
+    """The firmware's fine value per frame (dsp_ppg_fine in fw/dsp/src/ppg.c), int64 unwrapped.
+
+    fine = hi_on - 11 dac12 + dark10, with dark10 = 11 dac12 - hi_dark if hi_dark is in range
+    (then fine = hi_on - hi_dark), else 10 tia_dark; if hi_on is railed, fine = -10 coarse.
+    Units: 80.6 pA (TIA_OUT / 10 codes); fine = -(LED-induced photocurrent), so more blood
+    -> less light -> fine goes UP (systolic upstroke up). Continuous across DAC12 steps.
+    """
+    f = np.asarray(frames, dtype=np.int64)
+    tia_dark, hi_dark, tia_on, hi_on = f[:, 0], f[:, 1], f[:, 2], f[:, 3]
+    d11 = 11 * np.asarray(dac12, dtype=np.int64)
+    dark_ok = (hi_dark >= HI_MIN) & (hi_dark <= HI_MAX)
+    dark10 = np.where(dark_ok, d11 - hi_dark, 10 * tia_dark)
+    on_ok = (hi_on >= HI_MIN) & (hi_on <= HI_MAX)
+    return np.where(on_ok, hi_on - d11 + dark10, -10 * (tia_on - tia_dark))
 
 
 def render_ppg(p: PpgParams, beats: BeatSchedule, duration_s: float, rng: np.random.Generator) -> PpgSignal:
@@ -248,12 +267,11 @@ def render_ppg(p: PpgParams, beats: BeatSchedule, duration_s: float, rng: np.ran
 
     tia_dark, tia_on = volts_to_code(tia_dark_v), volts_to_code(tia_on_v)
     hi_dark, hi_on = volts_to_code(hi_dark_v), volts_to_code(hi_on_v)
-    # fine = 11 * dac - hi_on - bias: continuous across DAC steps (10 x TIA code above the bias)
-    bias_codes = int(round(10 * TIA_BIAS_V / VREF * ADC_FS_CODES))
-    fine = 11 * dac - hi_on - bias_codes
     disturbed = np.zeros(n, dtype=bool)
     disturbed[1:] = (np.diff(dac) != 0) | (np.diff(led_code) != 0)
     frames = np.stack([tia_dark, hi_dark, tia_on, hi_on], axis=1).astype(np.uint16)
+    # fine exactly as the firmware computes it from these codes (what the stream carries)
+    fine = fine_from_frames(frames, dac)
     keep = (foot > 0) & (foot < duration_s)
     return PpgSignal(frames, fine, dac.astype(np.uint16), led_code.astype(np.uint16), disturbed,
                      foot[keep], pat[keep])

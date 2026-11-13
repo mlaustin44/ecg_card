@@ -6,10 +6,11 @@ import time
 from pathlib import Path
 
 import numpy as np
+import pytest
 
 from ecgcard import codec, refdsp, streamsim
 from ecgcard.capture import CaptureSession, run_capture
-from ecgcard.record import Recording
+from ecgcard.record import ECG_ANALOG_DELAY_S, ECG_T0_S, ECG_T0_SAMPLES, Recording, assemble
 from ecgcard.sources import follow_source, tcp_source
 
 TOOLS = Path(__file__).resolve().parents[1]
@@ -26,13 +27,19 @@ def test_siggen_to_report_end_to_end(sim, tmp_path):
     r1 = run("stream_capture.py", "--file", str(raw), "--npz", str(npz), "-q")
     rec = Recording.load(npz)
     assert rec.n_ecg == 15000 and rec.meta["decoder"]["bad_crc"] == 0 and rec.meta["decoder"]["seq_lost"] == 0
-    # the decoded ECG equals the reference decimation of the generated codes (in uV)
+    # the decoded ECG equals the reference decimation of the generated codes (in uV), delayed
+    # by the firmware's stream offset (stream sample m = raw time 8 m - 40)
     dec = refdsp.decimate_8(s.ecg_codes)
     ref_uv = (dec - s.ecg_params.mid_code) * 805.7 / s.ecg_params.gain
-    assert np.abs(rec.ecg_uv - ref_uv[:rec.n_ecg]).max() < 805.7 / s.ecg_params.gain / 8
+    k = ECG_T0_SAMPLES
+    assert np.abs(rec.ecg_uv[k:] - ref_uv[:rec.n_ecg - k]).max() < 805.7 / s.ecg_params.gain / 8
     truth = np.array(s.truth()["r_peak_times_s"])
-    tp, fp, fn, err = refdsp.match_events(rec.r_peak_times(), truth, 0.05)
+    tp, fp, fn, err = refdsp.match_events(rec.r_peak_true_times(), truth, 0.05)
     assert tp >= len(truth) - 1 and fp == 0
+    assert abs(err.mean()) < 0.0015 and np.abs(err).max() <= 0.0035  # timeline offsets removed
+    feet_truth = np.array(s.truth()["pulse_foot_times_s"])
+    tp, fp, fn, err = refdsp.match_events(rec.pulse_foot_times(), feet_truth, 0.05)
+    assert tp >= len(feet_truth) - 2 and abs(err.mean()) < 0.004
     pats = [e["pat_ms"] for e in rec.pulses]
     assert abs(np.mean(pats) - 200) < 8
     run("stream_plot.py", "--report", str(npz), "--png", str(png))
@@ -41,6 +48,27 @@ def test_siggen_to_report_end_to_end(sim, tmp_path):
     # report straight from the raw stream too
     run("stream_plot.py", "--report", str(raw), "--png", str(tmp_path / "r2.png"))
     assert (tmp_path / "r2.png").exists()
+
+
+@pytest.mark.parametrize("name", ["clean_60bpm", "mains50", "both_pat200", "fast_180bpm", "low_amp_noisy"])
+def test_sim_stream_on_firmware_timeline(sim, name):
+    """Event indices and fine values as the firmware would send them for the simulation."""
+    s = sim(name)
+    msgs, st = codec.decode_stream(streamsim.sim_stream(s))
+    rec = assemble(msgs)
+    t_r = np.array(s.truth()["r_peak_times_s"])
+    # R-peak at stream index round((t_R + analog 0.974 ms + 10 ms) * 500), within one sample
+    # (the generator's analog band shifts the R by ~1.07 ms, not exactly 0.974 ms)
+    want = np.round((t_r + ECG_ANALOG_DELAY_S - ECG_T0_S) * 500)
+    got = rec.r_peak_samples()
+    assert len(got) == len(want) and np.abs(got - want).max() <= 1
+    assert np.mean(got == want) >= 0.6
+    pats = np.array([e["pat_ms"] for e in rec.pulses])
+    assert len(pats) >= len(t_r) - 2 and abs(pats.mean() - s.ppg_params.pat_ms) < 3.5
+    # fine goes over the wire exactly as computed by the firmware formula (modulo 2^16)
+    n = rec.n_ppg
+    diff = rec.ppg_fine - s.ppg.fine[:n]
+    assert np.all(diff == diff[0]) and diff[0] % 65536 == 0
 
 
 def test_report_with_losses_and_no_ppg(sim, tmp_path):

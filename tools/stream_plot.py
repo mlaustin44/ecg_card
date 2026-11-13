@@ -60,8 +60,8 @@ def live(a) -> int:
         if rec.ecg_valid.any():
             uv, t = rec.ecg_uv, rec.ecg_t
             l_e.set_data(t, uv)
-            rt = rec.r_peak_times()
-            idx = np.round(rt * 500).astype(int) - rec.ecg_offset
+            rt = rec.r_peak_times()  # stream timeline, same as rec.ecg_t
+            idx = rec.r_peak_samples() - rec.ecg_offset
             ok = (idx >= 0) & (idx < len(uv))
             m_r.set_data(rt[ok], uv[idx[ok]])
             lo, hi = np.nanmin(uv), np.nanmax(uv)
@@ -69,7 +69,7 @@ def live(a) -> int:
             ax_e.set_ylim(lo - pad, hi + pad)
             ax_e.set_xlim(t[-1] - a.window, t[-1] + 0.2)
         if rec.ppg_valid.any():
-            p = rec.ppg_pulse
+            p = rec.ppg_systole_up  # fine as is (firmware: -photocurrent, systole up)
             pt = rec.ppg_t
             l_p.set_data(pt, p - np.nanmedian(p))
             ft = rec.pulse_foot_times()

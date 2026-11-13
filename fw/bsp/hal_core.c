@@ -577,7 +577,11 @@ uint32_t hal_standby(uint32_t wake_after_s)
     SCB->ICSR = SCB_ICSR_PENDSTCLR_Msk;
 
     pm = hal_irq_lock();
-    g_wake_events = 0u;
+    /* hal.h: a stale 1 Hz tick is discarded; any other event still pending
+     * (e.g. a button edge after the caller's last hal_events_take()) is a
+     * wake reason, so the loop below returns at once instead of losing it. */
+    g_events &= ~(uint32_t) HAL_EV_RTC;
+    g_wake_events = g_events;
     s_rtc_deadline = s_rtc_secs + wake_after_s;
     s_rtc_deadline_armed = (wake_after_s != 0u);
     s_in_standby = true;
