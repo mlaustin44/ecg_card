@@ -74,15 +74,18 @@ TEST(full_session)
     scen_run_ms(30000);
     CHECK_NEAR(scen_m()->live.hr_bpm, tc.hr_bpm, 2);
     CHECK(scen_m()->live.elapsed_s >= 40);
-    /* thumbs off: summary a bit over 2 s after the lead-off */
+    /* thumbs off: "hold still" while railed, the summary
+     * ACQ_ECG_LOST_END_MS after the signal stopped being stable (was: 2 s
+     * after a 100 ms lead-off) */
     sim_set_thumbs(false);
     uint64_t t_off = sim_now_ms();
     scen_run_ms(1500);
     CHECK_EQ(scen_screen(), UI_SCREEN_ECG);
-    CHECK_EQ(scen_live_state(), UI_MEAS_WAIT_CONTACT);
+    CHECK_EQ(scen_live_state(), UI_MEAS_SETTLING);
     CHECK(scen_run_cond(is_summary, 2000));
     uint64_t dt = sim_now_ms() - t_off;
-    CHECK(dt > 2000 && dt < 2500);
+    printf("  thumbs off -> summary %llu ms\n", (unsigned long long)dt);
+    CHECK(dt >= ACQ_ECG_LOST_END_MS && dt < ACQ_ECG_LOST_END_MS + 300);
     scen_run_ms(200);
     scen_shot("ecg_summary");
     const ui_summary_t *s = &scen_m()->summary;
@@ -162,7 +165,9 @@ TEST(no_contact_timeout_and_abort)
     sim_set_thumbs(true);
     CHECK(scen_run_cond(is_settling, 2000));
     sim_set_thumbs(false);
-    scen_run_ms(3000);
+    scen_run_ms(2500);
+    CHECK(is_settling()); /* a rail is "recovering" first */
+    scen_run_ms(1000);    /* ACQ_ECG_LOST_WAIT_MS (was: 100 ms lead-off) */
     CHECK(is_waiting());
     CHECK_EQ(scen_screen(), UI_SCREEN_ECG);
     /* BUTTON1 before RUNNING: back to the card, no summary */

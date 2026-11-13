@@ -6,7 +6,7 @@ static const golden_t golden[] = {
     {"settings_2", 0x36BB92A9u},
     {"about", 0x9B54076Cu},
     {"diag", 0xD759853Bu},
-    {"ecg_wait_c", 0xAC8CE4DBu},
+    {"ecg_wait_c", 0x2C75A2A4u},
     {"ecg_settling", 0xDEAA1BA5u},
     {"ecg_run", 0x8326C9F3u},
     {"ecg_run_205", 0x92C4AE7Au},

@@ -4,64 +4,102 @@
 
 int32_t dsp_uv_q20(int gain); /* mains.c */
 
-/* ---- Lead-off ------------------------------------------------------------ */
+/* ---- Front-end state ------------------------------------------------------ */
+
+static void stats_clear(dsp_lead_stats_t *s)
+{
+    s->n = 0;
+    s->rail = 0;
+    s->sum = 0;
+    s->min = UINT16_MAX;
+    s->max = 0;
+}
 
 void dsp_lead_init(dsp_lead_t *l, uint16_t mid_code)
 {
     l->base_q9 = 0;
     l->clip = 0;
     l->rail_run = 0;
+    l->in_run = 0;
     l->ok_run = 0;
     l->sec_n = 0;
     l->sec_rail = 0;
     l->last_s = 0;
     l->mid = (int16_t)mid_code;
-    l->lead_off = 1;
+    l->railed = 1;
+    l->stable = 0;
+    stats_clear(&l->st);
 }
 
-uint8_t dsp_lead_push(dsp_lead_t *l, const uint16_t *raw, size_t n)
+uint8_t dsp_lead_push(dsp_lead_t *l, const uint16_t *raw, size_t n, size_t n_blank)
 {
     uint8_t ev = 0;
     for (size_t i = 0; i < n; i++) {
         uint16_t c = raw[i];
-        int32_t x = (int32_t)c - l->mid;
-        l->base_q9 += (x * 512 - l->base_q9) >> 9;
-        if (c < DSP_LEAD_RAIL_LO || c >= DSP_LEAD_RAIL_HI) {
-            l->ok_run = 0;
-            if (l->rail_run < 65535u)
-                l->rail_run++;
-            l->sec_rail++;
-            if (!l->lead_off) {
-                l->clip++;
-                if (l->rail_run > DSP_LEAD_OFF_RUN) {
-                    l->lead_off = 1;
-                    ev |= DSP_LEAD_EV_OFF;
-                }
-            }
-        } else {
-            if (l->ok_run < 65535u)
-                l->ok_run++;
-            if (l->ok_run >= DSP_LEAD_GAP_RUN) {
-                l->rail_run = 0;
-                if (l->lead_off) {
-                    l->lead_off = 0;
-                    ev |= DSP_LEAD_EV_CONTACT;
-                }
-            }
+        bool rail = c < DSP_LEAD_RAIL_LO || c >= DSP_LEAD_RAIL_HI;
+        if (l->st.n < (1u << 20)) { /* 262 s: the sum cannot overflow */
+            l->st.n++;
+            l->st.sum += c;
+            l->st.rail += rail;
         }
+        if (c < l->st.min)
+            l->st.min = c;
+        if (c > l->st.max)
+            l->st.max = c;
+        l->sec_rail += rail;
         if (++l->sec_n == 4000u) {
             l->last_s = l->sec_rail;
             l->sec_rail = 0;
             l->sec_n = 0;
         }
+        if (i < n_blank)
+            continue; /* FAST_RESTORE: no evidence either way */
+
+        int32_t x = (int32_t)c - l->mid;
+        l->base_q9 += (x * 512 - l->base_q9) >> 9;
+        if (rail) {
+            l->ok_run = 0;
+            if (l->rail_run < UINT32_MAX)
+                l->rail_run++;
+            if (!l->railed) {
+                if (l->stable)
+                    l->clip++;
+                if (l->rail_run > DSP_LEAD_RAIL_RUN) {
+                    l->railed = 1;
+                    l->in_run = 0;
+                    ev |= l->stable ? DSP_LEAD_EV_RAIL | DSP_LEAD_EV_UNSTABLE : DSP_LEAD_EV_RAIL;
+                    l->stable = 0;
+                } else {
+                    l->in_run++; /* a short clip */
+                }
+            }
+        } else {
+            if (l->ok_run < UINT16_MAX)
+                l->ok_run++;
+            if (l->ok_run >= DSP_LEAD_OK_RUN)
+                l->rail_run = 0;
+            if (l->railed) {
+                if (l->ok_run >= DSP_LEAD_OK_RUN) {
+                    l->railed = 0;
+                    l->in_run = l->ok_run;
+                    ev |= DSP_LEAD_EV_INRANGE;
+                }
+            } else if (l->in_run < UINT32_MAX) {
+                l->in_run++;
+            }
+        }
+        if (!l->railed && !l->stable && l->in_run >= DSP_LEAD_STABLE_RUN) {
+            l->stable = 1;
+            ev |= DSP_LEAD_EV_STABLE;
+        }
     }
     return ev;
 }
 
-bool dsp_lead_is_off(const dsp_lead_t *l)
-{
-    return l->lead_off != 0;
-}
+bool dsp_lead_railed(const dsp_lead_t *l) { return l->railed != 0; }
+bool dsp_lead_stable(const dsp_lead_t *l) { return l->stable != 0; }
+uint32_t dsp_lead_rail_samples(const dsp_lead_t *l) { return l->railed ? l->rail_run : 0u; }
+uint32_t dsp_lead_in_samples(const dsp_lead_t *l) { return l->railed ? 0u : l->in_run; }
 
 int16_t dsp_lead_baseline(const dsp_lead_t *l)
 {
@@ -84,6 +122,12 @@ uint32_t dsp_lead_take_clip(dsp_lead_t *l)
 uint16_t dsp_lead_rail_last_s(const dsp_lead_t *l)
 {
     return l->last_s;
+}
+
+void dsp_lead_take_stats(dsp_lead_t *l, dsp_lead_stats_t *out)
+{
+    *out = l->st;
+    stats_clear(&l->st);
 }
 
 /* ---- Baseline wander ------------------------------------------------------ */

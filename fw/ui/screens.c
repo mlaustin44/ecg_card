@@ -424,9 +424,12 @@ static void live_wait(const ui_model_t *m)
         gfx_text(cx, 29, "thumb on", TXT_CENTER);
         gfx_text(cx, 38, "the sensor", TXT_CENTER);
     } else {
-        gfx_text(cx, 20, "Place both", TXT_CENTER);
-        gfx_text(cx, 29, "thumbs on", TXT_CENTER);
-        gfx_text(cx, 38, "the pads", TXT_CENTER);
+        /* the unit needs ~2 s after every touch or movement (U5's 0.5 s
+         * coupling): ask for stillness up front */
+        gfx_text(cx, 14, "Place both", TXT_CENTER);
+        gfx_text(cx, 23, "thumbs on", TXT_CENTER);
+        gfx_text(cx, 32, "the pads", TXT_CENTER);
+        gfx_text(cx, 45, "Hold still", TXT_CENTER | TXT_BOLD);
     }
 }
 

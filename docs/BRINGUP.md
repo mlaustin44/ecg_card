@@ -206,11 +206,29 @@ mcp=ok|mcp=FAIL` plus ` (eeprom programmed)` on the boot that wrote the MCP4728 
 `batt: CW2015 not answering: battery unknown`; `session: start mode=<0 ECG, 1 Pulse, 2 both>
 gain=558|gain=1098`; `session: vmid=<mV> mV mid=<code> tol=+-30` (ECG start, once); `session: blocked: USB power`; `session: refused: battery low`;
 `session: refused: MCP4728 absent`; `session: start failed err=<1 VMID, 2 LED DAC, 3 USB,
-4 start> vmid=<mV>`; `acq: contact`, `acq: contact lost`, `acq: running`;
+4 start> vmid=<mV>`;
+`ecg: <from> -> <to> (<why>)` on every ECG session state change (states `wait`, `settle`, `run`,
+`hold` = settling again after running, `end`; why `stable`, `settled, beat`, `rail`,
+`no stable signal`, `no beat`), `ppg: <from> -> <to>` in Pulse mode (`wait`, `settle`, `run`);
 `session: end <user|abort|lead-off|usb|battery|timeout> run_ms= beats= hr= pulses= pat= lost=`;
 `usb: plugged|removed`; `power: off requested | display off | standby | wake`;
 `batt: critical mv= pct=`, `batt: low: measurement stopped`;
 `fault: Button 1|2 stuck down: it is ignored`. The RLD mode is not logged.
+
+While a session is armed, one evidence line per second per signal (values of the last second
+unless "so far"; under 110 characters, about 100 B/s each, so the 1 KB channel 0 buffer keeps
+up even with a slow reader):
+
+    [22644] ecg: run rail=0% min=1681 max=2490 avg=1904 fr=0 beats=1 hr=0 mains=61 lost=168 rs=0
+    [20966] ppg: on led=1344 dac=1290 dk=304 on=1225 hi=1944/1869-2046 c=921 agc=0 dcc=1 p=21 pr=73 lost=0
+
+`ecg:` state; `rail` % of the 4 kHz codes on a rail (< 205 or >= 3891); `min`/`max`/`avg` raw
+codes (mid = the `session: vmid` code); `fr` FAST_RESTORE pulses; `beats` reported so far; `hr`;
+`mains` 50/60 Hz residual uVpp (input-referred); `lost` samples re-filled so far (HAL overruns);
+`rs` resyncs. `ppg:` `off`/`on` (finger, ECG+Pulse) or `off`/`set`/`run` (Pulse); `led` LED DAC
+code; `dac` DAC12 offset code; `dk`/`on`/`hi` means of `tia_dark`, `tia_on`, `hi_on` with
+`hi` min-max; `c` mean `tia_on - tia_dark`; `agc` LED steps and `dcc` DAC12 steps so far; `p`
+pulses so far; `pr` pulse rate; `lost` frames re-filled so far.
 
 ### Stage 0: bare board (brief step 0)
 
@@ -303,7 +321,7 @@ application tests the display itself in stage 5.
 ### Stage 8: ECG sampling rate and overruns (stream capture)
 
 - Action: Home, ECG card, BUTTON1 (Start). No thumbs needed: sampling runs in "Place both thumbs" state. Start the capture first: `scripts/rtt.sh -e build/target/fw/bsp/ecg_fw.elf both build/rtt.bin` (terminal 1), `python3 tools/stream_capture.py --follow build/rtt.bin --npz build/rec.npz` (terminal 2). Let it run 10 min, then Ctrl-C both. Scope `ANA_EN`/`MEASURE_REQ` at start.
-- Start sequence you will see (from `fw/acq/src/acq.c`, `board.h`): t=0 `ANA_EN` and `BUCK_PS_SYNC` high; at 400 ms (`ACQ_VMID_WAIT_MS`) VMID checked; then `GAIN_HI`/`RLD_L_EN`/`RLD_R_EN` set per Settings and, in the same pass, `MEASURE_REQ` high (TP15 high if on battery) with ECG timers starting, so about 400 ms after the press. `FAST_RESTORE` stays low until contact is detected; on contact it gets one 30 ms pulse (`ECG_FAST_RESTORE_MS`), and one more 500 ms later (`ACQ_FR_RECHECK_MS`) if the baseline is still over 25 % of full scale from mid. Each later contact edge repeats this.
+- Start sequence you will see (from `fw/acq/src/acq.c`, `board.h`): t=0 `ANA_EN` and `BUCK_PS_SYNC` high; at 400 ms (`ACQ_VMID_WAIT_MS`) VMID checked; then `GAIN_HI`/`RLD_L_EN`/`RLD_R_EN` set per Settings and, in the same pass, `MEASURE_REQ` high (TP15 high if on battery) with ECG timers starting, so about 400 ms after the press. `FAST_RESTORE` stays low until `MEASURE_REQ` is high; then it gets a 30 ms pulse (`ECG_FAST_RESTORE_MS`) whenever the output has been on a rail for 50 ms (`ACQ_FR_RAIL_MS`), at most every 250 ms (`ACQ_FR_REPEAT_MS`), so with no thumbs (floating inputs on a rail) expect about 4 pulses per second (`fr=4` in the `ecg:` line). In range it gets one more pulse only 500 ms after the signal became stable (`ACQ_FR_RECHECK_MS`) if the baseline is still over 25 % of full scale from mid.
 - Look: log `session: start mode=0 gain=558`; stream rate on `stream_capture.py` line: about 50 ECG blocks/s, about 2.8 kB/s (33 B per ECG block, 23 B per PPG block, plus events); `seq_lost=0`. After stopping (BUTTON1 on the live screen) the log has `session: end user ... lost=0`; diagnostics page 4 `lost ECG 0 PPG 0`, `drop 0/N`, `loop <ms>`.
 - Pass (exactly 500 samples/s):
   1. `python3 tools/check_capture.py build/rtt.bin` exits 0: no CRC errors and every ECG block start steps by 10.
@@ -335,7 +353,7 @@ application tests the display itself in stage 5.
 ### Stage 10: ECG with thumbs, RLD, restore, interlock (brief steps 8 and Safety)
 
 - **First, USB-plug test with the generator setup, no thumbs** (laptop J-Link may stay; USB from an adapter): start ECG (TP15 high), plug USB. Pass: TP15 goes low at once (hardware AND with `CHG_PG`), log `usb: plugged` then `session: end usb ...` (summary only if the session had reached RUNNING), screen `Stopped / USB connected. ECG runs on battery only.`, `MEASURE_REQ` low. Then, with USB still in, press Start: log `session: blocked: USB power`, screen `Unplug USB to measure ECG`, TP15 and `MEASURE_REQ` stay low. Unplugging USB on that screen re-arms the session by itself.
-- Thumbs: laptop on battery. Start ECG, both thumbs on the pads. Log `acq: contact`, `acq: running`; the screen shows the trace, heart rate, quality.
+- Thumbs: laptop on battery. Start ECG, both thumbs on the pads and hold still. Log `ecg: wait -> settle (stable)` (about 2 s after the touch with dry thumbs: the offset step decays through U5), then `ecg: settle -> run (settled, beat)` about 2.5 s later; the screen shows the trace, heart rate, quality. Moving a thumb while running gives `ecg: run -> hold (rail)` ("Hold still") and back to `run`; lifting the thumbs gives `ecg: hold -> end (no stable signal)` 2.5 s later and the summary. Read the `ecg:` lines: `rail`, `min`/`max` show how long the front end stays saturated after a touch, `mains` the contact quality.
 - Pass: QRS visible, HR plausible (check by hand count or a reference); no oscillation on the right-leg drive (scope U6B output/thumb islands); compare the four RLD modes `Both`, `Left`, `Right`, `Off` (one session each, set in Settings; not in the log) using the mains line in `stream_plot.py --report` (spectrum with 50/60 Hz markers) and the quality number; `FAST_RESTORE` (R69 pad, 30 ms pulses) recovers the baseline within about 3 s after a thumb removed less than 2 s (longer ends the session: `session: end lead-off`, `CONTACT_LOST_END_MS` 2000); lead-off detected after more than 100 ms on a rail (brief: within 200 ms).
 - Open question 9 (D8 drift): with a 5 min record compare slow baseline drift (`Recording` wander) with thumbs swapped; the stream has one lead, so left/right can only be compared by swapping.
 - Fail: no contact with thumbs: electrode paths, U20/U21 closed? (`BODY_EN`), ring contact. Mains too high in `Both`: try `Left`/`Right` (brief right-leg drive table). Settling longer than 3 s: coupling time constant (0.5 s), `ECG_SETTLE_MS`.

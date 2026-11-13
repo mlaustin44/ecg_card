@@ -2,7 +2,7 @@
 
 #include "hal.h"
 
-#define LINE_MAX 96
+#define LINE_MAX 120
 
 static char s_line[LINE_MAX + 2];
 static char *s_p;

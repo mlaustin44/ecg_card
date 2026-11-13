@@ -58,11 +58,21 @@ static struct {
     uint32_t ecg_next;   /* HAL timeline index of the next raw sample expected */
     uint16_t last_raw;
     bool have_raw;
-    bool ecg_contact;
-    uint32_t ecg_contact_ms;
-    bool fr_on, fr_recheck;
-    uint32_t fr_off_ms;
+    uint8_t ecg_state;   /* acq_ecg_state_t */
+    bool ran;            /* RUN was reached this session */
+    uint8_t lead_ev;     /* DSP_LEAD_EV_* since the last ecg_timers() */
+    uint32_t unstable_ms;    /* stability last lost */
+    uint32_t stable_ms;      /* last stable edge */
+    bool settle_done;
+    uint32_t settle_done_ms; /* settling time reached in the current run */
+    bool have_beat;          /* a beat since the signal came back in range */
+    uint32_t beat_ms;
+    bool fr_on, fr_any, fr_recheck;
+    uint32_t fr_off_ms, fr_last_ms;
+    bool blank_hold;         /* FAST_RESTORE held: every sample is blanked */
+    uint32_t blank_until;    /* raw index: samples before it are blanked */
     uint32_t gain_ms, qual_ms;
+    acq_diag_t diag;
 
     /* ---- PPG ---- */
     dsp_ppg_t ppg;
@@ -111,6 +121,28 @@ void acq_init(const acq_sink_t *sink)
 
 bool acq_active(void) { return A.st.phase == ACQ_STARTING || A.st.phase == ACQ_ON; }
 const acq_status_t *acq_status(void) { return &A.st; }
+
+static void diag_clear(void)
+{
+    memset(&A.diag, 0, sizeof A.diag);
+    A.diag.hi_min = UINT16_MAX;
+}
+
+void acq_diag_take(acq_diag_t *d)
+{
+    if (A.cfg.ecg)
+        dsp_lead_take_stats(&A.lead, &A.diag.ecg);
+    else
+        memset(&A.diag.ecg, 0, sizeof A.diag.ecg);
+    *d = A.diag;
+    diag_clear();
+}
+
+static void count16(uint16_t *c)
+{
+    if (*c < UINT16_MAX)
+        (*c)++;
+}
 const acq_summary_t *acq_summary(void) { return &A.sum; }
 
 static uint8_t notch_of(uint8_t mode)
@@ -173,6 +205,8 @@ bool acq_start(const acq_cfg_t *cfg)
     /* Rough initial offset for a mid-range light level; the first frame
      * replaces it (dcc_init). */
     A.dac = dsp_ppg_dcc_code(DSP_AGC_TGT_LO);
+    A.ecg_state = ACQ_ECG_WAIT;
+    diag_clear();
 
     /* ECG start step 2 / PPG start steps 1-3 */
     rails_analog_on();
@@ -192,6 +226,7 @@ static void dsp_setup(void)
     if (A.cfg.ecg) {
         uint16_t mid = A.st.mid_code;
         dsp_lead_init(&A.lead, mid);
+        A.st.railed = dsp_lead_railed(&A.lead); /* no evidence yet */
         dsp_decim_init(&A.decim, mid);
         dsp_disp_init(&A.disp, A.gain, A.st.notch_hz);
         dsp_mains_init(&A.mains, A.gain);
@@ -287,24 +322,46 @@ static void start_step(uint32_t now)
 /* ECG                                                                       */
 /* ======================================================================== */
 
+static bool ecg_contact(void)
+{
+    return A.ecg_state == ACQ_ECG_SETTLE || A.ecg_state == ACQ_ECG_RUN ||
+           A.ecg_state == ACQ_ECG_HOLD;
+}
+
+/* Raw timeline index of the sample being taken now (1 ms clock: up to 4
+ * samples early). */
+static uint32_t raw_index_now(uint32_t now)
+{
+    return (now - A.start_ms) * (ECG_RAW_HZ / 1000u);
+}
+
 static void fast_restore_pulse(uint32_t now)
 {
     if (rails_fast_restore(true)) {
         A.fr_on = true;
+        A.fr_any = true;
         A.fr_off_ms = now + ECG_FAST_RESTORE_MS;
+        A.fr_last_ms = now;
+        A.blank_hold = true; /* every sample from now on, until the release */
+        count16(&A.diag.fr_pulses);
     }
 }
 
+static void ecg_state_to(acq_ecg_state_t s, acq_why_t why)
+{
+    A.ecg_state = (uint8_t)s;
+    A.st.ecg_state = (uint8_t)s;
+    A.st.ecg_why = (uint8_t)why;
+}
+
+/* WAIT -> SETTLE: the signal is stable (the QRS detector has been learning
+ * since it came back in range). */
 static void ecg_on_contact(uint32_t now)
 {
-    A.ecg_contact = true;
-    A.ecg_contact_ms = now;
-    fast_restore_pulse(now);
-    A.fr_recheck = true;
-    dsp_qrs_reset(&A.qrs);
-    dsp_disp_reset(&A.disp);
+    ecg_state_to(ACQ_ECG_SETTLE, ACQ_WHY_STABLE);
+    A.st.contact_beat = false;
     /* the automatic notch choice is made on contact data, not on the
-     * floating lead-off signal */
+     * floating inputs */
     dsp_mains_init(&A.mains, A.gain);
     if (A.cfg.ppg)
         dsp_pat_init(&A.pat);
@@ -312,18 +369,35 @@ static void ecg_on_contact(uint32_t now)
     set_contact(true, now);
 }
 
-static void ecg_on_lead_off(uint32_t now)
+/* -> WAIT (never ran) or END (ran): contact is over. */
+static void ecg_on_lead_off(acq_ecg_state_t s, acq_why_t why, uint32_t now)
 {
-    A.ecg_contact = false;
+    ecg_state_to(s, why);
     set_settled(false);
     A.st.hr_bpm = 0;
     A.st.quality = 0;
     set_contact(false, now);
 }
 
-static void ecg_beat(const dsp_qrs_beat_t *b)
+/* ACQ_ECG_MIN_QRS_UV in stream units (8 per raw code). */
+static uint32_t min_qrs_amp(void)
 {
+    return ACQ_ECG_MIN_QRS_UV * (uint32_t)A.gain * 8u * 10u / ADC_UV_PER_CODE_X10;
+}
+
+static void ecg_beat(const dsp_qrs_beat_t *b, uint32_t now)
+{
+    bool good = b->amp >= min_qrs_amp();
+    if (good) {
+        A.have_beat = true;
+        A.beat_ms = now;
+    }
+    if (!ecg_contact())
+        return; /* evidence only: not reported while waiting */
+    if (good)
+        A.st.contact_beat = true;
     A.st.beat_seq++;
+    count16(&A.st.ecg_beats);
     A.st.hr_bpm = b->hr_bpm;
     if (A.st.settled) {
         dsp_hrv_add_beat(&A.hrv, b->rr_ms);
@@ -335,36 +409,39 @@ static void ecg_beat(const dsp_qrs_beat_t *b)
         A.sink->beat(b->index, b->hr_bpm);
 }
 
+/* Stream block flags: bit1 settling (SETTLE / HOLD), bit2 lead-off (no
+ * contact, or the output on a rail). */
 static uint8_t ecg_flags(void)
 {
-    return (uint8_t)((A.st.gain_hi ? 1u : 0u) |
-                     (A.ecg_contact && !A.st.settled ? 2u : 0u) |
-                     (dsp_lead_is_off(&A.lead) ? 4u : 0u));
+    bool settling = A.ecg_state == ACQ_ECG_SETTLE || A.ecg_state == ACQ_ECG_HOLD;
+    return (uint8_t)((A.st.gain_hi ? 1u : 0u) | (settling ? 2u : 0u) |
+                     (!ecg_contact() || dsp_lead_railed(&A.lead) ? 4u : 0u));
 }
 
-static void ecg_process(const uint16_t *raw, size_t n, uint32_t now)
+/* raw[0] has timeline index idx. */
+static void ecg_process(const uint16_t *raw, size_t n, uint32_t idx, uint32_t now)
 {
-    uint8_t ev = dsp_lead_push(&A.lead, raw, n);
-    if (ev) {
-        bool off_now = dsp_lead_is_off(&A.lead);
-        if ((ev & DSP_LEAD_EV_OFF) && (ev & DSP_LEAD_EV_CONTACT)) {
-            /* both edges in one block: replay them in the order that ends in
-             * the detector's current state */
-            if (off_now) {
-                ecg_on_contact(now);
-                ecg_on_lead_off(now);
-            } else {
-                ecg_on_lead_off(now);
-                ecg_on_contact(now);
-            }
-        } else if (ev & DSP_LEAD_EV_OFF) {
-            ecg_on_lead_off(now);
-        } else {
-            ecg_on_contact(now);
-        }
+    size_t nb = 0;
+    if (A.blank_hold) {
+        nb = n;
+    } else {
+        int32_t left = (int32_t)(A.blank_until - idx);
+        if (left > 0)
+            nb = (size_t)left < n ? (size_t)left : n;
+    }
+    uint8_t ev = dsp_lead_push(&A.lead, raw, n, nb);
+    A.lead_ev |= ev;
+    if (ev & DSP_LEAD_EV_INRANGE) {
+        /* back in range: the detectors re-learn from here (the rail data
+         * before were skipped) */
+        dsp_qrs_reset(&A.qrs);
+        dsp_disp_reset(&A.disp);
+        A.have_beat = false;
+        A.st.hr_bpm = 0;
     }
     A.last_raw = raw[n - 1];
     A.have_raw = true;
+    A.st.railed = dsp_lead_railed(&A.lead);
 
     size_t m = dsp_decim_push(&A.decim, raw, n, s_dec);
     if (m == 0)
@@ -382,20 +459,22 @@ static void ecg_process(const uint16_t *raw, size_t n, uint32_t now)
     A.st.ecg_samples += (uint32_t)m;
 
     if (dsp_mains_push(&A.mains, s_dec, m)) {
-        /* notch AUTO: follow the detector while settling only */
+        A.st.mains_uvpp = dsp_mains_residual_uvpp(&A.mains);
+        /* notch AUTO: follow the detector while settling on a stable signal */
         uint8_t hz = dsp_mains_auto_hz(&A.mains);
-        if (A.cfg.notch == NOTCH_AUTO && A.ecg_contact && !A.st.settled && hz && hz != A.st.notch_hz) {
+        if (A.cfg.notch == NOTCH_AUTO && ecg_contact() && !A.st.settled &&
+            dsp_lead_stable(&A.lead) && hz && hz != A.st.notch_hz) {
             dsp_disp_set_notch(&A.disp, hz);
             A.st.notch_hz = hz;
         }
     }
     dsp_wander_push(&A.wander, s_dec, m);
 
-    if (A.ecg_contact) {
+    if (!dsp_lead_railed(&A.lead) && A.ecg_state != ACQ_ECG_END) {
         dsp_qrs_beat_t beats[2];
-        size_t nb = dsp_qrs_process(&A.qrs, s_dec, m, beats, 2);
-        for (size_t i = 0; i < nb; i++)
-            ecg_beat(&beats[i]);
+        size_t nb2 = dsp_qrs_process(&A.qrs, s_dec, m, beats, 2);
+        for (size_t i = 0; i < nb2; i++)
+            ecg_beat(&beats[i], now);
         dsp_disp_process(&A.disp, s_dec, s_uv, m);
         if (A.st.settled && A.sink && A.sink->ecg_trace)
             A.sink->ecg_trace(s_uv, m);
@@ -414,7 +493,7 @@ static void count_resync(uint16_t *c)
  * the last sample, at the index where they belong (hal.h read contract), so
  * that every stream index stays on the acquisition timeline (R-peak times,
  * PAT). */
-static void ecg_fill(uint32_t lost, uint16_t filler, uint32_t now)
+static void ecg_fill(uint32_t lost, uint16_t filler, uint32_t idx, uint32_t now)
 {
     A.sum.ecg_lost += lost;
     if (lost > FILL_MAX_ECG) {
@@ -425,7 +504,8 @@ static void ecg_fill(uint32_t lost, uint16_t filler, uint32_t now)
         size_t k = lost < ECG_CHUNK ? lost : ECG_CHUNK;
         for (size_t i = 0; i < k; i++)
             s_fill[i] = filler;
-        ecg_process(s_fill, k, now);
+        ecg_process(s_fill, k, idx, now);
+        idx += (uint32_t)k;
         lost -= (uint32_t)k;
     }
 }
@@ -439,7 +519,7 @@ static void ecg_drain(uint32_t now)
             break;
         int32_t gap = (int32_t)(first - A.ecg_next);
         if (gap > 0) {
-            ecg_fill((uint32_t)gap, A.have_raw ? A.last_raw : s_raw[0], now);
+            ecg_fill((uint32_t)gap, A.have_raw ? A.last_raw : s_raw[0], A.ecg_next, now);
             A.ecg_next = first;
         } else if (gap < -(int32_t)FILL_MAX_ECG) {
             count_resync(&A.sum.ecg_resyncs); /* wild index: follow it */
@@ -449,8 +529,89 @@ static void ecg_drain(uint32_t now)
         uint32_t skip = A.ecg_next - first;
         if (skip >= n)
             continue;
-        ecg_process(s_raw + skip, n - skip, now);
+        ecg_process(s_raw + skip, n - skip, first + skip, now);
         A.ecg_next = first + (uint32_t)n;
+    }
+}
+
+/* The contact state machine (acq.h), once per poll on the detector state. */
+static void ecg_contact_update(uint32_t now, uint8_t ev)
+{
+    bool stable = dsp_lead_stable(&A.lead);
+    bool stable_edge = (ev & DSP_LEAD_EV_STABLE) && stable;
+    if (ev & DSP_LEAD_EV_UNSTABLE)
+        A.unstable_ms = now;
+    if (stable_edge) {
+        A.stable_ms = now;
+        A.fr_recheck = true;
+    }
+    if (!stable) {
+        A.settle_done = false;
+        A.fr_recheck = false;
+    }
+    uint32_t in_ms = dsp_lead_in_samples(&A.lead) / (ECG_RAW_HZ / 1000u);
+    switch (A.ecg_state) {
+    case ACQ_ECG_WAIT:
+        if (stable_edge)
+            ecg_on_contact(now);
+        break;
+    case ACQ_ECG_SETTLE:
+    case ACQ_ECG_HOLD:
+        if (!stable) {
+            if (now - A.unstable_ms >= (A.ran ? ACQ_ECG_LOST_END_MS : ACQ_ECG_LOST_WAIT_MS))
+                ecg_on_lead_off(A.ran ? ACQ_ECG_END : ACQ_ECG_WAIT, ACQ_WHY_NO_STABLE, now);
+            break;
+        }
+        if (in_ms < ECG_SETTLE_MS)
+            break;
+        if (!A.settle_done) {
+            A.settle_done = true;
+            A.settle_done_ms = now;
+        }
+        if (A.have_beat && now - A.beat_ms < ACQ_ECG_NO_BEAT_MS) {
+            A.ran = true;
+            ecg_state_to(ACQ_ECG_RUN, ACQ_WHY_SETTLED);
+            set_settled(true);
+        } else {
+            /* settled, but no beat: within ACQ_ECG_NO_BEAT_MS of the
+             * settling time (or of the last beat) */
+            uint32_t ref = A.settle_done_ms;
+            if (A.have_beat && (int32_t)(A.beat_ms - ref) > 0)
+                ref = A.beat_ms;
+            if (now - ref >= ACQ_ECG_NO_BEAT_MS)
+                ecg_on_lead_off(A.ran ? ACQ_ECG_END : ACQ_ECG_WAIT, ACQ_WHY_NO_BEAT, now);
+        }
+        break;
+    case ACQ_ECG_RUN:
+        if (!stable) {
+            ecg_state_to(ACQ_ECG_HOLD, ACQ_WHY_RAIL);
+            set_settled(false);
+            A.st.settle_pct = 0;
+        } else if (!A.have_beat || now - A.beat_ms >= ACQ_ECG_NO_BEAT_MS) {
+            ecg_on_lead_off(ACQ_ECG_END, ACQ_WHY_NO_BEAT, now);
+        }
+        break;
+    default:
+        break;
+    }
+    if (A.ecg_state == ACQ_ECG_SETTLE || A.ecg_state == ACQ_ECG_HOLD) {
+        uint32_t pct = stable ? in_ms * 100u / ECG_SETTLE_MS : 0u;
+        A.st.settle_pct = (uint8_t)(pct > 99u ? 99u : pct);
+    }
+}
+
+static void ecg_fast_restore(uint32_t now)
+{
+    if (A.fr_on || A.ecg_state == ACQ_ECG_END)
+        return;
+    uint32_t rail_ms = dsp_lead_rail_samples(&A.lead) / (ECG_RAW_HZ / 1000u);
+    if (dsp_lead_railed(&A.lead)) {
+        if (rail_ms >= ACQ_FR_RAIL_MS && (!A.fr_any || now - A.fr_last_ms >= ACQ_FR_REPEAT_MS))
+            fast_restore_pulse(now);
+    } else if (A.fr_recheck && now - A.stable_ms >= ACQ_FR_RECHECK_MS) {
+        A.fr_recheck = false;
+        if (dsp_lead_far_from_mid(&A.lead))
+            fast_restore_pulse(now);
     }
 }
 
@@ -459,19 +620,14 @@ static void ecg_timers(uint32_t now)
     if (A.fr_on && (int32_t)(now - A.fr_off_ms) >= 0) {
         rails_fast_restore(false);
         A.fr_on = false;
+        A.blank_hold = false;
+        /* + 2 ms for the 1 ms clock */
+        A.blank_until = raw_index_now(now) + (DSP_LEAD_BLANK_MS + 2u) * (ECG_RAW_HZ / 1000u);
     }
-    if (A.fr_recheck && A.ecg_contact && now - A.ecg_contact_ms >= ACQ_FR_RECHECK_MS) {
-        A.fr_recheck = false;
-        if (dsp_lead_far_from_mid(&A.lead) && !A.fr_on)
-            fast_restore_pulse(now);
-    }
-    if (A.ecg_contact && !A.st.settled) {
-        uint32_t dt = now - A.ecg_contact_ms;
-        if (dt >= ECG_SETTLE_MS)
-            set_settled(true);
-        else
-            A.st.settle_pct = (uint8_t)(dt * 100u / ECG_SETTLE_MS);
-    }
+    uint8_t ev = A.lead_ev;
+    A.lead_ev = 0;
+    ecg_contact_update(now, ev);
+    ecg_fast_restore(now);
     if (now - A.gain_ms >= GAIN_TICK_MS) {
         uint32_t el = now - A.gain_ms;
         A.gain_ms = now;
@@ -481,13 +637,13 @@ static void ecg_timers(uint32_t now)
     }
     if (now - A.qual_ms >= QUALITY_MS) {
         A.qual_ms = now;
-        if (!A.ecg_contact) {
+        if (!ecg_contact()) {
             A.st.quality = 0;
         } else {
             dsp_quality_in_t q;
-            uint32_t since_contact = now - A.ecg_contact_ms;
+            uint32_t since_contact = now - A.st.contact_ms;
             uint32_t since_beat = dsp_qrs_since_beat(&A.qrs) * 2u;
-            q.lead_off = dsp_lead_is_off(&A.lead);
+            q.lead_off = dsp_lead_railed(&A.lead);
             q.rail_per_s = dsp_lead_rail_last_s(&A.lead);
             q.mains_uvpp = dsp_mains_residual_uvpp(&A.mains);
             q.wander_uvpp = dsp_wander_uvpp(&A.wander);
@@ -532,6 +688,7 @@ static void ppg_pulse(const dsp_ppg_pulse_t *p)
     uint16_t pat_ms = 0;
     bool settled = A.st.settled && A.st.finger;
     A.pulse_k = A.st.ppg_frames;
+    count16(&A.st.ppg_pulses);
     A.st.pulse_bpm = p->pulse_bpm;
     if (p->pi_permille)
         A.st.pi_permille = p->pi_permille;
@@ -574,6 +731,18 @@ static void ppg_frame(const hal_ppg_frame_t *f, uint8_t extra, uint32_t now)
     A.step_k++;
 
     bool finger = dsp_finger_update(&A.finger, out.coarse, f->tia_on);
+    if (!(extra & DSP_PPG_IN_DISTURBED) && A.diag.ppg_n < UINT16_MAX) { /* measured, not a filler */
+        acq_diag_t *d = &A.diag;
+        d->ppg_n++;
+        d->dark_sum += f->tia_dark;
+        d->on_sum += f->tia_on;
+        d->hi_sum += f->hi_on;
+        d->coarse_sum += (int32_t)f->tia_on - (int32_t)f->tia_dark;
+        if (f->hi_on < d->hi_min)
+            d->hi_min = f->hi_on;
+        if (f->hi_on > d->hi_max)
+            d->hi_max = f->hi_on;
+    }
 
     if (A.pblk_n == 0) {
         A.pblk_start = k;
@@ -659,6 +828,7 @@ static void set_dac(uint16_t code, uint32_t t0)
     A.dac = code;
     rails_ppg_offset(code);
     A.st.dac12 = code;
+    count16(&A.st.dcc_steps);
     flag_step(DSP_PPG_IN_DAC_STEP, t0);
 }
 
@@ -710,6 +880,7 @@ static void ppg_control(uint32_t now)
             uint16_t dark = (uint16_t)(A.agc_dark_sum / A.agc_n);
             uint16_t old = A.led, nc = A.led;
             if (dsp_agc_step(&A.agc, tia, &nc, A.led_max) && set_led(nc, t0)) {
+                count16(&A.st.agc_steps);
                 /* re-cancel the offset with the step so PPG_HI does not rail */
                 set_dac(dsp_ppg_dcc_predict(dark, tia, old, nc), t0);
                 (void)dsp_ppg_take_avg(&A.ppg, &avg);

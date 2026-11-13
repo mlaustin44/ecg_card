@@ -1,4 +1,5 @@
-/* Lead-off / contact, baseline, wander, quality score, auto-gain advisor. */
+/* Front-end state (rail / in range / stable, blanking), baseline, code
+ * statistics, wander, quality score, auto-gain advisor. */
 #include <math.h>
 #include <stdlib.h>
 
@@ -11,18 +12,23 @@
 #define M_PI 3.14159265358979323846
 #endif
 
-/* Feed a constant / generated code for ms milliseconds, 1 sample at a time;
- * returns the sample (from the start) at which ev_mask first fired, or -1. */
-static long feed(dsp_lead_t *l, long ms, uint16_t (*gen)(long), uint8_t ev_mask, long *t)
+/* Feed a generated code for ms milliseconds, 1 sample at a time (blanked
+ * if blank); returns the sample (from the start) at which ev_mask first
+ * fired, or -1. */
+static long feed_b(dsp_lead_t *l, long ms, uint16_t (*gen)(long), uint8_t ev_mask, long *t, bool blank)
 {
     long hit = -1;
     for (long i = 0; i < ms * 4; i++, (*t)++) {
         uint16_t c = gen(*t);
-        uint8_t ev = dsp_lead_push(l, &c, 1);
+        uint8_t ev = dsp_lead_push(l, &c, 1, blank ? 1 : 0);
         if ((ev & ev_mask) && hit < 0)
             hit = i;
     }
     return hit;
+}
+static long feed(dsp_lead_t *l, long ms, uint16_t (*gen)(long), uint8_t ev_mask, long *t)
+{
+    return feed_b(l, ms, gen, ev_mask, t, false);
 }
 
 static uint16_t g_mid(long t) { (void)t; return 2047; }
@@ -31,38 +37,104 @@ static uint16_t g_low_rail(long t) { (void)t; return 30; }
 /* on the rail, but 50 Hz pickup pulls it off for 4 ms every cycle */
 static uint16_t g_rail_mains(long t) { return (t % 80) < 16 ? 3700 : 4095; }
 static uint16_t g_ecg(long t) { return (uint16_t)(2047 + 300 * sin(2 * M_PI * 10 * t / 4000.0)); }
+/* floating inputs: on the rail, a 300 ms in-range excursion every second */
+static uint16_t g_float(long t) { return (t % 4000) < 1200 ? 2500 : 4095; }
 
-TEST(lead_off_and_contact)
+TEST(rail_inrange_stable)
 {
     dsp_lead_t l;
     long t = 0;
     dsp_lead_init(&l, 2047);
-    CHECK(dsp_lead_is_off(&l));
-    long c = feed(&l, 100, g_ecg, DSP_LEAD_EV_CONTACT, &t);
-    printf("  contact reported after %.1f ms off the rail\n", c / 4.0);
+    CHECK(dsp_lead_railed(&l) && !dsp_lead_stable(&l));
+    CHECK_EQ(dsp_lead_rail_samples(&l), 0); /* no evidence yet */
+    long c = feed(&l, 100, g_ecg, DSP_LEAD_EV_INRANGE, &t);
+    printf("  in range reported after %.1f ms off the rail\n", c / 4.0);
     CHECK_NEAR(c / 4.0, 20, 0.5);
-    CHECK(!dsp_lead_is_off(&l));
-    /* 80 ms on the rail: not lead-off; counts as clipping */
-    CHECK_EQ(feed(&l, 80, g_rail, DSP_LEAD_EV_OFF, &t), -1);
-    CHECK(!dsp_lead_is_off(&l));
-    CHECK_EQ(dsp_lead_take_clip(&l), 320);
+    CHECK(!dsp_lead_railed(&l) && !dsp_lead_stable(&l));
+    CHECK_EQ(dsp_lead_in_samples(&l), 400);
+    long st = feed(&l, 500, g_ecg, DSP_LEAD_EV_STABLE, &t);
+    CHECK_NEAR((st + 400) / 4.0, DSP_LEAD_STABLE_MS, 0.5);
+    CHECK(dsp_lead_stable(&l));
+    /* a 15 ms clip: clipping, still stable */
+    CHECK_EQ(feed(&l, 15, g_rail, DSP_LEAD_EV_RAIL | DSP_LEAD_EV_UNSTABLE, &t), -1);
+    CHECK(dsp_lead_stable(&l));
+    CHECK_EQ(dsp_lead_take_clip(&l), 60);
     CHECK_EQ(dsp_lead_take_clip(&l), 0);
     feed(&l, 100, g_mid, 0, &t);
-    long off = feed(&l, 300, g_rail, DSP_LEAD_EV_OFF, &t);
-    printf("  lead-off reported %.2f ms after reaching the rail\n", off / 4.0);
-    CHECK_NEAR(off / 4.0, 100.25, 0.3);
-    CHECK(dsp_lead_is_off(&l));
-    long c2 = feed(&l, 100, g_mid, DSP_LEAD_EV_CONTACT, &t);
-    CHECK_NEAR(c2 / 4.0, 20, 0.5);
-    /* low rail too, with mains riding on it */
-    off = feed(&l, 300, g_low_rail, DSP_LEAD_EV_OFF, &t);
-    CHECK(off > 0);
+    /* 20 ms on the rail: railed, stability lost */
+    long off = feed(&l, 300, g_rail, DSP_LEAD_EV_UNSTABLE, &t);
+    printf("  railed %.2f ms after reaching the rail\n", off / 4.0);
+    CHECK_NEAR(off / 4.0, 20.0, 0.3);
+    CHECK(dsp_lead_railed(&l) && !dsp_lead_stable(&l));
+    CHECK_EQ(dsp_lead_rail_samples(&l), 1200);
+    CHECK_EQ(dsp_lead_in_samples(&l), 0);
+    /* low rail too; mains riding on the rail keeps it railed */
     feed(&l, 100, g_mid, 0, &t);
-    off = feed(&l, 500, g_rail_mains, DSP_LEAD_EV_OFF, &t);
-    printf("  rail with 50 Hz excursions: lead-off after %.1f ms\n", off / 4.0);
-    CHECK(off > 0 && off / 4.0 < 160);
-    /* stays off while mains keeps kicking it 4 ms off the rail */
-    CHECK_EQ(feed(&l, 500, g_rail_mains, DSP_LEAD_EV_CONTACT, &t), -1);
+    CHECK(feed(&l, 300, g_low_rail, DSP_LEAD_EV_RAIL, &t) > 0);
+    CHECK_EQ(feed(&l, 1000, g_rail_mains, DSP_LEAD_EV_INRANGE, &t), -1);
+    CHECK(dsp_lead_rail_samples(&l) > 3000);
+    /* floating inputs: in range for 300 ms at a time, never stable */
+    long tf = 0;
+    dsp_lead_init(&l, 2047);
+    CHECK_EQ(feed(&l, 30000, g_float, DSP_LEAD_EV_STABLE, &tf), -1);
+    tf = 0;
+    dsp_lead_init(&l, 2047);
+    CHECK(feed(&l, 1000, g_float, DSP_LEAD_EV_INRANGE, &tf) >= 0);
+}
+
+/* FAST_RESTORE: blanked samples (mid-scale while the pulse holds the node)
+ * neither end a rail run nor count towards stability, and pause the counts. */
+TEST(blanking)
+{
+    dsp_lead_t l;
+    long t = 0;
+    dsp_lead_init(&l, 2047);
+    feed(&l, 100, g_rail, 0, &t);
+    CHECK_EQ(feed_b(&l, 40, g_mid, DSP_LEAD_EV_INRANGE, &t, true), -1);
+    CHECK(dsp_lead_railed(&l));
+    CHECK_EQ(dsp_lead_rail_samples(&l), 400); /* paused, not reset */
+    feed(&l, 5, g_rail, 0, &t);               /* back on the rail after the pulse */
+    CHECK_EQ(dsp_lead_rail_samples(&l), 420);
+    /* in range after the blanking: counts from the first unblanked sample */
+    feed_b(&l, 40, g_mid, 0, &t, true);
+    long c = feed(&l, 100, g_mid, DSP_LEAD_EV_INRANGE, &t);
+    CHECK_NEAR(c / 4.0, 20, 0.5);
+    /* a pulse while stable: paused, stays stable */
+    feed(&l, 600, g_mid, 0, &t);
+    CHECK(dsp_lead_stable(&l));
+    uint32_t in0 = dsp_lead_in_samples(&l);
+    CHECK_EQ(feed_b(&l, 40, g_rail, DSP_LEAD_EV_RAIL, &t, true), -1);
+    CHECK(dsp_lead_stable(&l));
+    CHECK_EQ(dsp_lead_in_samples(&l), in0);
+    /* a whole block with only its head blanked */
+    uint16_t blk[64];
+    for (int i = 0; i < 64; i++)
+        blk[i] = 4095;
+    dsp_lead_init(&l, 2047);
+    dsp_lead_push(&l, blk, 64, 64);
+    CHECK_EQ(dsp_lead_rail_samples(&l), 0);
+    dsp_lead_push(&l, blk, 64, 20);
+    CHECK_EQ(dsp_lead_rail_samples(&l), 44);
+}
+
+TEST(code_stats)
+{
+    dsp_lead_t l;
+    dsp_lead_init(&l, 2047);
+    dsp_lead_stats_t s;
+    dsp_lead_take_stats(&l, &s);
+    CHECK_EQ(s.n, 0);
+    CHECK(s.min > s.max);
+    uint16_t blk[8] = {100, 4095, 2000, 2100, 3900, 1000, 3000, 2000};
+    dsp_lead_push(&l, blk, 8, 3); /* blanked samples are still ADC codes */
+    dsp_lead_take_stats(&l, &s);
+    CHECK_EQ(s.n, 8);
+    CHECK_EQ(s.rail, 3);
+    CHECK_EQ(s.min, 100);
+    CHECK_EQ(s.max, 4095);
+    CHECK_EQ(s.sum, 18195);
+    dsp_lead_take_stats(&l, &s);
+    CHECK_EQ(s.n, 0);
 }
 
 TEST(baseline_and_rail_rate)
@@ -72,12 +144,12 @@ TEST(baseline_and_rail_rate)
     uint16_t buf[4000];
     for (int i = 0; i < 4000; i++)
         buf[i] = 3300;
-    dsp_lead_push(&l, buf, 4000);
+    dsp_lead_push(&l, buf, 4000, 0);
     CHECK_NEAR(dsp_lead_baseline(&l), 1300, 2);
     CHECK(dsp_lead_far_from_mid(&l));
     for (int i = 0; i < 4000; i++)
         buf[i] = (uint16_t)(i < 100 ? 4095 : 2100);
-    dsp_lead_push(&l, buf, 4000);
+    dsp_lead_push(&l, buf, 4000, 0);
     CHECK_NEAR(dsp_lead_baseline(&l), 100, 2);
     CHECK(!dsp_lead_far_from_mid(&l));
     CHECK_EQ(dsp_lead_rail_last_s(&l), 100);
@@ -182,7 +254,9 @@ TEST(gain_advisor)
 
 int main(void)
 {
-    RUN(lead_off_and_contact);
+    RUN(rail_inrange_stable);
+    RUN(blanking);
+    RUN(code_stats);
     RUN(baseline_and_rail_rate);
     RUN(wander);
     RUN(quality);

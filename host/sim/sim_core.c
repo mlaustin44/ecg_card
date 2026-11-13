@@ -266,6 +266,10 @@ static void canned_usb(void *c) { sim_set_usb(((canned_t *)c)->b); }
 static void canned_thumbs(void *c) { sim_set_thumbs(((canned_t *)c)->b); }
 static void canned_finger(void *c) { sim_set_finger(((canned_t *)c)->b); }
 static void canned_batt(void *c) { sim_set_battery_mv((uint16_t)((canned_t *)c)->v); }
+static void canned_adjust(void *c)
+{
+    sim_ecg_thumb_adjust((int32_t)((canned_t *)c)->v, (unsigned)((canned_t *)c)->a);
+}
 static void canned(uint64_t ms, sim_cb_t cb, int a, bool b, uint32_t v)
 {
     canned_t *c = malloc(sizeof *c);
@@ -278,6 +282,10 @@ void sim_at_usb(uint64_t ms, bool present) { canned(ms, canned_usb, 0, present, 
 void sim_at_thumbs(uint64_t ms, bool on) { canned(ms, canned_thumbs, 0, on, 0); }
 void sim_at_finger(uint64_t ms, bool on) { canned(ms, canned_finger, 0, on, 0); }
 void sim_at_battery_mv(uint64_t ms, uint16_t mv) { canned(ms, canned_batt, 0, false, mv); }
+void sim_at_thumb_adjust(uint64_t ms, int32_t step_uv, unsigned ramp_ms)
+{
+    canned(ms, canned_adjust, (int)ramp_ms, false, (uint32_t)step_uv);
+}
 
 /* ------------------------------------------------------------------------ */
 /* run control                                                               */

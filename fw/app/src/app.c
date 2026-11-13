@@ -35,7 +35,8 @@
 #include "ui_model.h"
 
 /* ---- policy constants ---------------------------------------------------- */
-#define CONTACT_LOST_END_MS   2000u  /* thumbs off after RUNNING -> summary */
+#define CONTACT_LOST_END_MS   2000u  /* PPG: finger off after RUNNING -> summary (ECG: acq.h) */
+#define EVIDENCE_LOG_MS       1000u  /* one ecg / ppg line per second while armed */
 #define NO_CONTACT_DISARM_MS  30000u /* WAIT_CONTACT -> back to the card */
 #define MIN_VALID_MS          10000u /* summary needs >= 10 s ... */
 #define MIN_VALID_BEATS       5u     /* ... and >= 5 beats / pulses */
@@ -83,9 +84,11 @@ static struct {
     /* session */
     ses_t ses;
     ui_mode_t mode;
-    uint32_t nocontact_ms;  /* since when there is no contact */
+    uint32_t nocontact_ms;  /* since when there is no contact (with a heartbeat) */
     bool ever_running;
     bool start_logged;      /* VMID self-check result logged for this session */
+    uint8_t log_state;      /* session state last logged (ecg / ppg token) */
+    uint32_t log_ms;        /* last evidence line */
     const char *fault_text;
     ui_summary_t summary;
     bool have_session;
@@ -209,11 +212,13 @@ static void send_state(void)
 static void k_ecg_trace(const int16_t *uv, size_t n) { ui_trace_push(UI_TRACE_ECG, uv, (uint16_t)n); }
 static void k_ppg_trace(const int16_t *v, size_t n) { ui_trace_push(UI_TRACE_PPG, v, (uint16_t)n); }
 
+/* The 30 s disarm counts from the arming or from the end of the last
+ * contact; in ECG modes only a contact that delivered a beat restarts it
+ * (open inputs that look stable for a while are not a person). */
 static void k_contact(bool on)
 {
     stream_ev_lead(on);
-    log_line("acq", on ? "contact" : "contact lost");
-    if (!on)
+    if (!on && (!mode_has_ecg(S.mode) || acq_status()->contact_beat))
         S.nocontact_ms = hal_millis();
     redraw();
 }
@@ -224,7 +229,6 @@ static void k_settled(bool on)
         /* fresh sweep: the first one must not be scaled to the transient */
         ui_trace_reset(sweep_ms(S.settings.sweep));
         S.ever_running = true;
-        log_line("acq", "running");
     }
     redraw();
 }
@@ -402,11 +406,134 @@ static void to_summary_or_card(bool summary)
     go_screen(summary ? UI_SCREEN_SUMMARY : nav_card_of(S.mode));
 }
 
+/* ---- evidence log (RTT channel 0, text) ----------------------------------
+ * State changes as they happen, and while armed one line per second per
+ * signal (< 110 characters each, ~200 bytes/s in BOTH mode: the 1 KB
+ * non-blocking RTT buffer drops whole lines when full):
+ *   [t] ecg: <state> rail=<% of raw samples on a rail> min= max= avg=<raw
+ *       codes> fr=<FAST_RESTORE pulses> beats=<so far> hr= mains=<uVpp>
+ *       lost=<samples re-filled so far> rs=<resyncs>
+ *   [t] ppg: <off|on|set|run> led=<LED DAC code> dac=<DAC12> dk= on=
+ *       hi=<mean>/<min>-<max> (tia_dark, tia_on, hi_on means) c=<on - dark>
+ *       agc=<LED steps> dcc=<DAC12 steps> p=<pulses> pr=<bpm> lost=<frames>
+ * Values are of the last second unless "so far". */
+static const char *const ecg_state_names[] = {"wait", "settle", "run", "hold", "end"};
+static const char *const why_names[] = {"", "stable", "settled, beat", "rail", "no stable signal",
+                                        "no beat"};
+
+static uint8_t log_token(const acq_status_t *st)
+{
+    if (mode_has_ecg(S.mode))
+        return st->ecg_state;
+    return !st->contact ? 0u : st->settled ? 2u : 1u; /* wait / settle / run */
+}
+
+static void log_transition(const acq_status_t *st)
+{
+    uint8_t t = log_token(st);
+    if (t == S.log_state)
+        return;
+    bool ecg = mode_has_ecg(S.mode);
+    const char *const *names = ecg_state_names;
+    log_begin(ecg ? "ecg" : "ppg");
+    log_s(" ");
+    log_s(names[S.log_state]);
+    log_s(" -> ");
+    log_s(names[t]);
+    if (ecg && st->ecg_why && st->ecg_why < sizeof why_names / sizeof why_names[0]) {
+        log_s(" (");
+        log_s(why_names[st->ecg_why]);
+        log_s(")");
+    }
+    log_end();
+    S.log_state = t;
+}
+
+static void log_mean(const char *k, uint32_t sum, uint32_t n)
+{
+    log_s(k);
+    log_u(n ? (sum + n / 2u) / n : 0u);
+}
+
+static void log_evidence(const acq_status_t *st)
+{
+    if (S.now - S.log_ms < EVIDENCE_LOG_MS)
+        return;
+    S.log_ms = S.now;
+    acq_diag_t d;
+    acq_diag_take(&d);
+    const acq_summary_t *a = acq_summary();
+    if (mode_has_ecg(S.mode)) {
+        log_begin("ecg");
+        log_s(" ");
+        log_s(ecg_state_names[st->ecg_state < 5u ? st->ecg_state : 0u]);
+        if (d.ecg.n) {
+            log_s(" rail=");
+            log_u((d.ecg.rail * 100u + d.ecg.n / 2u) / d.ecg.n);
+            log_s("% min=");
+            log_u(d.ecg.min);
+            log_s(" max=");
+            log_u(d.ecg.max);
+            log_mean(" avg=", d.ecg.sum, d.ecg.n);
+        } else {
+            log_s(" no samples");
+        }
+        log_s(" fr=");
+        log_u(d.fr_pulses);
+        log_s(" beats=");
+        log_u(st->ecg_beats);
+        log_s(" hr=");
+        log_u(st->hr_bpm);
+        log_s(" mains=");
+        log_u(st->mains_uvpp);
+        log_s(" lost=");
+        log_u(a->ecg_lost);
+        log_s(" rs=");
+        log_u((uint32_t)a->ecg_resyncs + hal_acq_resyncs());
+        log_end();
+    }
+    if (mode_has_ppg(S.mode)) {
+        log_begin("ppg");
+        log_s(!st->finger ? " off" : S.mode == UI_MODE_BOTH ? " on" : st->settled ? " run" : " set");
+        log_s(" led=");
+        log_u(st->led_code);
+        log_s(" dac=");
+        log_u(st->dac12);
+        if (d.ppg_n) {
+            log_mean(" dk=", d.dark_sum, d.ppg_n);
+            log_mean(" on=", d.on_sum, d.ppg_n);
+            log_mean(" hi=", d.hi_sum, d.ppg_n);
+            log_s("/");
+            log_u(d.hi_min);
+            log_s("-");
+            log_u(d.hi_max);
+            log_s(" c=");
+            int32_t n = (int32_t)d.ppg_n;
+            log_i(d.coarse_sum >= 0 ? (d.coarse_sum + n / 2) / n : -((n / 2 - d.coarse_sum) / n));
+        } else {
+            log_s(" no frames");
+        }
+        log_s(" agc=");
+        log_u(st->agc_steps);
+        log_s(" dcc=");
+        log_u(st->dcc_steps);
+        log_s(" p=");
+        log_u(st->ppg_pulses);
+        log_s(" pr=");
+        log_u(st->pulse_bpm);
+        log_s(" lost=");
+        log_u(a->ppg_lost);
+        log_end();
+    }
+}
+
 static void start_session(ui_mode_t mode)
 {
     S.mode = mode;
     S.ever_running = false;
     S.start_logged = false;
+    S.log_state = 0;
+    S.log_ms = S.now;
     S.fault_text = NULL;
     S.nocontact_ms = S.now;
     if (mode_has_ecg(mode) && usb_now()) {
@@ -512,13 +639,22 @@ static void session_update(void)
             log_end();
         }
     }
+    if (st->phase != ACQ_ON)
+        return;
+    log_transition(st);
+    if (mode_has_ecg(S.mode) && st->ecg_state == ACQ_ECG_END) {
+        /* end of contact after RUNNING (acq.h decides from the signal) */
+        to_summary_or_card(end_session(END_LEAD));
+        return;
+    }
+    log_evidence(st);
     if (st->contact)
         return;
     uint32_t off = S.now - S.nocontact_ms;
-    if (S.ever_running) {
+    if (S.ever_running && !mode_has_ecg(S.mode)) {
         if (off > CONTACT_LOST_END_MS)
             to_summary_or_card(end_session(END_LEAD));
-    } else if (off > NO_CONTACT_DISARM_MS) {
+    } else if (!S.ever_running && off > NO_CONTACT_DISARM_MS) {
         end_session(END_TIMEOUT);
         go_screen(nav_card_of(S.mode));
     }

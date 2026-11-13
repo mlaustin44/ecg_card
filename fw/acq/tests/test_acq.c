@@ -22,9 +22,18 @@ static struct {
     uint32_t next_ecg, next_ppg;
     bool ecg_gap, ppg_gap;
     uint32_t pat_sum, pat_n;
-    uint64_t fr_rise_us;
-    uint32_t fr_pulses, fr_bad, fr_without_contact;
+    uint64_t fr_rise_us, fr_prev_rise_us;
+    uint32_t fr_pulses, fr_bad, fr_before_electrodes, fr_close;
+    uint64_t fr_min_gap_us;
+    unsigned mid_after_fr_ms;  /* floating inputs at mid-scale this long after each pulse */
+    uint32_t polls_in_range;   /* polls with the detector not railed */
 } C;
+
+static void back_to_rail(void *ctx)
+{
+    (void)ctx;
+    sim_ecg_set_float_model(SIM_FLOAT_RAIL);
+}
 
 static void s_ecg(uint32_t start, uint8_t f, const int16_t *s)
 {
@@ -80,14 +89,26 @@ static void run_until(uint64_t t_ms)
         acq_poll(hal_millis());
         bool now = sim_pin(PIN_FAST_RESTORE);
         if (now && !fr) {
+            C.fr_prev_rise_us = C.fr_rise_us;
             C.fr_rise_us = sim_now_us();
-            if (!acq_status()->contact) C.fr_without_contact++;
+            if (!sim_rail(SIM_RAIL_BODY_EN)) C.fr_before_electrodes++;
+            if (C.fr_pulses) {
+                uint64_t gap = C.fr_rise_us - C.fr_prev_rise_us;
+                if (gap < ACQ_FR_REPEAT_MS * 1000u) C.fr_close++;
+                if (!C.fr_min_gap_us || gap < C.fr_min_gap_us) C.fr_min_gap_us = gap;
+            }
         }
         if (!now && fr) {
             uint64_t w = sim_now_us() - C.fr_rise_us;
             C.fr_pulses++;
             if (w < 20000 || w > 50000) C.fr_bad++;
+            if (C.mid_after_fr_ms) {
+                sim_ecg_set_float_model(SIM_FLOAT_MID);
+                sim_after_ms(C.mid_after_fr_ms, back_to_rail, NULL);
+            }
         }
+        if (acq_active() && acq_status()->phase == ACQ_ON && !acq_status()->railed)
+            C.polls_in_range++;
         fr = now;
         hal_wdt_kick();
         hal_idle();
@@ -124,15 +145,18 @@ TEST(ecg_session)
     CHECK(!acq_status()->contact);
     CHECK(sim_rail(SIM_RAIL_BODY_EN));
     sim_set_thumbs(true);
-    run_until(4500);
+    run_until(4000);
     CHECK(acq_status()->contact);
     CHECK(!acq_status()->settled);
     run_until(20000);
     CHECK(acq_status()->settled);
     CHECK_NEAR(acq_status()->hr_bpm, tc.hr_bpm, 2);
-    /* brief start step 4: FAST_RESTORE stays low until contact (step 7) */
+    /* brief start step 4: FAST_RESTORE stays low until the electrodes are
+     * connected; afterwards pulses while railed (floating inputs too), at
+     * most every ACQ_FR_REPEAT_MS */
     CHECK(C.fr_pulses >= 1);
-    CHECK_EQ(C.fr_without_contact, 0);
+    CHECK_EQ(C.fr_before_electrodes, 0);
+    CHECK_EQ(C.fr_close, 0);
     CHECK_EQ(C.fr_bad, 0);
     CHECK(!C.ecg_gap);
     CHECK_EQ(hal_ecg_overruns(), 0);
@@ -145,14 +169,64 @@ TEST(ecg_session)
     uint32_t idx = acq_status()->ecg_samples;
     CHECK_NEAR((double)(idx - idx0), 500.0, 1); /* 1 s of 500 Hz despite the loss */
     CHECK(!C.ecg_gap);
+    /* thumbs off: a rail is "hold still" first, the end of contact after
+     * ACQ_ECG_LOST_END_MS without a stable signal */
     sim_set_thumbs(false);
     run_until(22000);
+    CHECK(acq_status()->contact);
+    CHECK_EQ(acq_status()->ecg_state, ACQ_ECG_HOLD);
+    run_until(24000);
     CHECK(!acq_status()->contact);
+    CHECK_EQ(acq_status()->ecg_state, ACQ_ECG_END);
+    CHECK_EQ(acq_status()->ecg_why, ACQ_WHY_NO_STABLE);
     acq_stop();
     CHECK(acq_summary()->ecg_lost > 0);
     CHECK(acq_summary()->hrv.beats >= 15);
     CHECK_NEAR(acq_summary()->hrv.hr_avg, tc.hr_bpm, 3);
     CHECK(!sim_pin(PIN_ANA_EN) && !sim_rail(SIM_RAIL_BODY_EN));
+}
+
+/* FAST_RESTORE policy on floating inputs that sit on the rail: a pulse once
+ * the output has been railed for ACQ_FR_RAIL_MS, then every ACQ_FR_REPEAT_MS;
+ * the mid-scale samples the pulse forces (and DSP_LEAD_BLANK_MS after it)
+ * are no evidence: the detector stays railed, nothing starts. */
+static void floating_rail_run(unsigned mid_after_ms)
+{
+    boot();
+    testsrc_cfg_t tc = testsrc_defaults();
+    testsrc_install(&tc);
+    sim_ecg_set_float_model(SIM_FLOAT_RAIL);
+    C.mid_after_fr_ms = mid_after_ms;
+    acq_cfg_t c = cfg(true, false);
+    CHECK(acq_start(&c));
+    run_until(11000);
+    CHECK_EQ(C.fr_before_electrodes, 0);
+    acq_stop();
+}
+
+TEST(fast_restore_policy)
+{
+    floating_rail_run(0);
+    printf("  floating on the rail, 10.6 s: %u pulses, closest %.1f ms apart\n", C.fr_pulses,
+           C.fr_min_gap_us / 1000.0);
+    CHECK(C.fr_pulses >= 40 && C.fr_pulses <= 43); /* every 250 ms */
+    CHECK_EQ(C.fr_close, 0);
+    CHECK(C.fr_min_gap_us < (ACQ_FR_REPEAT_MS + 20u) * 1000u);
+    CHECK_EQ(C.fr_bad, 0);
+    CHECK_EQ(C.polls_in_range, 0); /* the pulses' mid-scale samples: no evidence */
+    CHECK(!acq_status()->contact);
+    /* in range for 25 ms right after each release: inside the 10 ms blanking
+     * + 20 ms in-range test, still nothing */
+    floating_rail_run(25);
+    CHECK(C.fr_pulses >= 40);
+    CHECK_EQ(C.polls_in_range, 0);
+    CHECK_EQ(acq_status()->ecg_state, ACQ_ECG_WAIT);
+    /* 45 ms in range after each release: that is evidence (in range), but
+     * far from stable */
+    floating_rail_run(45);
+    CHECK(C.polls_in_range > 0);
+    CHECK_EQ(acq_status()->ecg_state, ACQ_ECG_WAIT);
+    sim_ecg_set_float_model(SIM_FLOAT_EXCURSIONS);
 }
 
 TEST(ppg_session)
@@ -357,6 +431,7 @@ int main(void)
 {
     RUN(vmid_fault);
     RUN(ecg_session);
+    RUN(fast_restore_policy);
     RUN(ppg_session);
     RUN(ppg_pulse_timeout);
     RUN(both_pat);

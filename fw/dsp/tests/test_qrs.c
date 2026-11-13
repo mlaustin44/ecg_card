@@ -81,17 +81,17 @@ static void run_chain(synth_ecg_t *e, double dur, int gain, dets_t *out, double 
             if (t >= off_from && t < off_to)
                 raw[j] = 4095;
         }
-        uint8_t ev = dsp_lead_push(&l, raw, 80);
+        uint8_t ev = dsp_lead_push(&l, raw, 80, 0);
         if (events)
             *events |= ev;
-        if (ev & DSP_LEAD_EV_CONTACT)
+        if (ev & DSP_LEAD_EV_INRANGE)
             reset_pending = 1;
         size_t k = dsp_decim_push(&d, raw, 80, s);
         if (reset_pending && i > 4000) {
-            dsp_qrs_reset(q); /* the app does this on re-contact */
+            dsp_qrs_reset(q); /* acq does this when the signal is back in range */
             reset_pending = 0;
         }
-        if (dsp_lead_is_off(&l) && i > 4000) {
+        if (dsp_lead_railed(&l) && i > 4000) {
             sidx += (uint32_t)k;
             dsp_qrs_skip(q, (uint32_t)k); /* keep the stream timeline */
             continue;
@@ -313,8 +313,8 @@ TEST(lead_off_recontact)
     dets_t v = { 0 };
     int ev = 0;
     run_chain(&e, bc.duration, 558, &v, 25.0, 28.0, &ev);
-    CHECK(ev & DSP_LEAD_EV_OFF);
-    CHECK(ev & DSP_LEAD_EV_CONTACT);
+    CHECK(ev & DSP_LEAD_EV_RAIL);
+    CHECK(ev & DSP_LEAD_EV_INRANGE);
     /* no detections while off; detection resumes within ~3 s of contact */
     int during = 0;
     double first_after = 1e9;

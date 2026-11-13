@@ -1,5 +1,6 @@
-/* ECG contact and signal monitoring: lead-off / re-contact on raw codes,
- * baseline wander, the 0..4 quality score and the auto-gain advisor. */
+/* ECG front-end monitoring: rail / in-range / stable on raw codes, baseline,
+ * code statistics, baseline wander, the 0..4 quality score and the auto-gain
+ * advisor. */
 #ifndef DSP_ECG_MON_H
 #define DSP_ECG_MON_H
 
@@ -7,53 +8,85 @@
 #include <stddef.h>
 #include <stdint.h>
 
-/* ---- Lead-off (raw 4 kHz codes) ------------------------------------------
+/* ---- Front-end state (raw 4 kHz codes) -----------------------------------
  * "Rail" = code < 5 % or >= 95 % of full scale (< 205 or >= 3891).
- * LEAD OFF: rail samples for more than 100 ms (400 samples); gaps shorter
- *   than 20 ms (mains riding on the rail) do not restart the count.
- * CONTACT ("came off the rail"): 20 ms (80 samples) continuously off the rail
- *   while lead-off. Pulse FAST_RESTORE and reset the processing on this.
- * The state starts lead-off, so the first contact is reported as an event.
- * Rail samples while in contact are counted as clipping (gain advisor,
- * quality). The baseline is an EMA (tau 128 ms) of code - mid. */
+ * RAILED: rail samples for more than 20 ms (80 samples); gaps shorter than
+ *   20 ms (mains riding on the rail) do not end the run, 20 ms continuously
+ *   in range does (DSP_LEAD_EV_INRANGE). A rail means the front end is
+ *   saturated or recovering (an electrode offset step decays through U5's
+ *   0.5 s coupling for ~2 s), or the inputs float: it never means "thumbs
+ *   off" by itself. Shorter rail runs are clipping (gain advisor, quality).
+ * STABLE: continuously in range for DSP_LEAD_STABLE_MS (DSP_LEAD_EV_STABLE),
+ *   short clips included; lost when RAILED asserts (DSP_LEAD_EV_UNSTABLE). One
+ *   tau of U5, and longer than the in-range excursions floating inputs make
+ *   (up to ~0.3 s on the first board).
+ * BLANKED samples (FAST_RESTORE held, and DSP_LEAD_BLANK_MS after it; the
+ *   caller passes how many of a block are blanked) are not evidence either
+ *   way: the pulse forces mid-scale. They pause every count and the
+ *   baseline; the min / max / rail statistics still see them.
+ * The state starts railed with an empty run: no evidence yet.
+ * The baseline is an EMA (tau 128 ms) of code - mid. */
 #define DSP_LEAD_RAIL_LO   205u
 #define DSP_LEAD_RAIL_HI   3891u
-#define DSP_LEAD_OFF_RUN   400u
-#define DSP_LEAD_GAP_RUN   80u
+#define DSP_LEAD_RAIL_RUN  80u    /* rail samples (20 ms) -> RAILED */
+#define DSP_LEAD_OK_RUN    80u    /* in-range samples (20 ms) that end a rail run */
+#define DSP_LEAD_STABLE_MS 500u
+#define DSP_LEAD_STABLE_RUN (DSP_LEAD_STABLE_MS * 4u)
+#define DSP_LEAD_BLANK_MS  10u    /* after FAST_RESTORE is released */
 
-#define DSP_LEAD_EV_OFF     0x01u /* contact lost (lead-off asserted) */
-#define DSP_LEAD_EV_CONTACT 0x02u /* came off the rail: contact made */
+#define DSP_LEAD_EV_RAIL     0x01u /* RAILED asserted */
+#define DSP_LEAD_EV_INRANGE  0x02u /* rail run ended: in range for 20 ms */
+#define DSP_LEAD_EV_STABLE   0x04u /* in range for DSP_LEAD_STABLE_MS */
+#define DSP_LEAD_EV_UNSTABLE 0x08u /* RAILED asserted while stable */
+
+typedef struct {
+    uint32_t n, rail, sum;
+    uint16_t min, max;
+} dsp_lead_stats_t;   /* raw codes since the last dsp_lead_take_stats() */
 
 typedef struct {
     int32_t base_q9;   /* EMA of (code - mid), 9 fractional bits */
-    uint32_t clip;     /* rail samples while in contact, since last take */
-    uint16_t rail_run; /* rail samples in the current run (gaps < 20 ms ok) */
-    uint16_t ok_run;   /* consecutive off-rail samples */
+    uint32_t clip;     /* rail samples while stable, since last take */
+    uint32_t rail_run; /* rail samples in the current run (gaps < 20 ms ok) */
+    uint32_t in_run;   /* samples since the rail run ended (0 while railed) */
+    uint16_t ok_run;   /* consecutive in-range samples */
     uint16_t sec_n;    /* samples into the current second */
     uint16_t sec_rail; /* rail samples in the current second */
     uint16_t last_s;   /* rail samples in the last complete second */
     int16_t mid;
-    uint8_t lead_off;
-} dsp_lead_t;          /* 24 bytes */
+    uint8_t railed, stable;
+    dsp_lead_stats_t st;
+} dsp_lead_t;          /* 52 bytes */
 
 void dsp_lead_init(dsp_lead_t *l, uint16_t mid_code);
 
-/* Feed raw codes; returns the OR of DSP_LEAD_EV_* that occurred in the block. */
-uint8_t dsp_lead_push(dsp_lead_t *l, const uint16_t *raw, size_t n);
+/* Feed raw codes; the first n_blank of them are blanked (see above).
+ * Returns the OR of DSP_LEAD_EV_* that occurred in the block. */
+uint8_t dsp_lead_push(dsp_lead_t *l, const uint16_t *raw, size_t n, size_t n_blank);
 
-bool dsp_lead_is_off(const dsp_lead_t *l);
+bool dsp_lead_railed(const dsp_lead_t *l);
+bool dsp_lead_stable(const dsp_lead_t *l);
+/* Length of the current rail run while railed (else 0), and of the current
+ * in-range run while not railed (else 0), in raw samples (4 per ms). */
+uint32_t dsp_lead_rail_samples(const dsp_lead_t *l);
+uint32_t dsp_lead_in_samples(const dsp_lead_t *l);
 
 /* Baseline offset from mid, ADC codes (signed). The start sequence pulses
  * FAST_RESTORE again if |offset| > 1024 (25 % of full scale) 500 ms after
- * contact: see dsp_lead_far_from_mid(). */
+ * the signal became stable: see dsp_lead_far_from_mid(). */
 int16_t dsp_lead_baseline(const dsp_lead_t *l);
 bool dsp_lead_far_from_mid(const dsp_lead_t *l);
 
-/* Rail samples while in contact since the previous call (then cleared). */
+/* Rail samples while stable since the previous call (then cleared). */
 uint32_t dsp_lead_take_clip(dsp_lead_t *l);
 
 /* Rail samples (any state) in the last complete second of 4000 raw samples. */
 uint16_t dsp_lead_rail_last_s(const dsp_lead_t *l);
+
+/* Statistics of every code pushed since the previous call (then cleared):
+ * count, rail samples, sum, min, max (min > max when n = 0). Counting
+ * stops after 2^20 samples (262 s) if nobody takes them. */
+void dsp_lead_take_stats(dsp_lead_t *l, dsp_lead_stats_t *out);
 
 /* ---- Baseline wander (500 Hz stream) --------------------------------------
  * Mean of each 0.5 s block; wander = max - min of the last 4 block means
@@ -71,8 +104,8 @@ void dsp_wander_push(dsp_wander_t *w, const int16_t *x, size_t n);
 uint16_t dsp_wander_uvpp(const dsp_wander_t *w); /* 0 until 2 s seen */
 
 /* ---- Quality score ---------------------------------------------------------
- * 0 = no contact (lead-off) or saturated: more than 5 % of the raw samples
- *     of the last second on the rail.
+ * 0 = no contact / railed (lead_off) or saturated: more than 5 % of the raw
+ *     samples of the last second on the rail.
  * Otherwise start at 4 and subtract:
  *   clipping      any rail sample in the last second             -1
  *   mains         residual > 100 uVpp: -1;  > 400 uVpp: -2
@@ -82,7 +115,7 @@ uint16_t dsp_wander_uvpp(const dsp_wander_t *w); /* 0 until 2 s seen */
  *                 and less than 3 s since contact)
  * and clamp to 1..4 while in contact. */
 typedef struct {
-    bool lead_off;
+    bool lead_off;           /* no contact, or dsp_lead_railed() */
     uint16_t rail_per_s;     /* dsp_lead_rail_last_s() (of 4000) */
     uint16_t mains_uvpp;     /* dsp_mains_residual_uvpp() */
     uint16_t wander_uvpp;    /* dsp_wander_uvpp() */

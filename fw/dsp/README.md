@@ -26,7 +26,7 @@ the quantised coefficients. Its outputs are checked in:
 | `dsp_mains.h` | Goertzel bins at 50 and 60 Hz: pickup in µVpp, automatic notch choice |
 | `dsp_qrs.h` | Pan–Tompkins R-peaks with sub-sample refinement, median-of-5 HR |
 | `dsp_hrv.h` | Session statistics: beats, HR avg/min/max, SDNN, RMSSD |
-| `dsp_ecg_mon.h` | Lead-off and contact, baseline, wander, quality 0..4, auto-gain advisor |
+| `dsp_ecg_mon.h` | Front-end state (railed / in range / stable), baseline, code statistics, wander, quality 0..4, auto-gain advisor |
 | `dsp_ppg.h` | PPG frame reconstruction, bridging, band-pass, pulse foot, rate, PI |
 | `dsp_ppg_ctrl.h` | DC-cancel DAC12, LED AGC, LED current limit, finger detection |
 | `dsp_pat.h` | Pulse arrival time (R-peak to foot) on the shared timeline |
@@ -38,12 +38,15 @@ the quantised coefficients. Its outputs are checked in:
 
 ECG, for each ADC0 DMA block of raw codes (any length):
 
-1. `dsp_lead_push(raw)` → `DSP_LEAD_EV_OFF` / `DSP_LEAD_EV_CONTACT`.
-   - On CONTACT: pulse FAST_RESTORE, then `dsp_qrs_reset`, `dsp_disp_reset`
-     and `dsp_hrv_add_beat(h, 0)` before the next beat. If
-     `dsp_lead_far_from_mid()` 500 ms later, pulse it again.
-   - While lead-off: still decimate, but call `dsp_qrs_skip(q, n)` instead
+1. `dsp_lead_push(raw, n, n_blank)` → `DSP_LEAD_EV_RAIL` / `_INRANGE` /
+   `_STABLE` / `_UNSTABLE`. `n_blank`: how many leading samples were taken
+   while FAST_RESTORE was held or within `DSP_LEAD_BLANK_MS` after it.
+   - On INRANGE: `dsp_qrs_reset`, `dsp_disp_reset` (re-learn from here).
+   - While railed: still decimate, but call `dsp_qrs_skip(q, n)` instead
      of `dsp_qrs_process` so that stream indices stay continuous.
+   - Contact / session decisions (fw/acq, acq.h) use STABLE only; a rail is
+     "recovering", not "thumbs off". If `dsp_lead_far_from_mid()` 500 ms
+     after STABLE, pulse FAST_RESTORE once more.
 2. `n = dsp_decim_push(raw, out)`. The output has room for
    `DSP_DECIM_MAX_OUT(len)` samples. These are the stream samples (×8 units).
 3. Pass the same 500 Hz samples to `dsp_mains_push`, `dsp_wander_push`,
@@ -123,7 +126,7 @@ Both assume the ECG and PPG timers start from the same event (ecg-fw.md).
 | `dsp_hrv_t` | 64 |
 | `dsp_decim_t` | 56 (the transposed polyphase needs no input history) |
 | `dsp_mains_t` | 32 |
-| `dsp_lead_t` | 24 |
+| `dsp_lead_t` | 52 |
 | `dsp_wander_t` | 20 |
 | `dsp_gain_t` | 10 |
 | `dsp_finger_t`, `dsp_agc_t` | 2, 1 |
@@ -146,7 +149,7 @@ about 25 cycles for each `__aeabi_lmul` call.
 | Work | Rate | Cycles/item | Cycles/s |
 |---|---|---|---|
 | Decimator: 12 MACs per raw sample | 4000/s | ~150 | 600 k |
-| Lead-off monitor | 4000/s | ~15 | 60 k |
+| Front-end monitor | 4000/s | ~20 | 80 k |
 | Display path: 3 biquads + µV scale (Q30, 5 × 64-bit MAC each) | 500/s | ~750 | 375 k |
 | QRS: 4 biquads, derivative, MWI, peak tracking | 500/s | ~1000 | 500 k |
 | Mains Goertzel, 2 bins | 500/s | ~100 | 50 k |
@@ -156,11 +159,14 @@ about 25 cycles for each `__aeabi_lmul` call.
 
 ## Rules worth knowing
 
-- **Lead-off:** a raw code < 205 or ≥ 3891 (5 % of either rail) for more
-  than 400 samples (100 ms). Gaps shorter than 20 ms (mains riding on the
-  rail) do not restart the count. **Contact:** 20 ms continuously off the
-  rail. The state starts as lead-off.
-- **Quality 0..4:** 0 when lead-off, or when more than 5 % of the last
+- **Front-end state:** a raw code < 205 or ≥ 3891 (5 % of either rail) is a
+  rail sample. **Railed:** more than 80 rail samples (20 ms) in a run; gaps
+  shorter than 20 ms (mains riding on the rail) do not end the run, 20 ms
+  continuously in range does (INRANGE). Shorter runs are clipping.
+  **Stable:** in range continuously for `DSP_LEAD_STABLE_MS` (500 ms, one
+  tau of U5's coupling). Blanked samples (FAST_RESTORE) pause every count.
+  The state starts railed with an empty run.
+- **Quality 0..4:** 0 without contact or while railed, or when more than 5 % of the last
   second's raw samples were on the rail. Otherwise start from 4 and
   subtract:
   - 1 for any rail sample;

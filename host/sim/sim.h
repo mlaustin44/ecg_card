@@ -299,22 +299,51 @@ bool sim_oled_save_png(const char *path, int scale);
  * Only used while the thumbs are on and BODY_EN is high. */
 typedef int32_t (*sim_ecg_fn)(uint64_t t_us, void *ctx);
 void sim_set_ecg_source(sim_ecg_fn fn, void *ctx);
-/* Contact transients, applied when BODY_EN and the thumbs are both on:
+/* The chain while the thumbs are on (BODY_EN high):
+ *   electrodes: v = source + electrode offset (DC, see below)
+ *   U5 (ecg-fw.md ECG chain 2): y1 = v + 20 * HP(v), HP with tau 0.5 s (the
+ *     gain network's 50 uF AC coupling): gain 21 for changes, 1 at DC. Its
+ *     output clips at VMID +- 1.55 V. FAST_RESTORE does not reach it.
+ *   C34/R36 (tau 0.33 s), the node FAST_RESTORE shorts to VMID, then x26.6
+ *     (x52.3) and the 159 Hz / 339 Hz low-passes to the rails 0.05..3.25 V.
+ * Contact transients, applied when BODY_EN and the thumbs are both on:
  *  - offset: DC step at the high-pass node (C34/R36, unity DC gain), in uV at
  *    the node (default 200000 = 200 mV: saturates the output, ~0.5 s to leave
  *    the 25 % band at 558x). Decays with the 0.48 Hz high-pass unless
  *    FAST_RESTORE is pulsed, which snaps it away completely.
- *  - transient: step at the electrode input (default 1000 uV) that goes through
- *    the first stage's 0.32 Hz AC coupling (x21): the 2-3 s "settling" tail that
- *    FAST_RESTORE cannot remove. */
+ *  - transient: the electrode offset (half-cell / skin potential difference)
+ *    present at contact, in uV at the electrodes (default 1000). It steps
+ *    the U5 output by 21x (clipping for more than ~74 mV) and decays to 1x
+ *    with tau 0.5 s: the "settling" tail FAST_RESTORE cannot remove. Dry
+ *    thumbs: tens to hundreds of mV. */
 void sim_ecg_set_contact_offset_uv(int32_t uv);
 void sim_ecg_set_contact_transient_uv(int32_t uv);
+/* Thumb adjustment: the electrode offset changes by step_uv now (a new step
+ * through U5, as at contact), linearly over ramp_ms (0 = at once). Ignored
+ * while there is no contact. */
+void sim_ecg_thumb_adjust(int32_t step_uv, unsigned ramp_ms);
+void sim_at_thumb_adjust(uint64_t time_ms, int32_t step_uv, unsigned ramp_ms);
+/* What ECG_ADC does with the electrodes open (thumbs off, or BODY_EN low):
+ *  SIM_FLOAT_EXCURSIONS (default, what the first board did): floating inputs
+ *    keep the output on a rail (sim_ecg_set_float_high), with brief in-range
+ *    excursions at a random level: Poisson starts at rate_hz, durations
+ *    min + (max - min) * u^3, u uniform (mostly short: half are under
+ *    ~50 ms with the defaults 1 Hz, 20..300 ms, seed 1; deterministic for a
+ *    given seed). After a FAST_RESTORE pulse the output is back on the rail
+ *    at once unless an excursion is in progress.
+ *  SIM_FLOAT_RAIL: always near the rail (slow 60 mV wobble).
+ *  SIM_FLOAT_MID: open inputs sit quietly near mid-scale (+-4 mV, 0.3 Hz),
+ *    as other boards / conditions may do.
+ * FAST_RESTORE high holds the output at VMID in every model (node shorted). */
+typedef enum { SIM_FLOAT_EXCURSIONS = 0, SIM_FLOAT_RAIL, SIM_FLOAT_MID } sim_float_model_t;
+void sim_ecg_set_float_model(sim_float_model_t model);
+void sim_ecg_set_float_excursions(double rate_hz, unsigned min_ms, unsigned max_ms, uint64_t seed);
 /* Additive mains interference at the electrodes (default off). Amplitude is
  * for RLD both on; x3 with one RLD pin, x10 with none. */
 void sim_ecg_set_mains(double hz, double amp_uv);
 void sim_ecg_set_noise_uv(double rms_uv);       /* white, at the electrodes (default 0) */
 void sim_ecg_set_vmid_error_mv(int mv);         /* VMID target = 1650 + mv (default 0) */
-void sim_ecg_set_float_high(bool high);         /* lead-off rail (default true: near 3.25 V) */
+void sim_ecg_set_float_high(bool high);         /* floating-input rail (default true: near 3.25 V) */
 /* Offset injected at the output by a GAIN_HI or RLD pin change (defaults 15, 8). */
 void sim_ecg_set_injection_mv(double gain_mv, double rld_mv);
 void sim_ecg_set_adc_noise_lsb(double rms);     /* default 0 */
