@@ -106,7 +106,32 @@
  * A Control write is accepted at ATT level if it is 1..16 bytes; the command
  * result arrives on Events as STREAM_EV_CMD_RESULT.
  * If notifications back up (link stall), the radio keeps about 1 s of data,
- * drops the oldest blocks and counts them in LINK_CONN_STATE.dropped. */
+ * drops the oldest blocks and counts them in LINK_CONN_STATE.dropped.
+ *
+ * ---- Clarifications (as implemented on both ends) ---------------------------
+ * - Device name digits: ble_addr[1] then ble_addr[0] of LINK_HELLO, upper-case
+ *   hex (address A1:B2:C3:D4:E5:F6 gives "ECG Card E5F6").
+ * - LINK_HELLO.reset_reason is the raw CH585 value: 0 software, 1 power-on,
+ *   2 watchdog, 3 reset pin, 5 wake. A HELLO after the first means the radio
+ *   restarted: the MCU logs it and repeats SET_INFO, STATUS, ADV_START.
+ * - STREAM_EVENT frames are sent while LINK_SUB_EVENTS or LINK_SUB_HR is set;
+ *   the radio notifies the Events characteristic only if it is subscribed.
+ * - Notification payloads are at most 32 bytes.
+ * - LINK_CONN_STATE: mtu is 0 when not connected; a changing dropped count is
+ *   reported at most once per second.
+ * - After a disconnect the radio resumes fast advertising by itself unless
+ *   the last advertising command was LINK_RC_ADV_STOP.
+ * - LINK_RC_ADV_START while connected is answered LINK_RES_BUSY; while
+ *   advertising, LINK_RES_OK without restarting the schedule. A
+ *   LINK_RADIO_CTRL op with unexpected extra bytes gets LINK_RES_BAD_ARG.
+ *   LINK_RC_SET_INFO text is at most 20 bytes.
+ * - Nothing is acknowledged after LINK_RC_SHUTDOWN.
+ * - LINK_CMD_SET item 5 (SET_ITEM_BLE) is Bluetooth on/off. Gain, notch, RLD
+ *   and LED limit are refused with LINK_RES_BUSY during a session.
+ * - LINK_CMD_SET_TIME is refused with LINK_RES_BAD_ARG before 2024-01-01 or
+ *   with an offset outside -720..+840 minutes.
+ * - LINK_CMD_START during a session is answered LINK_RES_BUSY (stop first).
+ * - Actual baud: radio 458823 (-0.43 %), MCU 460432 or 461095. */
 #ifndef LINK_FMT_H
 #define LINK_FMT_H
 
