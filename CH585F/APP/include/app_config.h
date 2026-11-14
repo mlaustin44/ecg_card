@@ -38,6 +38,11 @@
 #define APP_NOTIFY_BURST    8u
 #define APP_NOTIFY_BACKOFF  8u /* 5 ms */
 
+/* ECG / PPG blocks per notification (ble_app.c): bounded by ATT_MTU - 3
+ * and by these. 8 ECG blocks = 200 B = 160 ms of signal. */
+#define APP_BATCH_MAX_BLOCKS 8u
+#define APP_BATCH_MAX_BYTES  244u
+
 /* Link manager tick (0.625 ms units): watchdog feed, ACK timeouts. */
 #define APP_TICK            160u /* 100 ms */
 /* Error summary log period and CONN_STATE rate limit for 'dropped'. */

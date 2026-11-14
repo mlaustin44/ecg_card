@@ -4,3 +4,7 @@ __pycache__/
 *.pyc
 .venv/
 .claude/
+# session dumps and recordings saved from tools/ble_client.html
+ecgcard_*.txt
+ecgcard_*.csv
+ecgcard_*.ecgcap

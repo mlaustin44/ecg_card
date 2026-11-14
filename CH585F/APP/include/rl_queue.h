@@ -43,6 +43,16 @@ const rl_qent_t *rl_queue_peek(const rl_queue_t *q);
 void rl_queue_pop(rl_queue_t *q);       /* delivered */
 void rl_queue_drop_head(rl_queue_t *q); /* not deliverable: counted */
 void rl_queue_discard_head(rl_queue_t *q); /* not wanted (unsubscribed): not counted */
+/* Batching: copies the head entry, then later entries of the same kind and
+ * length (in queue order, entries of other kinds are stepped over), into buf
+ * back to back, while they fit in cap and up to max_entries. Returns the
+ * bytes written and sets *entries (0 if the queue is empty or the head does
+ * not fit). The queue is unchanged. */
+size_t rl_queue_gather(const rl_queue_t *q, uint8_t *buf, size_t cap,
+                       unsigned max_entries, unsigned *entries);
+/* Removes what rl_queue_gather selected for the same 'entries' (delivered:
+ * counted as sent). The other entries keep their order. */
+void rl_queue_pop_gathered(rl_queue_t *q, unsigned entries);
 /* Drop everything (counted). Returns the number of entries dropped. */
 unsigned rl_queue_flush(rl_queue_t *q);
 unsigned rl_queue_count(const rl_queue_t *q);

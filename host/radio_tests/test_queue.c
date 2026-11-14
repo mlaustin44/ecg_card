@@ -99,6 +99,109 @@ TEST(drop_discard_flush)
     CHECK_EQ(rl_queue_dropped16(&Q), 0xFFFF);
 }
 
+/* interleaved ECG (kind 0, 25 B) and PPG (kind 1, 15 B) blocks plus an event */
+static void fill_mixed(unsigned pairs)
+{
+    uint8_t b[25];
+    rl_queue_init(&Q);
+    for (unsigned i = 0; i < pairs; i++) {
+        memset(b, (int)(0x10 + i), sizeof b);
+        rl_queue_push(&Q, 0, b, 25);
+        memset(b, (int)(0x80 + i), sizeof b);
+        rl_queue_push(&Q, 1, b, 15);
+        if (i == 1) {
+            memset(b, 0xEE, sizeof b);
+            rl_queue_push(&Q, 2, b, 7);
+        }
+    }
+}
+
+TEST(gather_batches_one_stream_in_order)
+{
+    uint8_t buf[244];
+    unsigned n;
+    fill_mixed(6); /* 13 entries */
+    /* MTU 247: 8 blocks allowed, only 6 ECG queued */
+    CHECK_EQ(rl_queue_gather(&Q, buf, sizeof buf, 8, &n), 150);
+    CHECK_EQ(n, 6);
+    for (unsigned i = 0; i < 6; i++) {
+        CHECK_EQ(buf[i * 25], 0x10 + i);
+        CHECK_EQ(buf[i * 25 + 24], 0x10 + i);
+    }
+    CHECK_EQ(rl_queue_count(&Q), 13); /* gather alone changes nothing */
+    rl_queue_pop_gathered(&Q, n);
+    CHECK_EQ(rl_queue_count(&Q), 7);
+    CHECK_EQ(Q.sent, 6);
+    CHECK_EQ(Q.dropped, 0);
+    /* what is left keeps its order: PPG 0, PPG 1, event, PPG 2.. */
+    CHECK_EQ(rl_queue_gather(&Q, buf, sizeof buf, 8, &n), 90);
+    CHECK_EQ(n, 6);
+    for (unsigned i = 0; i < 6; i++)
+        CHECK_EQ(buf[i * 15], 0x80 + i);
+    rl_queue_pop_gathered(&Q, n);
+    CHECK_EQ(rl_queue_count(&Q), 1);
+    CHECK_EQ(rl_queue_peek(&Q)->kind, 2);
+    CHECK_EQ(rl_queue_peek(&Q)->len, 7);
+    CHECK_EQ(rl_queue_peek(&Q)->data[0], 0xEE);
+}
+
+TEST(gather_respects_capacity_and_entry_limit)
+{
+    uint8_t buf[244];
+    unsigned n;
+    fill_mixed(12);
+    CHECK_EQ(rl_queue_gather(&Q, buf, sizeof buf, 8, &n), 200); /* entry limit */
+    CHECK_EQ(n, 8);
+    CHECK_EQ(rl_queue_gather(&Q, buf, 60, 8, &n), 50);          /* small MTU */
+    CHECK_EQ(n, 2);
+    CHECK_EQ(rl_queue_gather(&Q, buf, 20, 8, &n), 0);           /* head does not fit */
+    CHECK_EQ(n, 0);
+    /* partial pop: the next gather starts at the first block not taken */
+    rl_queue_pop_gathered(&Q, 2);
+    CHECK_EQ(rl_queue_peek(&Q)->kind, 1);  /* PPG 0 is now the head */
+    CHECK_EQ(rl_queue_gather(&Q, buf, sizeof buf, 1, &n), 15);
+    rl_queue_pop_gathered(&Q, 1);
+    CHECK_EQ(rl_queue_peek(&Q)->kind, 1);  /* PPG 1 (ECG 0, 1 already sent) */
+    CHECK_EQ(rl_queue_peek(&Q)->data[0], 0x81);
+    rl_queue_pop_gathered(&Q, 1);
+    CHECK_EQ(rl_queue_peek(&Q)->kind, 2);
+    rl_queue_pop(&Q);
+    CHECK_EQ(rl_queue_peek(&Q)->kind, 0);
+    CHECK_EQ(rl_queue_peek(&Q)->data[0], 0x12);
+    rl_queue_init(&Q);
+    CHECK_EQ(rl_queue_gather(&Q, buf, sizeof buf, 8, &n), 0);   /* empty */
+    rl_queue_pop_gathered(&Q, 3);
+    CHECK_EQ(rl_queue_count(&Q), 0);
+}
+
+TEST(gather_across_wraparound_and_push_after)
+{
+    uint8_t buf[244], b[25];
+    unsigned n;
+    rl_queue_init(&Q);
+    /* move the head near the end of the storage */
+    for (unsigned i = 0; i < RL_Q_SLOTS - 3; i++) {
+        rl_queue_push(&Q, 3, b, 1);
+        rl_queue_discard_head(&Q);
+    }
+    for (unsigned i = 0; i < 10; i++) {
+        memset(b, (int)i, sizeof b);
+        rl_queue_push(&Q, (uint8_t)(i & 1), b, 25);
+    }
+    CHECK_EQ(rl_queue_gather(&Q, buf, sizeof buf, 8, &n), 125);
+    CHECK_EQ(n, 5);
+    for (unsigned i = 0; i < 5; i++)
+        CHECK_EQ(buf[i * 25], 2 * i);
+    rl_queue_pop_gathered(&Q, n);
+    memset(b, 99, sizeof b);
+    rl_queue_push(&Q, 1, b, 25);
+    CHECK_EQ(rl_queue_gather(&Q, buf, sizeof buf, 8, &n), 150);
+    CHECK_EQ(n, 6);
+    for (unsigned i = 0; i < 5; i++)
+        CHECK_EQ(buf[i * 25], 2 * i + 1);
+    CHECK_EQ(buf[125], 99);
+}
+
 TEST(ring)
 {
     static uint8_t buf[16];
@@ -137,6 +240,9 @@ int main(void)
     RUN(drop_oldest_when_full);
     RUN(too_big_and_payload_limits);
     RUN(drop_discard_flush);
+    RUN(gather_batches_one_stream_in_order);
+    RUN(gather_respects_capacity_and_entry_limit);
+    RUN(gather_across_wraparound_and_push_after);
     RUN(ring);
     return TEST_RESULT();
 }

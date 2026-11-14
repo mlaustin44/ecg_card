@@ -58,6 +58,8 @@ static rl_log_t s_log;
 static rl_hr_sel_t s_hr;
 static uint32_t s_unsub;    /* frames/entries for an unsubscribed characteristic */
 static uint32_t s_busy;     /* back-offs: no stack buffer */
+static uint32_t s_batched;  /* blocks that rode in another block's notification */
+static uint8_t s_batch[APP_BATCH_MAX_BYTES];
 static uint32_t s_mtu_big;  /* entries longer than MTU - 3 (also in dropped) */
 static uint32_t s_noti_err; /* other GATT_Notification errors (also in dropped) */
 static uint8_t s_last_err;
@@ -369,6 +371,7 @@ static void ba_pump(void)
         bStatus_t st;
         bool is_log, newline = false;
         const uint8_t *data;
+        unsigned batch;
 
         if (e == NULL)
             return;
@@ -394,6 +397,25 @@ static void ba_pump(void)
                 noti.len = 1;
             }
         }
+        /* ECG and PPG blocks: as many queued blocks as fit go out in one
+         * notification, so the data rate does not depend on the connection
+         * interval the phone picked (link_fmt.h). */
+        batch = 0;
+        if (e->kind == ECS_CHAR_ECG || e->kind == ECS_CHAR_PPG) {
+            uint16_t mtu = ATT_GetMTU(s_conn);
+            size_t cap = mtu > 3u ? (size_t)(mtu - 3u) : 0u;
+            size_t got;
+            if (cap > sizeof s_batch)
+                cap = sizeof s_batch;
+            got = rl_queue_gather(&s_q, s_batch, cap, APP_BATCH_MAX_BLOCKS, &batch);
+            if (batch > 1) {
+                data = s_batch;
+                noti.len = (uint16_t)got;
+                s_batched += batch - 1;
+            } else {
+                batch = 0;
+            }
+        }
         if ((uint16_t)(noti.len + 3u) > ATT_GetMTU(s_conn)) {
             s_mtu_big++;
             if (is_log)
@@ -408,6 +430,10 @@ static void ba_pump(void)
         }
         tmos_memcpy(noti.pValue, data, noti.len);
         st = ba_notify(e->kind, &noti);
+        if (st == SUCCESS && batch) {
+            rl_queue_pop_gathered(&s_q, batch);
+            continue;
+        }
         if (st == SUCCESS) {
             if (newline) {
                 rl_log_tx_sent(&s_log, NULL); /* the entry itself goes next */
@@ -524,10 +550,10 @@ void ble_app_tick(uint32_t now_ms)
     ba_kick();
     if (connected() && (uint32_t)(now_ms - s_last_stats_ms) >= APP_STATS_PERIOD_MS) {
         s_last_stats_ms = now_ms;
-        link_log("ble: sent %u drop %u q %u busy %u unsub %u big %u err %u/0x%02X",
+        link_log("ble: sent %u drop %u q %u busy %u unsub %u big %u err %u/0x%02X bat %u",
                  (unsigned)s_q.sent, (unsigned)s_q.dropped, rl_queue_count(&s_q),
                  (unsigned)s_busy, (unsigned)s_unsub, (unsigned)s_mtu_big,
-                 (unsigned)s_noti_err, s_last_err);
+                 (unsigned)s_noti_err, s_last_err, (unsigned)s_batched);
         if (s_subscribed & LINK_SUB_LOG)
             link_log("ble: log mcu %u drop %u own %u drop %u out %u skip %u",
                      (unsigned)s_log.in_chunks, (unsigned)s_log.in_drops,

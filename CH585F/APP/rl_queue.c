@@ -66,6 +66,55 @@ void rl_queue_discard_head(rl_queue_t *q)
         advance_head(q);
 }
 
+size_t rl_queue_gather(const rl_queue_t *q, uint8_t *buf, size_t cap,
+                       unsigned max_entries, unsigned *entries)
+{
+    const rl_qent_t *h;
+    size_t off = 0;
+    unsigned n = 0, i;
+
+    *entries = 0;
+    if (!q->count)
+        return 0;
+    h = &q->e[q->head];
+    for (i = 0; i < q->count && n < max_entries; i++) {
+        const rl_qent_t *e = &q->e[(q->head + i) & RL_Q_MASK];
+        if (e->kind != h->kind || e->len != h->len)
+            continue;
+        if (off + e->len > cap)
+            break;
+        memcpy(buf + off, e->data, e->len);
+        off += e->len;
+        n++;
+    }
+    *entries = n;
+    return off;
+}
+
+void rl_queue_pop_gathered(rl_queue_t *q, unsigned entries)
+{
+    uint8_t kind, len;
+    unsigned i, w = 0, taken = 0, count = q->count;
+
+    if (!count || !entries)
+        return;
+    kind = q->e[q->head].kind;
+    len = q->e[q->head].len;
+    for (i = 0; i < count; i++) {
+        rl_qent_t *e = &q->e[(q->head + i) & RL_Q_MASK];
+        if (taken < entries && e->kind == kind && e->len == len) {
+            taken++;
+            continue;
+        }
+        if (w != i)
+            q->e[(q->head + w) & RL_Q_MASK] = *e;
+        w++;
+    }
+    /* the survivors now sit at head .. head+w-1 */
+    q->count = (uint16_t)w;
+    q->sent += taken;
+}
+
 unsigned rl_queue_flush(rl_queue_t *q)
 {
     unsigned n = q->count;

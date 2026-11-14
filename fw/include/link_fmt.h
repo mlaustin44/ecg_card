@@ -113,13 +113,17 @@
  *
  * ECG Card service, base d578xxxx-8a28-493a-ad8d-6b741ba09ea7:
  *   service        d5780001-8a28-493a-ad8d-6b741ba09ea7
- *   ECG stream     d5780002-...  notify            STREAM_ECG_BLOCK payload
- *   PPG stream     d5780003-...  notify            STREAM_PPG_BLOCK payload
+ *   ECG stream     d5780002-...  notify            1..8 STREAM_ECG_BLOCK payloads
+ *   PPG stream     d5780003-...  notify            1..8 STREAM_PPG_BLOCK payloads
  *   Events         d5780004-...  notify            STREAM_EVENT payload
  *   Status         d5780005-...  read, notify      LINK_STATUS payload
  *   Control        d5780006-...  write (with response)  LINK_CMD payload
  *   Log            d5780007-...  notify            device log text (UTF-8,
  *                                                  STREAM_LOG chunks, <= 32 B)
+ * An ECG or PPG notification carries whole blocks back to back, oldest
+ * first (length = n * 25 or n * 15 bytes, n limited by ATT_MTU - 3): the
+ * radio sends every block it has queued for that stream at once, so the
+ * streams keep up at any connection interval. Clients split by block size.
  * A Control write is accepted at ATT level if it is 1..16 bytes; the command
  * result arrives on Events as STREAM_EV_CMD_RESULT.
  * Log is optional for clients (radio firmware before it has no 0x0007). It

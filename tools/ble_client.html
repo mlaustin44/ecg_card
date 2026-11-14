@@ -570,7 +570,8 @@ const Codec = (() => {
   // SET_TIME limits (link_fmt.h clarifications): refused with BAD_ARG outside these
   const TIME_MIN_UNIX = 1704067200;                  // 2024-01-01T00:00:00Z
   const UTC_OFF_MIN = -720, UTC_OFF_MAX = 840;
-  const NOTIFY_MAX_LEN = 32;                         // notification payloads are at most 32 bytes
+  const NOTIFY_MAX_LEN = 32;                         // one block / event / status / log chunk is at most 32 bytes
+  const STREAM_MAX_LEN = 244;                        // ECG / PPG notifications carry several blocks (ATT_MTU 247)
   /** null if the device would accept SET_TIME with these arguments, else the reason. */
   function setTimeProblem(unixSeconds, offMin) {
     if (!(unixSeconds >= TIME_MIN_UNIX)) return "clock is before 2024-01-01 (device would answer BAD_ARG)";
@@ -587,6 +588,15 @@ const Codec = (() => {
 
   // ---- parsers. Each validates the length first and returns null on success or an error string.
   // They write into caller-owned objects so the hot path does not allocate.
+  /** An ECG or PPG notification holds 1..n whole blocks back to back (link_fmt.h). Calls
+   *  fn(DataView of one block) for each; returns an error string when the length is not n * len. */
+  function eachBlock(dv, len, fn) {
+    const n = dv.byteLength / len;
+    if (n < 1 || n !== Math.floor(n)) return `payload ${dv.byteLength} B is not a multiple of ${len}`;
+    if (n === 1) { fn(dv); return null; }
+    for (let i = 0; i < n; i++) fn(new DataView(dv.buffer, dv.byteOffset + i * len, len));
+    return null;
+  }
   function newEcgBlock() { return { start: 0, flags: 0, s: new Int16Array(ECG_SAMPLES) }; }
   function parseEcg(dv, out) {
     if (dv.byteLength !== ECG_LEN) return `ECG payload ${dv.byteLength} B, expected ${ECG_LEN}`;
@@ -1036,7 +1046,7 @@ const Codec = (() => {
     UV_PER_CODE, GAIN_LO, GAIN_HI, NA_PER_COARSE, NA_PER_FINE, LED_UA_PER_CODE, ecgGain, ecgUvPerUnit,
     EV, EV_LEN, EV_NAME, PROTO_VERSION, ST, CMD, CMD_NAME, RES_NAME, RES_TEXT, MODE_NAME, MEAS_NAME, SETTINGS, settingText,
     SET_ITEM_BLE, BLE_OFF, TIME_MIN_UNIX, UTC_OFF_MIN, UTC_OFF_MAX, NOTIFY_MAX_LEN, setTimeProblem, nameSuffixOfAddress,
-    newEcgBlock, parseEcg, newPpgBlock, parsePpg, newEvent, parseEvent, eventFields, describeEvent,
+    eachBlock, STREAM_MAX_LEN, newEcgBlock, parseEcg, newPpgBlock, parsePpg, newEvent, parseEvent, eventFields, describeEvent,
     parseStatus, statusFlagsText, parseHrm, parseBattery,
     cmdStart, cmdStop, cmdSet, cmdSetTime, cmdGetStatus, nowSetTimeArgs, describeCommand,
     encodeEcg, encodePpg, encodeEvent, encodeStatus, encodeHrm,
@@ -1541,12 +1551,12 @@ const hooks = { onStatus: null, onCmdResult: null, onEvent: null };
 function onNotify(ch, dv, tRx) {
   const st = S.chars[ch];
   if (st) { st.n++; st.bytes += dv.byteLength; st.lastRx = tRx; }
-  if (dv.byteLength > C.NOTIFY_MAX_LEN) Log.add("error", `${C.CHAR_NAME[ch] || ch}: ${dv.byteLength} B notification exceeds the ${C.NOTIFY_MAX_LEN}-byte maximum`);
+  if (dv.byteLength > (ch === C.CHAR.ECG || ch === C.CHAR.PPG ? C.STREAM_MAX_LEN : C.NOTIFY_MAX_LEN)) Log.add("error", `${C.CHAR_NAME[ch] || ch}: ${dv.byteLength} B notification exceeds the maximum`);
   if (Recorder.on) Recorder.add(ch, new Uint8Array(dv.buffer, dv.byteOffset, dv.byteLength), tRx);
   try {
     switch (ch) {
-      case C.CHAR.ECG: { const e = C.parseEcg(dv, blkE); if (e) return bad(ch, e, dv); ingestEcg(blkE, tRx); break; }
-      case C.CHAR.PPG: { const e = C.parsePpg(dv, blkP); if (e) return bad(ch, e, dv); ingestPpg(blkP, tRx); break; }
+      case C.CHAR.ECG: { const e = C.eachBlock(dv, C.ECG_LEN, (b) => { C.parseEcg(b, blkE); ingestEcg(blkE, tRx); }); if (e) return bad(ch, "ECG " + e, dv); break; }
+      case C.CHAR.PPG: { const e = C.eachBlock(dv, C.PPG_LEN, (b) => { C.parsePpg(b, blkP); ingestPpg(blkP, tRx); }); if (e) return bad(ch, "PPG " + e, dv); break; }
       case C.CHAR.EVENTS: { const e = C.parseEvent(dv, evt); if (e) return bad(ch, e, dv); ingestEvent(evt, dv, tRx); break; }
       case C.CHAR.STATUS: {
         const s = C.parseStatus(dv); if (s.err) return bad(ch, s.err, dv);
@@ -2717,18 +2727,20 @@ function exportCsv() {
   const q = (s) => '"' + s.replace(/"/g, '""') + '"';
   Recorder.each((ch, tMs, p) => {
     const dv = new DataView(p.buffer, p.byteOffset, p.byteLength);
-    if (ch === C.CHAR.ECG && !C.parseEcg(dv, be)) {
+    if (ch === C.CHAR.ECG) C.eachBlock(dv, C.ECG_LEN, (b) => {
+      C.parseEcg(b, be);
       if (ce.push(be.start, 10) === C.CONT.NEWRUN) runE++;
       const k = C.ecgUvPerUnit(be.flags), f = be.flags;
       for (let i = 0; i < 10; i++) { const u = ce.uStart + i; rows.push(`${u},${C.ecgTime(u).toFixed(4)},${(be.s[i] * k).toFixed(2)},${f},${f & 1},${(f >> 1) & 1},${(f >> 2) & 1},${runE}\n`); }
       out.nE += 10; now = Math.max(now, C.ecgTime(ce.uStart + 10));
       if (rows.length > 20000) flush(out.ecg);
-    }
+    });
   });
   flush(out.ecg);
   Recorder.each((ch, tMs, p) => {
     const dv = new DataView(p.buffer, p.byteOffset, p.byteLength);
-    if (ch === C.CHAR.PPG && !C.parsePpg(dv, bp)) {
+    if (ch === C.CHAR.PPG) C.eachBlock(dv, C.PPG_LEN, (b) => {
+      C.parsePpg(b, bp);
       const kind = cp.push(bp.start, 2);
       if (kind === C.CONT.NEWRUN) { runP++; uw.reset(); }
       for (let j = 0; j < 2; j++) {
@@ -2737,15 +2749,15 @@ function exportCsv() {
       }
       out.nP += 2;
       if (rows.length > 20000) flush(out.ppg);
-    }
+    });
   });
   flush(out.ppg);
   const ce2 = new C.Continuity(C.ECG_HZ * 2), cp2 = new C.Continuity(C.PPG_HZ * 2);
   now = 0;
   Recorder.each((ch, tMs, p) => {
     const dv = new DataView(p.buffer, p.byteOffset, p.byteLength);
-    if (ch === C.CHAR.ECG && !C.parseEcg(dv, be)) { ce2.push(be.start, 10); now = C.ecgTime(ce2.uNext - 1); return; }
-    if (ch === C.CHAR.PPG && !C.parsePpg(dv, bp)) { cp2.push(bp.start, 2); now = C.ppgTime(cp2.uNext - 1); return; }
+    if (ch === C.CHAR.ECG) { C.eachBlock(dv, C.ECG_LEN, (b) => { C.parseEcg(b, be); ce2.push(be.start, 10); now = C.ecgTime(ce2.uNext - 1); }); return; }
+    if (ch === C.CHAR.PPG) { C.eachBlock(dv, C.PPG_LEN, (b) => { C.parsePpg(b, bp); cp2.push(bp.start, 2); now = C.ppgTime(cp2.uNext - 1); }); return; }
     let kind, fields, tt = now.toFixed(4);
     if (ch === C.CHAR.EVENTS) {
       if (C.parseEvent(dv, ev)) { kind = "malformed"; fields = { hex: C.hex(dv) }; }

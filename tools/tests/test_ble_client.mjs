@@ -54,6 +54,28 @@ test("ECG block: layout and uV scaling at both gains", () => {
   assert.equal(start.start, 0xffffffff);
 });
 
+test("eachBlock splits a batched notification and rejects partial blocks", () => {
+  const mk = (start) => bytes(le32(start), 0x01, Array.from({ length: 10 }, (_, i) => le16(start + i)));
+  const raw = bytes(...[100, 110, 120, 130].map((v) => Array.from(mk(v))));
+  // at a non-zero byteOffset, as a notification inside a larger buffer would be
+  const padded = new Uint8Array(raw.length + 3); padded.set(raw, 3);
+  const view = new DataView(padded.buffer, 3, raw.length);
+  const blk = C.newEcgBlock(), seen = [];
+  assert.equal(C.eachBlock(view, C.ECG_LEN, (b) => { assert.equal(C.parseEcg(b, blk), null); seen.push([blk.start, blk.s[9]]); }), null);
+  assert.deepEqual(seen, [[100, 109], [110, 119], [120, 129], [130, 139]]);
+  let n = 0;
+  assert.equal(C.eachBlock(dv(mk(7)), C.ECG_LEN, () => n++), null);
+  assert.equal(n, 1);
+  for (const len of [0, 24, 26, 49, 51]) {
+    n = 0;
+    assert.ok(C.eachBlock(dv(new Uint8Array(len)), C.ECG_LEN, () => n++), `length ${len}`);
+    assert.equal(n, 0);
+  }
+  n = 0;
+  assert.equal(C.eachBlock(dv(new Uint8Array(8 * C.PPG_LEN)), C.PPG_LEN, () => n++), null);
+  assert.equal(n, 8);
+});
+
 test("length validation rejects every wrong size", () => {
   const e = C.newEcgBlock(), p = C.newPpgBlock(), ev = C.newEvent();
   for (const n of [0, 1, 24, 26, 244]) assert.match(C.parseEcg(dv(new Uint8Array(n)), e), /ECG payload/);
