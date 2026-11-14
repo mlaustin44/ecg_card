@@ -130,6 +130,8 @@ static struct {
     uint32_t nocontact_ms;  /* since when there is no contact (with a heartbeat) */
     bool ever_running;
     bool start_logged;      /* VMID self-check result logged for this session */
+    uint32_t acq_on_ms;     /* hal_millis() when the acquisition was first seen ON */
+    uint32_t end_n, end_ms; /* ECG stream samples and ms since acq_on_ms at the session end */
     uint8_t log_state;      /* session state last logged (ecg / ppg token) */
     uint32_t log_ms;        /* last evidence line */
     const char *fault_text;
@@ -432,6 +434,10 @@ static void log_session_end(end_t why)
     log_u(a->pat_avg_ms);
     log_s(" lost=");
     log_u(a->ecg_lost + a->ppg_lost);
+    log_s(" n=");
+    log_u(S.end_n);
+    log_s(" ms=");
+    log_u(S.end_ms);
     if (a->ecg_resyncs || a->ppg_resyncs || hal_acq_resyncs()) {
         log_s(" resync=");
         log_u((uint32_t)a->ecg_resyncs + a->ppg_resyncs + hal_acq_resyncs());
@@ -444,6 +450,10 @@ static void log_session_end(end_t why)
 static bool end_session(end_t why)
 {
     bool was_active = S.ses == SES_ACTIVE;
+    /* timeline check for the log: ECG stream samples against the millisecond
+     * clock (same oscillator), expected 1 sample per 2 ms */
+    S.end_n = acq_status()->ecg_samples;
+    S.end_ms = S.start_logged ? hal_millis() - S.acq_on_ms : 0u;
     acq_stop(); /* stop sequence; also a no-op safety net when idle */
     if (!was_active) {
         S.ses = SES_NONE;
@@ -694,6 +704,7 @@ static void session_update(void)
         /* VMID self-check value on RTT at every start (ECG_VMID_TOL_MV is
          * checked in acq.c; a bring-up board can be judged from the log) */
         S.start_logged = true;
+        S.acq_on_ms = hal_millis();
         if (mode_has_ecg(S.mode)) {
             log_begin("session");
             log_s(" vmid=");

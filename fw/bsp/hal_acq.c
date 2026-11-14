@@ -41,9 +41,10 @@
  * enabled, so the ring is circular in hardware.
  * The one software duty: the ADC clears its own CTL2.DMAEN when it sees the
  * DMA "done" at each lap end (hw_adc12.h: "Software has to re-enable DMAEN").
- * The ADC0 DMA_DONE interrupt (priority 0) re-enables it; the deadline is the
- * next conversion, 250 us later, once per 128 ms. A sample that lands while
- * DMAEN is off is detected (MEMRESIFG0 still set) and counted as lost.
+ * The ADC0 DMA_DONE interrupt (priority 0) re-enables it within the 250 us
+ * to the next result. A result stranded by a late ISR is overwritten by the
+ * next conversion and counted as lost through the OVERFLOW interrupt
+ * (MEMRESIFG0 at the lap end is not usable: it is always set on the board).
  * The ISR also counts laps; the reader derives the total number of samples
  * written as laps * 512 + (512 - DMASZ), cross-checked against DMADA (see
  * ecg_written() and bsp_ring.h, which holds all of the index arithmetic as
@@ -357,16 +358,16 @@ void ADC0_IRQHandler(void)
            ADC12_CPU_INT_IIDX_STAT_NO_INTR) {
         if (iidx == (uint32_t) DL_ADC12_IIDX_DMA_DONE) {
             /* The DMA ring just wrapped (DMADA is back at s_ecg_ring) and the
-             * ADC cleared DMAEN. A result that arrived since then is still
-             * in MEMRES0 (flag set) and will never be moved: it is lost, just
-             * before the new lap's first sample. Reading MEMRES0 clears
-             * MEMRESIFG0. Then re-arm DMAEN. */
-            uint32_t lost = 0u;
-            if (DL_ADC12_getRawInterruptStatus(ADC0, DL_ADC12_INTERRUPT_MEM0_RESULT_LOADED)) {
-                (void) DL_ADC12_getMemResult(ADC0, DL_ADC12_MEM_IDX_0);
-                lost = 1u;
-            }
-            bsp_ring_skew_lap_end(&s_er, s_ecg_laps, lost);
+             * ADC cleared DMAEN: re-arm it. This runs within microseconds of
+             * the lap's last transfer, 250 us before the next result.
+             * MEMRESIFG0 is NOT a sign of a stranded result here: on the
+             * board it is set at every lap end (a DMA read of MEMRES0 does
+             * not clear the raw flag), and counting it made the timeline run
+             * 513/512 fast. It is cleared and ignored; a result that really
+             * is stranded by a late ISR is overwritten by the next conversion
+             * and counted by the OVERFLOW branch below. */
+            DL_ADC12_clearInterruptStatus(ADC0, DL_ADC12_INTERRUPT_MEM0_RESULT_LOADED);
+            bsp_ring_skew_lap_end(&s_er, s_ecg_laps, 0u);
             DL_ADC12_enableDMA(ADC0);
             s_ecg_laps++;
         } else if (iidx == (uint32_t) DL_ADC12_IIDX_OVERFLOW) {

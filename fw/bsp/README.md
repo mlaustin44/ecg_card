@@ -82,8 +82,10 @@ back) and returns only on a real wake source or the timed deadline
    per trigger. Expect exactly 4000 samples/s (if 1000/s, averaging needs a
    trigger per conversion).
 3. **ECG DMA ring**: ADC clears DMAEN at each DMA lap in repeat mode and the
-   ISR re-arms it; DMA reads of MEMRES0 clear MEMRESIFG0 (otherwise every lap
-   / every sample counts as "lost" — visible as a steady `hal_ecg_overruns()`).
+   ISR re-arms it; on the board MEMRESIFG0 is set at every lap end
+   even though no sample is lost (a DMA read does not clear the raw flag), so
+   the ISR clears and ignores it; real losses come from the OVERFLOW interrupt.
+   Check: `session: end ... n=<samples> ms=<ms>` must give n = ms / 2.
    The write position is taken from DMASZ (the TRM documents it as
    decremented per transfer) and cross-checked against DMADA, which the TRM
    only describes as copied to a temporary register in the repeated modes

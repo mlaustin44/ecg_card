@@ -100,7 +100,7 @@
                        notification that completed the line; local_time "YYYY-MM-DD HH:MM:SS.mmm");
                        client notes appear as "# note: ..." in the line column.
   "Save session" (top bar) needs no recording: one .txt with device, status, counters, the event
-  log and device log merged in time order (oldest first; evt / dev / rad), and the last 10 s of
+  log and device log merged in time order (oldest first; evt / dev / rad), and the last 120 s of
   ECG and PPG samples.
   The Device log panel's Copy / Download .txt give "<local_time>  <line>" for the collected lines
   that match its filter (all lines when the filter is empty).
@@ -349,7 +349,7 @@ ol.list li.cmd .c { color: var(--accent); }
     <button id="btnReconnect" disabled title="Reconnect to the same device without a new scan">Reconnect</button>
     <button id="btnDisconnect" disabled>Disconnect</button>
     <button id="btnDemo" title="Simulated device in the exact wire format (also ?demo=1)">Demo</button>
-    <button id="btnDump" title="Download everything this page holds as one text file: device, status, counters, event log and device log merged in time order, and the last 10 s of samples. No Record needed.">Save session</button>
+    <button id="btnDump" title="Download everything this page holds as one text file: device, status, counters, event log and device log merged in time order, and the last 2 minutes of samples. No Record needed.">Save session</button>
     <select id="selTheme" aria-label="Theme" title="Colour theme">
       <option value="auto">Theme: system</option><option value="light">Light</option><option value="dark">Dark</option>
     </select>
@@ -2670,7 +2670,7 @@ function baseName() {
 }
 /** One text file with everything in memory, for pasting into a bug report: no Record needed.
  *  Sections: header, device, counters, timeline (event log "evt" and device log "dev"/"rad"
- *  merged, oldest first), then the last 10 s of ECG and PPG samples. */
+ *  merged, oldest first), then the last 120 s of ECG and PPG samples. */
 function sessionDump() {
   const tr = App.tr, o = [], kv = (k, v) => o.push(`${k}: ${v}\n`);
   o.push("# ECG Card session dump\n");
@@ -2695,10 +2695,10 @@ function sessionDump() {
   o.push(`\n## Timeline (${Log.entries.length} events, ${DevLog.entries.length} device log lines, oldest first)\n`);
   for (const t of tl) o.push(`${clock(t[0])} ${t[3]}\n`);
   const tail = (title, ring, hz, row) => {
-    const hi = ring.empty ? 0 : ring.hi, lo = Math.max(ring.oldest(), hi - 10 * hz);
+    const hi = ring.empty ? 0 : ring.hi, lo = Math.max(ring.oldest(), hi - 120 * hz);
     let n = 0; const rows = [];
     for (let u = lo; u < hi; u++) if (ring.has(u)) { rows.push(row(u, u & ring.mask)); n++; }
-    o.push(`\n## ${title}: last 10 s, ${n} of ${hi - lo} present (missing indices are gaps)\n`, rows.join(""));
+    o.push(`\n## ${title}: last 120 s, ${n} of ${hi - lo} present (missing indices are gaps)\n`, rows.join(""));
   };
   tail("ECG index,uV,flags", S.ecg, C.ECG_HZ, (u, i) => `${u},${Math.round(S.ecg.val[i])},${S.ecg.fl[i]}\n`);
   tail("PPG frame,coarse,fine_nA,led_code,flags", S.ppg, C.PPG_HZ, (u, i) => `${u},${Math.round(S.ppg.coarse[i])},${Math.round(S.ppg.val[i])},${S.ppg.led[i]},${S.ppg.fl[i]}\n`);
