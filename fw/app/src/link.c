@@ -7,12 +7,30 @@
 
 static uint8_t s_seq;
 static uint32_t s_frames, s_drops;
+static uint32_t s_est, s_est_ms; /* TX backlog estimate (bytes) and when it was aged */
 
-void link_init(void) { s_seq = 0; s_frames = s_drops = 0; }
-void link_tx_reset(void) { s_seq = 0; }
+void link_init(void) { s_seq = 0; s_frames = s_drops = 0; s_est = 0; }
+void link_tx_reset(void) { s_seq = 0; s_est = 0; }
 uint8_t link_tx_last_seq(void) { return (uint8_t)(s_seq - 1u); }
 uint32_t link_tx_frames(void) { return s_frames; }
 uint32_t link_tx_drops(void) { return s_drops; }
+
+/* Take off what the line can have sent since the last call. */
+static void est_age(void)
+{
+    uint32_t now = hal_millis(), dt = now - s_est_ms;
+    s_est_ms = now;
+    if (dt >= HAL_UART_TX_RING / LINK_TX_DRAIN_PER_MS + 1u)
+        s_est = 0;
+    else
+        s_est = s_est > dt * LINK_TX_DRAIN_PER_MS ? s_est - dt * LINK_TX_DRAIN_PER_MS : 0u;
+}
+
+uint32_t link_tx_backlog(void)
+{
+    est_age();
+    return s_est;
+}
 
 bool link_send(uint8_t type, const uint8_t *payload, size_t len)
 {
@@ -21,10 +39,13 @@ bool link_send(uint8_t type, const uint8_t *payload, size_t len)
     if (n == 0)
         return false;
     s_seq++;
+    est_age();
     if (!hal_radio_powered() || hal_uart_write(wire, n) != n) {
         s_drops++;
+        s_est = HAL_UART_TX_RING; /* it is full: assume so until it can have drained */
         return false;
     }
+    s_est = s_est + n < HAL_UART_TX_RING ? s_est + (uint32_t)n : HAL_UART_TX_RING;
     s_frames++;
     return true;
 }

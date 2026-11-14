@@ -439,7 +439,10 @@ sim_rt_t sim_radio_trace_get(size_t i, uint64_t *t_us);
  * OK without restarting the schedule; extra bytes on an argument-less op ->
  * BAD_ARG; SET_INFO text kept to 20 bytes; mtu 0 when not connected; after
  * a disconnect it advertises (fast) again by itself unless the last
- * advertising command was ADV_STOP. */
+ * advertising command was ADV_STOP. STREAM_LOG from the MCU goes to the
+ * phone's Log text (sim_phone_log_text) while subscribed with LINK_SUB_LOG
+ * (else it counts as unsolicited); payloads > 32 bytes count as
+ * oversize_notify. */
 typedef struct {
     bool present;            /* false: never sends anything (dead / unflashed radio) */
     uint32_t hello_delay_ms; /* power-up to HELLO, default 20 */
@@ -473,6 +476,7 @@ typedef struct {
     uint32_t oversize_notify;              /* ECG / PPG / EVENT payloads > 32 bytes (CH585 limit) */
     uint32_t after_shutdown;               /* frames received after the SHUTDOWN */
     uint32_t status_frames;
+    uint32_t log_frames, log_bytes;        /* STREAM_LOG (device log tee), any subscription */
     uint8_t last_status[LINK_STATUS_LEN];
     char mcu_info[40];                     /* LINK_RC_SET_INFO text */
     /* shutdown checks */
@@ -484,7 +488,15 @@ typedef struct {
 } sim_radio_info_t;
 const sim_radio_info_t *sim_radio_info(void);
 
-/* Frames the MCU sent (all types except ECG / PPG blocks), last 128. */
+/* Device log (Log characteristic): STREAM_LOG payloads the MCU sent while
+ * the phone was subscribed with LINK_SUB_LOG (others count as unsolicited),
+ * concatenated, plus the fake radio's own sim_radio_log() lines as
+ * "radio: <text>\n" (only at an MCU line boundary, as the CH585 does).
+ * NUL-terminated; cleared by sim_reset() and sim_phone_log_clear(). */
+const char *sim_phone_log_text(size_t *len);
+void sim_phone_log_clear(void);
+
+/* Frames the MCU sent (all types except ECG / PPG blocks and STREAM_LOG), last 128. */
 typedef struct {
     uint64_t t_us;
     uint8_t type, seq;

@@ -9,7 +9,7 @@ byte-identical copies live in `APP/include/` and a host test checks them.
 | Folder | What | Origin |
 | --- | --- | --- |
 | `APP/` | application: `main.c`, `ble_app.c` (GAP/GATT, notification queue), `link_mgr.c` (link protocol), `uart_link.c` (UART1 driver), `radio_board.c` (pins, watchdog) | ours |
-| `APP/rl_*.c`, `APP/include/rl_*.h` | portable logic with no WCH headers: COBS/CRC framing, frame parser, message builders/parsers, notification queue, log formatter, advertising data. Tested on the host by `host/radio_tests/` | ours |
+| `APP/rl_*.c`, `APP/include/rl_*.h` | portable logic with no WCH headers: COBS/CRC framing, frame parser, message builders/parsers, notification queue, device-log gate (`rl_log.c`), log formatter, advertising data. Tested on the host by `host/radio_tests/` | ours |
 | `Profile/` | GATT services: ECG Card (custom), Device Information, Battery, Heart Rate | ours, in the style of WCH's profiles |
 | `HAL/` | `MCU.c`, `RTC.c`, `SLEEP.c` (+ `KEY.c`, `LED.c`, excluded from the build) | WCH EVT `BLE/HAL`, unmodified |
 | `LIB/` | `libCH58xBLE.a`, `CH58xBLE_LIB.h`, `ble_task_scheduler.S` | WCH EVT `BLE/LIB`, unmodified |
@@ -30,7 +30,7 @@ constants (version, advertising and connection timing, watchdog) are in
    Open Project / load `.project` (MRS 2.x); select this `CH585F` folder.
    The toolchain is GCC12 (`.cproject`: RISC-V Compiler = GCC12).
 2. Build (hammer). Output: `obj/CH585F.hex` and `.elf`. Expect about
-   157 KB flash and 44 KB RAM (static; the stack uses the rest of the 128 KB).
+   159 KB flash and 44 KB RAM (static; the stack uses the rest of the 128 KB).
 3. Program with a WCH-LinkE on J3 (TC2030 pad: `RADIO_VCC`, `CH1_SWDIO`
    PB14, `CH1_SWCLK` PB15, GND), 2-wire mode:
    - The radio must be powered **by the card**: the MSPM0 has to hold
@@ -81,6 +81,22 @@ disconnect / parameter / MTU / PHY events, and every 10 s while connected
 `ble: sent .. drop .. q .. busy ..`. Link error counters
 (`link: rx .. crc .. cobs ..`, `link: uart ovr .. fe ..`) are logged every
 10 s when one of them has changed.
+
+### Device log over BLE (Log characteristic)
+
+The ECG Card service has a Log characteristic (`d5780007-...`, notify,
+UTF-8 text in chunks of at most 32 bytes, appended after Control so the
+older handles did not move). While a phone enables it, the MCU tees its RTT
+channel 0 text to the radio as STREAM_LOG chunks and the radio forwards them
+as Log notifications; the radio also puts its own lines there, as
+`radio: <text>`. `tools/ble_client.html` shows them in its Device log panel
+and parses the `ecg:` / `ppg:` evidence lines, so the card can be debugged
+without the J-Link attached. Log has the lowest priority in the notification
+queue (`rl_log.c`): a line is only started while the queue is at most half
+full, a line is dropped whole or from the point it was cut (a cut line is
+ended with `\n`, a tail is never sent without its start), and it never makes
+the queue evict data. Its counters are logged every 10 s while subscribed:
+`ble: log mcu <queued> drop <n> own <lines> drop <n> out <sent> skip <n>`.
 
 ## Only verifiable on hardware
 

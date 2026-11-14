@@ -86,6 +86,7 @@ void link_log(const char *fmt, ...)
     n = rl_vfmt(buf, sizeof buf, fmt, ap);
     va_end(ap);
     link_send(STREAM_LOG, (const uint8_t *)buf, n);
+    ble_app_log_own(buf, n); /* the phone's Log, if enabled */
 }
 
 void link_send_cmd(const uint8_t *p, size_t n)
@@ -199,7 +200,9 @@ static void lm_handle_frame(const rl_frame_t *f)
         lm_radio_ctrl(f);
         break;
     case STREAM_LOG:
+        /* the MCU's device log tee: to Log (or dropped) */
         s_rx_logs++;
+        ble_app_log_mcu(f->seq, f->payload, f->len);
         break;
     default:
         s_rx_unknown++;

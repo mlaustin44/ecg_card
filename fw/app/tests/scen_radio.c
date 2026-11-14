@@ -2,7 +2,9 @@
  * power-up / HELLO / advertising with the pin order checked by the
  * simulator's invariants (ABORT mode), HELLO faults, streaming to a phone,
  * phone commands and every refusal, timeouts, BLE Off, STANDBY handshake,
- * corrupted input, TX backlog and program mode. */
+ * corrupted input, TX backlog, program mode and the device log over BLE. */
+#define _GNU_SOURCE /* memmem */
+#include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -207,17 +209,22 @@ TEST(hello_missing_retry_fault)
  * contiguous blocks at 50 / s each reach the radio; the RTT stream is the
  * same as without a phone. */
 /* The same BOTH session on a fixed timeline; returns a copy of the RTT
- * stream (caller frees). */
-static uint8_t *both_session_fixed(bool phone_on, size_t *n)
+ * stream (caller frees). subs 0: no phone. radio_line: the radio logs it
+ * 12.3 s after the start press (NULL: nothing). */
+static void radio_line_cb(void *ctx) { sim_radio_log((const char *)ctx); }
+
+static uint8_t *both_session_subs(uint8_t subs, const char *radio_line, size_t *n)
 {
     scen_boot(false);
     testsrc_cfg_t tc = testsrc_defaults();
     testsrc_install(&tc);
     scen_run_until(1000);
     CHECK(advertising());
-    if (phone_on)
-        CHECK(sim_phone_connect(247, 16, SUB_ALL));
+    if (subs)
+        CHECK(sim_phone_connect(247, 16, subs));
     scen_run_until(1100);
+    if (radio_line)
+        sim_at(sim_now_ms() + 12300, radio_line_cb, (void *)(uintptr_t)radio_line);
     for (int i = 0; i < 3; i++)
         scen_tap(2);
     CHECK_EQ(scen_screen(), UI_SCREEN_BOTH_CARD);
@@ -239,6 +246,11 @@ static uint8_t *both_session_fixed(bool phone_on, size_t *n)
         memcpy(copy, d, len);
     *n = len;
     return copy;
+}
+
+static uint8_t *both_session_fixed(bool phone_on, size_t *n)
+{
+    return both_session_subs(phone_on ? SUB_ALL : 0u, NULL, n);
 }
 
 TEST(streaming_both)
@@ -850,6 +862,270 @@ TEST(phone_keeps_awake_and_radio_reset)
     end_checks();
 }
 
+/* ---- device log over BLE (Log characteristic) ------------------------------ */
+
+typedef struct {
+    const char *p;
+    size_t n;
+} span_t;
+
+/* Lines of t (without '\n'), empty ones skipped; with no_radio also those
+ * the MCU printed for the radio ("[t] radio: ..."). Caller frees. */
+static span_t *split_lines(const char *t, bool no_radio, size_t *count)
+{
+    size_t cap = 16, n = 0;
+    span_t *v = malloc(cap * sizeof *v);
+    while (v && *t) {
+        const char *e = strchr(t, '\n');
+        size_t len = e ? (size_t)(e - t) : strlen(t);
+        bool radio = no_radio && memmem(t, len, "] radio: ", 9) != NULL;
+        if (len && !radio) {
+            if (n == cap) {
+                cap *= 2;
+                span_t *nv = realloc(v, cap * sizeof *v);
+                if (!nv)
+                    break;
+                v = nv;
+            }
+            v[n++] = (span_t){t, len};
+        }
+        t += len + (e ? 1u : 0u);
+    }
+    *count = n;
+    return v;
+}
+
+typedef struct {
+    bool ok;            /* every phone line is an RTT line (or a head of one), in order */
+    size_t matched;     /* phone lines equal to an RTT line */
+    size_t heads;       /* phone lines that are the start of an RTT line (cut short) */
+    size_t radio;       /* "radio: " lines (the radio's own) */
+    size_t skipped;     /* RTT lines missing on the phone, between its first and last */
+    size_t after;       /* RTT lines after the phone's last line */
+} mirror_t;
+
+/* Compare what the phone got on Log with RTT channel 0. */
+static mirror_t log_mirror(const char *rtt, const char *phone, bool heads_ok)
+{
+    mirror_t m = {true, 0, 0, 0, 0, 0};
+    size_t nr, np;
+    span_t *r = split_lines(rtt, true, &nr), *ph = split_lines(phone, false, &np);
+    size_t j = 0;
+    bool started = false;
+    for (size_t i = 0; i < np && r && ph; i++) {
+        span_t q = ph[i];
+        if (q.n >= 7 && memcmp(q.p, "radio: ", 7) == 0) {
+            m.radio++;
+            continue;
+        }
+        size_t k = j;
+        bool head = false;
+        for (; k < nr; k++) {
+            if (r[k].n == q.n && memcmp(r[k].p, q.p, q.n) == 0)
+                break;
+            if (heads_ok && q.n < r[k].n && memcmp(r[k].p, q.p, q.n) == 0) {
+                head = true;
+                break;
+            }
+        }
+        if (k == nr) {
+            printf("  phone line not on RTT (or out of order): \"%.*s\"\n", (int)q.n, q.p);
+            m.ok = false;
+            break;
+        }
+        if (started)
+            m.skipped += k - j;
+        started = true;
+        if (head)
+            m.heads++;
+        else
+            m.matched++;
+        j = k + 1;
+    }
+    m.after = nr - j;
+    free(r);
+    free(ph);
+    return m;
+}
+
+static size_t count_str(const char *hay, const char *needle)
+{
+    size_t n = 0;
+    for (const char *q = hay; (q = strstr(q, needle)) != NULL; q += strlen(needle))
+        n++;
+    return n;
+}
+
+static void replace_all(char *t, const char *from, const char *to)
+{
+    size_t n = strlen(from);
+    for (char *q = t; (q = strstr(q, from)) != NULL; q += n)
+        memcpy(q, to, n); /* same length */
+}
+
+/* The fixed BOTH session with a phone subscribed to everything, without and
+ * with Log: RTT (text and stream) is identical apart from the subscription
+ * value in the "connected" line, the phone gets the same blocks, and the Log
+ * text equals the RTT text from the connection on (minus the radio's lines,
+ * which the radio tees itself). Unsubscribed: no STREAM_LOG at all. */
+TEST(device_log_mirror)
+{
+    static const char radio_line[] = "ble: sent 1234 drop 0 q 3 busy 0 (test)";
+    const uint8_t sub_log = SUB_ALL | LINK_SUB_LOG;
+    size_t n0, n1;
+    uint8_t *bin0 = both_session_subs(SUB_ALL, radio_line, &n0);
+    char *txt0 = strdup(sim_log_text());
+    sim_radio_info_t ri0 = *sim_radio_info();
+    CHECK_EQ(ri0.log_frames, 0); /* no subscription, no STREAM_LOG frames */
+    CHECK_EQ(ri0.by_type[STREAM_LOG], 0);
+    CHECK_EQ(sim_phone_log_text(NULL)[0], 0);
+    CHECK_EQ(radio_info()->log_lines + radio_info()->log_drops, 0);
+
+    uint8_t *bin1 = both_session_subs(sub_log, radio_line, &n1);
+    char *txt1 = strdup(sim_log_text());
+    const sim_radio_info_t *ri1 = sim_radio_info();
+    const radio_info_t *mi = radio_info();
+    /* RTT: the stream byte for byte, the text but for "sub 0x3F" */
+    CHECK(bin0 && bin1 && n0 > 50000 && n1 == n0 && memcmp(bin0, bin1, n0) == 0);
+    CHECK(txt0 && txt1);
+    if (txt0 && txt1) {
+        CHECK_EQ(count_str(txt1, "sub 0x3F"), 1);
+        replace_all(txt1, "sub 0x3F", "sub 0x1F");
+        CHECK(strcmp(txt0, txt1) == 0);
+    }
+    /* block delivery unchanged while the log flows */
+    CHECK_EQ(ri1->ecg_blocks, ri0.ecg_blocks);
+    CHECK_EQ(ri1->ppg_blocks, ri0.ppg_blocks);
+    CHECK_EQ(ri1->events, ri0.events);
+    CHECK_EQ(ri1->status_frames, ri0.status_frames);
+    CHECK_EQ(ri1->ecg_gaps + ri1->ppg_gaps + ri1->seq_gaps + ri1->crc_errors, 0);
+    CHECK_EQ(ri1->unsolicited, 0);
+    CHECK_EQ(ri1->oversize_notify, 0); /* every chunk <= 32 bytes */
+    CHECK_EQ(mi->data_drops, 0);
+    CHECK_EQ(link_tx_drops(), 0);
+    CHECK(scen.max_step_acq_us <= 20000);
+    /* the Log text */
+    size_t plen;
+    const char *ph = sim_phone_log_text(&plen);
+    mirror_t m = log_mirror(sim_log_text(), ph, false);
+    double secs = (double)(ri1->ecg_last_us - ri1->ecg_first_us) / 1e6;
+    printf("  Log: %u lines (%u dropped) in %u frames, %u bytes (%.0f B/s over the session)\n",
+           mi->log_lines, mi->log_drops, ri1->log_frames, ri1->log_bytes, ri1->log_bytes / secs);
+    CHECK(m.ok);
+    CHECK_EQ(m.skipped, 0);
+    CHECK_EQ(m.heads, 0);
+    CHECK_EQ(m.after, 0);
+    CHECK_EQ(m.matched, mi->log_lines);
+    CHECK(m.matched > 50);
+    CHECK_EQ(mi->log_drops, 0);
+    CHECK(plen && ph[plen - 1] == '\n');
+    CHECK(strstr(ph, "] ecg: ") && strstr(ph, " rail=") && strstr(ph, "] ppg: ") && strstr(ph, " led="));
+    /* the radio's line: once, from the radio itself; the MCU did not echo it */
+    CHECK_EQ(m.radio, 1);
+    CHECK_EQ(count_str(ph, "radio: ble: sent 1234 drop 0 q 3 busy 0 (test)\n"), 1);
+    CHECK_EQ(count_str(ph, "] radio: "), 0);
+    CHECK_EQ(count_str(sim_log_text(), "] radio: ble: sent 1234"), 1);
+    free(bin0);
+    free(bin1);
+    free(txt0);
+    free(txt1);
+    /* Log unsubscribed: nothing more, while lines keep coming on RTT */
+    sim_phone_subscribe(SUB_ALL);
+    scen_run_ms(50);
+    uint32_t f0 = sim_radio_info()->log_frames;
+    size_t rtt0 = sim_log_len();
+    scen_tap(1);
+    CHECK_EQ(scen_screen(), UI_SCREEN_BOTH_CARD);
+    scen_tap(1);
+    scen_run_ms(600);
+    sim_set_thumbs(true);
+    sim_set_finger(true);
+    scen_run_ms(5000);
+    CHECK(sim_log_len() > rtt0 + 500);
+    CHECK_EQ(sim_radio_info()->log_frames, f0);
+    CHECK_EQ(sim_radio_info()->unsolicited, 0);
+    sim_set_thumbs(false);
+    sim_set_finger(false);
+    scen_run_ms(4000);
+    end_checks();
+}
+
+/* Back-pressure: (a) the UART frozen for 3 s during a BOTH session: lines
+ * are dropped whole, what arrives is in order and never a tail without its
+ * start, streaming recovers as without the log; (b) a ring with room for one
+ * chunk only: the line is cut short, and the next line starts on a line of
+ * its own. */
+TEST(device_log_tx_stall)
+{
+    boot_connected(SUB_ALL | LINK_SUB_LOG);
+    testsrc_cfg_t tc = testsrc_defaults();
+    testsrc_install(&tc);
+    for (int i = 0; i < 3; i++)
+        scen_tap(2);
+    sim_stream_clear();
+    scen_tap(1);
+    scen_run_ms(600);
+    sim_set_thumbs(true);
+    sim_set_finger(true);
+    CHECK(scen_run_cond(is_running, 6000));
+    scen_run_ms(2000);
+    uint32_t ld0 = radio_info()->log_drops, ll0 = radio_info()->log_lines;
+    sim_uart_stall_tx(true);
+    scen_run_ms(3000);
+    uint32_t drops = radio_info()->data_drops, ldrops = radio_info()->log_drops - ld0;
+    printf("  link frozen 3 s: %u data frames and %u log lines dropped\n", drops, ldrops);
+    CHECK(drops > 250);
+    CHECK(ldrops >= 6); /* ~2 evidence lines / s */
+    sim_uart_stall_tx(false);
+    scen_run_ms(3000);
+    CHECK_EQ(radio_info()->data_drops, drops); /* recovered */
+    CHECK(radio_info()->log_lines > ll0 + 4);  /* and the log flows again */
+    CHECK(is_running());
+    CHECK(scen.max_step_acq_us <= 20000);
+    CHECK_EQ(hal_ecg_overruns(), 0);
+    CHECK_EQ(hal_ppg_overruns(), 0);
+    scen_decoded_t d = scen_decode_stream();
+    CHECK_EQ(d.seq_gaps + d.ecg_index_gaps + d.ppg_index_gaps, 0);
+    CHECK_EQ(stream_drops(), 0);
+    sim_set_thumbs(false);
+    sim_set_finger(false);
+    scen_run_ms(4000);
+    mirror_t m = log_mirror(sim_log_text(), sim_phone_log_text(NULL), true);
+    printf("  Log: %zu lines, %zu cut short, %zu missing\n", m.matched, m.heads, m.skipped);
+    CHECK(m.ok); /* in order, no tails, no merged lines */
+    CHECK_EQ(m.after, 0);
+    CHECK(m.skipped >= ldrops - m.heads);
+    CHECK(m.heads <= radio_info()->log_drops);
+    CHECK_EQ(sim_radio_info()->oversize_notify, 0);
+
+    /* (b) idle, connected; frozen line, ring filled (0x00 is no frame) up to
+     * 60 free bytes behind the estimate's back: the next line (two chunks,
+     * 40 + 31 wire bytes) loses its second chunk */
+    scen_run_ms(1000);
+    sim_phone_log_clear();
+    uint32_t cut0 = radio_info()->log_drops;
+    sim_uart_stall_tx(true);
+    static uint8_t zeros[HAL_UART_TX_RING - 60];
+    memset(zeros, 0, sizeof zeros);
+    CHECK_EQ(hal_uart_write(zeros, sizeof zeros), sizeof zeros);
+    sim_phone_subscribe((SUB_ALL | LINK_SUB_LOG) & ~LINK_SUB_HR); /* "ble: subscriptions ..." */
+    scen_run_ms(2);
+    CHECK_EQ(radio_info()->log_drops, cut0 + 1);
+    sim_uart_stall_tx(false);
+    scen_run_ms(20);
+    sim_phone_subscribe(SUB_ALL | LINK_SUB_LOG);
+    scen_run_ms(20);
+    const char *ph = sim_phone_log_text(NULL);
+    printf("  cut line on the phone: \"%s\"\n", ph);
+    m = log_mirror(sim_log_text(), ph, true);
+    CHECK(m.ok);
+    CHECK_EQ(m.heads, 1);
+    CHECK_EQ(m.matched, 1);
+    CHECK_EQ(strlen(ph) > 33 ? ph[32] : 0, '\n'); /* the head is chunk 1; the '\n' starts chunk 2 */
+    CHECK(strstr(ph + 33, "] ble: subscriptions mtu 247") == strchr(ph + 33, ']'));
+    end_checks();
+}
+
 int main(void)
 {
     RUN(power_up_hello_advertise);
@@ -865,5 +1141,7 @@ int main(void)
     RUN(tx_backlog);
     RUN(program_mode);
     RUN(phone_keeps_awake_and_radio_reset);
+    RUN(device_log_mirror);
+    RUN(device_log_tx_stall);
     return TEST_RESULT();
 }

@@ -27,6 +27,16 @@ uint8_t link_tx_last_seq(void);
 uint32_t link_tx_frames(void); /* accepted by hal_uart_write() */
 uint32_t link_tx_drops(void);  /* did not fit */
 
+/* Estimated bytes still in the TX ring (hal.h has no fill query): every
+ * accepted frame adds its wire length, time takes off LINK_TX_DRAIN_PER_MS
+ * per ms (below the 46 B/ms of 460800 baud, so the estimate errs high), a
+ * refused write sets it to HAL_UART_TX_RING. Low-priority traffic (the
+ * device log tee) uses it to leave the ring to the data blocks. */
+#define LINK_TX_DRAIN_PER_MS 40u
+uint32_t link_tx_backlog(void);
+/* Wire bytes of a frame with an n-byte payload (n <= 253): COBS + 0x00. */
+#define LINK_WIRE_LEN(n) ((n) + 6u + 2u)
+
 /* ---- input ---- */
 typedef struct {
     uint32_t frames;       /* good frames delivered */

@@ -224,7 +224,178 @@ test("display filters: high-pass removes DC, notch removes mains", () => {
   assert.ok(peak < 2, `notch residue ${peak}`);
 });
 
-// ---- vectors from the repository's Python encoder ----
+// ---- device log (Log characteristic 0x0007) ----
+const enc = (s) => new TextEncoder().encode(s);
+/** Splits bytes into notification-sized chunks (<= 32 B), like the radio. */
+const chunks = (u8, n = 32) => { const out = []; for (let i = 0; i < u8.length; i += n) out.push(u8.slice(i, i + n)); return out; };
+const ECG_LINE = "[52310] ecg: wait rail=68% min=0 max=4086 avg=1495 fr=3 beats=0 hr=0 mains=4917 lost=4 rs=0";
+const PPG_LINE = "[52311] ppg: on led=1344 dac=1290 dk=304 on=1225 hi=1944/1869-2046 c=921 agc=0 dcc=1 p=21 pr=73 lost=0";
+
+test("Log characteristic UUID and name (link_fmt.h LINK_UUID_LOG 0x0007)", () => {
+  assert.equal(C.CHAR.LOG, 0x0007);
+  assert.equal(C.CHAR_UUID.LOG, "d5780007-8a28-493a-ad8d-6b741ba09ea7");
+  assert.equal(C.uuid(C.CHAR.LOG), C.CHAR_UUID.LOG);
+  assert.equal(C.CHAR_NAME[C.CHAR.LOG], "Log");
+});
+
+test("line assembler: lines split across notifications, several per chunk", () => {
+  const a = C.newLineAssembler();
+  const stream = enc(ECG_LINE + "\n" + PPG_LINE + "\nradio: ble: sent 12\n");
+  const got = [];
+  const parts = chunks(stream);
+  assert.ok(parts.length >= 7 && parts.every((p) => p.length <= 32));
+  for (const p of parts) got.push(...a.push(p));
+  assert.deepEqual(got, [ECG_LINE, PPG_LINE, "radio: ble: sent 12"]);
+  assert.equal(a.pending, "");
+  // a single chunk ending two lines and starting a third; a DataView and an ArrayBuffer work too
+  const b = C.newLineAssembler();
+  assert.deepEqual(b.push(enc("ab")), []);
+  assert.deepEqual(b.push(dv(enc("c\nd\ne"))), ["abc", "d"]);
+  assert.equal(b.pending, "e");
+  assert.deepEqual(b.push(enc("f\n").buffer), ["ef"]);
+  // strings are accepted (demo / tests)
+  assert.deepEqual(b.push("x\ny\n"), ["x", "y"]);
+});
+
+test("line assembler: CRLF, empty and blank lines, flush", () => {
+  const a = C.newLineAssembler();
+  assert.deepEqual(a.push(enc("one\r\n\n\r\n   \ntwo\r")), ["one"]);
+  assert.deepEqual(a.push(enc("\nthree")), ["two"]);
+  assert.deepEqual(a.flush(), ["three"]);
+  assert.deepEqual(a.flush(), []);
+  // a cut-short line (best-effort log) is still a line
+  assert.deepEqual(a.push(enc("[100] ecg: run rail=0% mi\n[101] ppg: on\n")), ["[100] ecg: run rail=0% mi", "[101] ppg: on"]);
+  a.push(enc("partial")); a.reset();
+  assert.deepEqual(a.push(enc("new\n")), ["new"]);
+});
+
+test("line assembler: a UTF-8 character split across notifications", () => {
+  const s = "radio: temp 23°C µV € \u{1f600} ok";
+  const u8 = enc(s + "\n");
+  for (let cut = 1; cut < u8.length - 1; cut++) {
+    const a = C.newLineAssembler();
+    const got = [...a.push(u8.slice(0, cut)), ...a.push(u8.slice(cut))];
+    assert.deepEqual(got, [s], `cut at ${cut}`);
+  }
+  // byte by byte
+  const a = C.newLineAssembler(), got = [];
+  for (const byte of u8) got.push(...a.push(Uint8Array.of(byte)));
+  assert.deepEqual(got, [s]);
+});
+
+test("line assembler: runaway partial line is flushed at the cap", () => {
+  const a = C.newLineAssembler(16), got = [];
+  for (const p of chunks(enc("x".repeat(40)), 7)) got.push(...a.push(p));
+  assert.deepEqual(got, ["x".repeat(16), "x".repeat(16)]);
+  assert.equal(a.pending, "x".repeat(8));
+  assert.deepEqual(a.push(enc("\n")), ["x".repeat(8)]);
+  // a complete line longer than the cap comes out in pieces; exactly the cap is one line
+  assert.deepEqual(C.newLineAssembler(4).push("abcdefghij\nabcd\n"), ["abcd", "efgh", "ij", "abcd"]);
+  // default cap
+  assert.equal(C.LOG_LINE_MAX, 512);
+  const d = C.newLineAssembler(), big = [];
+  for (const p of chunks(enc("y".repeat(1300)))) big.push(...d.push(p));
+  assert.deepEqual(big.map((l) => l.length), [512, 512]);
+  assert.equal(d.pending.length, 1300 - 1024);
+});
+
+test("parseLogLine: ecg evidence line", () => {
+  const r = C.parseLogLine(ECG_LINE);
+  assert.equal(r.t_ms, 52310); assert.equal(r.src, "mcu"); assert.equal(r.tag, "ecg"); assert.equal(r.kind, "ecg");
+  assert.equal(r.state, "wait"); assert.equal(r.evidence, true); assert.equal(r.transition, false); assert.equal(r.nodata, false);
+  assert.deepEqual(r.fields, { rail: 68, min: 0, max: 4086, avg: 1495, fr: 3, beats: 0, hr: 0, mains: 4917, lost: 4, rs: 0 });
+  assert.equal(r.text, "wait rail=68% min=0 max=4086 avg=1495 fr=3 beats=0 hr=0 mains=4917 lost=4 rs=0");
+});
+
+test("parseLogLine: ppg evidence line with hi=mean/min-max and negative values", () => {
+  const r = C.parseLogLine(PPG_LINE);
+  assert.equal(r.t_ms, 52311); assert.equal(r.kind, "ppg"); assert.equal(r.state, "on"); assert.equal(r.evidence, true);
+  assert.deepEqual(r.fields, { led: 1344, dac: 1290, dk: 304, on: 1225, hi: 1944, hi_min: 1869, hi_max: 2046, c: 921, agc: 0, dcc: 1, p: 21, pr: 73, lost: 0 });
+  const n = C.parseLogLine("[7] ppg: set led=10 dac=0 dk=900 on=880 hi=-5/-30-12 c=-20 agc=2 dcc=0 p=0 pr=0 lost=0");
+  assert.equal(n.fields.c, -20);
+  assert.deepEqual([n.fields.hi, n.fields.hi_min, n.fields.hi_max], [-5, -30, 12]);
+  assert.equal(n.state, "set");
+});
+
+test("parseLogLine: no samples / no frames, unknown and reordered fields", () => {
+  const e = C.parseLogLine("[60000] ecg: settle no samples fr=0 beats=0 hr=0 mains=0 lost=0 rs=1");
+  assert.equal(e.state, "settle"); assert.equal(e.nodata, true); assert.equal(e.evidence, true);
+  assert.equal(e.fields.rail, undefined); assert.equal(e.fields.min, undefined); assert.equal(e.fields.rs, 1);
+  const p = C.parseLogLine("[60001] ppg: off led=0 dac=0 no frames agc=0 dcc=0 p=0 pr=0 lost=7");
+  assert.equal(p.state, "off"); assert.equal(p.nodata, true); assert.equal(p.fields.lost, 7); assert.equal(p.fields.dk, undefined);
+  const u = C.parseLogLine("[5] ecg: run mains=12 future=3.5 rail=2% mode=fast beats=9");
+  assert.deepEqual(u.fields, { mains: 12, future: 3.5, rail: 2, mode: "fast", beats: 9 });
+  assert.equal(u.state, "run"); assert.equal(u.evidence, true);
+  // a missing state word: fields still parse, state stays null
+  const m = C.parseLogLine("[5] ecg: rail=1% min=2");
+  assert.equal(m.state, null); assert.deepEqual(m.fields, { rail: 1, min: 2 });
+});
+
+test("parseLogLine: state transitions", () => {
+  const a = C.parseLogLine("[5000] ecg: wait -> settle");
+  assert.equal(a.transition, true); assert.equal(a.evidence, false);
+  assert.deepEqual([a.from, a.state, a.why, a.t_ms], ["wait", "settle", null, 5000]);
+  const b = C.parseLogLine("[9000] ecg: settle -> run (settled, beat)");
+  assert.deepEqual([b.from, b.state, b.why], ["settle", "run", "settled, beat"]);
+  assert.deepEqual(b.fields, {});
+  const c = C.parseLogLine("[9100] ppg: wait->run");
+  assert.deepEqual([c.kind, c.from, c.state], ["ppg", "wait", "run"]);
+});
+
+test("parseLogLine: radio lines and other text", () => {
+  const r = C.parseLogLine("radio: ble: sent 2513 notif, dropped 0");
+  assert.equal(r.src, "radio"); assert.equal(r.t_ms, null); assert.equal(r.tag, "ble"); assert.equal(r.kind, "ble");
+  assert.equal(r.text, "sent 2513 notif, dropped 0"); assert.equal(r.evidence, false); assert.equal(r.state, null);
+  // a radio line that looks like an ecg line is not front-end evidence
+  const f = C.parseLogLine("radio: ecg: run rail=1%");
+  assert.equal(f.src, "radio"); assert.equal(f.evidence, false);
+  const plain = C.parseLogLine("radio: hello");
+  assert.equal(plain.src, "radio"); assert.equal(plain.tag, null); assert.equal(plain.text, "hello");
+  const other = C.parseLogLine("[123] batt: mv=3930 pct=82");
+  assert.deepEqual([other.kind, other.state, other.evidence, other.fields.mv, other.fields.pct], ["batt", null, false, 3930, 82]);
+  const junk = C.parseLogLine("garbage without a prefix");
+  assert.deepEqual([junk.src, junk.t_ms, junk.tag, junk.evidence], ["mcu", null, null, false]);
+});
+
+// ---- spectrum ----
+test("FFT matches a direct DFT", () => {
+  const n = 64, re = new Float64Array(n), im = new Float64Array(n), x = [];
+  for (let i = 0; i < n; i++) { x.push(Math.sin(i * 0.37) + 0.3 * Math.cos(i * 1.9) + (i % 5) * 0.1); re[i] = x[i]; }
+  C.fft(re, im);
+  for (const k of [0, 1, 5, 17, 32, 63]) {
+    let sr = 0, si = 0;
+    for (let i = 0; i < n; i++) { sr += x[i] * Math.cos(2 * Math.PI * k * i / n); si -= x[i] * Math.sin(2 * Math.PI * k * i / n); }
+    close(re[k], sr, 1e-9); close(im[k], si, 1e-9);
+  }
+  assert.throws(() => C.fft(new Float64Array(12), new Float64Array(12)), /power of two/);
+});
+
+test("amplitude spectrum: 60 Hz (1.0) + 10 Hz (0.25) at fs = 500, N = 2048", () => {
+  const fs = 500, N = 2048, x = new Float64Array(N);
+  for (let i = 0; i < N; i++) x[i] = 3 + Math.sin(2 * Math.PI * 60 * i / fs) + 0.25 * Math.sin(2 * Math.PI * 10 * i / fs + 1);
+  const s = C.amplitudeSpectrum(x, fs, N);
+  assert.equal(s.amp.length, N / 2 + 1); close(s.df, fs / N); assert.equal(s.n, N);
+  const peak = (lo, hi) => { let k = lo; for (let i = lo; i <= hi; i++) if (s.amp[i] > s.amp[k]) k = i; return k; };
+  const k60 = peak(1, s.amp.length - 1), k10 = peak(1, Math.round(30 / s.df));
+  assert.ok(Math.abs(k60 - 60 / s.df) <= 1, `60 Hz peak at bin ${k60}`);
+  assert.ok(Math.abs(k10 - 10 / s.df) <= 1, `10 Hz peak at bin ${k10}`);
+  // Hann scalloping is at most 1.42 dB (15 %); both tones are near bin centres here
+  assert.ok(Math.abs(s.amp[k60] - 1) < 0.1, `60 Hz amplitude ${s.amp[k60]}`);
+  assert.ok(Math.abs(s.amp[k10] - 0.25) < 0.025, `10 Hz amplitude ${s.amp[k10]}`);
+  assert.ok(Math.abs(s.amp[k10] / s.amp[k60] - 0.25) < 0.03);
+  assert.ok(s.amp[0] < 1e-3, "mean removed");
+  assert.ok(s.amp[Math.round(150 / s.df)] < 1e-3, "no leakage far from the tones");
+  // exact-frequency readouts
+  close(C.toneAmplitude(x, fs, 60), 1, 1e-3);
+  close(C.toneAmplitude(x, fs, 10), 0.25, 1e-3);
+  const p = C.peakToneAmplitude(x, fs, 60.2);
+  close(p.amp, 1, 1e-3); assert.ok(Math.abs(p.f - 60) < 0.03);
+  // fewer samples than N: windowed over the samples, zero padded, same amplitude scale
+  const s2 = C.amplitudeSpectrum(x.subarray(0, 1500), fs, N);
+  assert.equal(s2.n, 1500);
+  assert.ok(Math.abs(Math.max(...s2.amp.subarray(1)) - 1) < 0.1);
+});
+
 const py = join(root, ".venv", "bin", "python");
 test("vectors from tools/ecgcard/codec.py and record.py", { skip: !existsSync(py) && "no .venv/bin/python" }, () => {
   const script = `

@@ -15,6 +15,8 @@
 #define IDX_STATUS_VALUE  11
 #define IDX_STATUS_CCCD   12
 #define IDX_CONTROL_VALUE 14
+#define IDX_LOG_VALUE     16
+#define IDX_LOG_CCCD      17
 
 static const uint8_t ecsServUUID[ATT_UUID_SIZE] = LINK_UUID128(LINK_UUID_SERVICE);
 static const uint8_t ecsEcgUUID[ATT_UUID_SIZE] = LINK_UUID128(LINK_UUID_ECG);
@@ -22,6 +24,7 @@ static const uint8_t ecsPpgUUID[ATT_UUID_SIZE] = LINK_UUID128(LINK_UUID_PPG);
 static const uint8_t ecsEventsUUID[ATT_UUID_SIZE] = LINK_UUID128(LINK_UUID_EVENTS);
 static const uint8_t ecsStatusUUID[ATT_UUID_SIZE] = LINK_UUID128(LINK_UUID_STATUS);
 static const uint8_t ecsControlUUID[ATT_UUID_SIZE] = LINK_UUID128(LINK_UUID_CONTROL);
+static const uint8_t ecsLogUUID[ATT_UUID_SIZE] = LINK_UUID128(LINK_UUID_LOG);
 
 static const gattAttrType_t ecsService = {ATT_UUID_SIZE, ecsServUUID};
 
@@ -38,6 +41,7 @@ static gattCharCfg_t ecsEcgCccd[PERIPHERAL_MAX_CONNECTION];
 static gattCharCfg_t ecsPpgCccd[PERIPHERAL_MAX_CONNECTION];
 static gattCharCfg_t ecsEventsCccd[PERIPHERAL_MAX_CONNECTION];
 static gattCharCfg_t ecsStatusCccd[PERIPHERAL_MAX_CONNECTION];
+static gattCharCfg_t ecsLogCccd[PERIPHERAL_MAX_CONNECTION];
 
 static ecsCccdChangeCB_t ecsCccdCB;
 static ecsControlCB_t ecsControlCB;
@@ -73,7 +77,17 @@ static gattAttribute_t ecsAttrTbl[] = {
     /* 13..14 Control */
     {{ATT_BT_UUID_SIZE, characterUUID}, GATT_PERMIT_READ, 0, &ecsControlProps},
     {{ATT_UUID_SIZE, ecsControlUUID}, GATT_PERMIT_WRITE, 0, ecsControl},
+
+    /* 15..17 Log (added last: the handles above stay where they were) */
+    {{ATT_BT_UUID_SIZE, characterUUID}, GATT_PERMIT_READ, 0, &ecsNotifyProps},
+    {{ATT_UUID_SIZE, ecsLogUUID}, 0, 0, &ecsDummy},
+    {{ATT_BT_UUID_SIZE, clientCharCfgUUID}, GATT_PERMIT_READ | GATT_PERMIT_WRITE, 0,
+     (uint8_t *)ecsLogCccd},
 };
+
+/* The IDX_* above must match the table (a wrong index would notify on, or
+ * accept writes to, the wrong attribute). */
+typedef char ecs_tbl_size_check[(GATT_NUM_ATTRS(ecsAttrTbl) == IDX_LOG_CCCD + 1) ? 1 : -1];
 
 static bStatus_t ecs_ReadAttrCB(uint16_t connHandle, gattAttribute_t *pAttr, uint8_t *pValue,
                                 uint16_t *pLen, uint16_t offset, uint16_t maxLen,
@@ -98,6 +112,8 @@ static gattCharCfg_t *ecs_cccd_table(uint8_t ch)
         return ecsEventsCccd;
     case ECS_CHAR_STATUS:
         return ecsStatusCccd;
+    case ECS_CHAR_LOG:
+        return ecsLogCccd;
     default:
         return NULL;
     }
@@ -114,6 +130,8 @@ static uint16_t ecs_value_handle(uint8_t ch)
         return ecsAttrTbl[IDX_EVENTS_VALUE].handle;
     case ECS_CHAR_STATUS:
         return ecsAttrTbl[IDX_STATUS_VALUE].handle;
+    case ECS_CHAR_LOG:
+        return ecsAttrTbl[IDX_LOG_VALUE].handle;
     default:
         return 0;
     }
@@ -129,6 +147,7 @@ bStatus_t Ecs_AddService(ecsCccdChangeCB_t cccdCB, ecsControlCB_t controlCB)
     GATTServApp_InitCharCfg(INVALID_CONNHANDLE, ecsPpgCccd);
     GATTServApp_InitCharCfg(INVALID_CONNHANDLE, ecsEventsCccd);
     GATTServApp_InitCharCfg(INVALID_CONNHANDLE, ecsStatusCccd);
+    GATTServApp_InitCharCfg(INVALID_CONNHANDLE, ecsLogCccd);
 
     /* Register GATT attribute list and CBs with GATT Server App */
     return GATTServApp_RegisterService(ecsAttrTbl, GATT_NUM_ATTRS(ecsAttrTbl),
@@ -217,5 +236,6 @@ void Ecs_Disconnected(uint16_t connHandle)
         GATTServApp_InitCharCfg(connHandle, ecsPpgCccd);
         GATTServApp_InitCharCfg(connHandle, ecsEventsCccd);
         GATTServApp_InitCharCfg(connHandle, ecsStatusCccd);
+        GATTServApp_InitCharCfg(connHandle, ecsLogCccd);
     }
 }

@@ -41,17 +41,30 @@
       R-peak / pulse events, so "HR events" vs "HR 0x2A37" checks the radio path.
     * Device name "ECG Card XXXX" = BLE address bytes [1],[0] (last 4 hex digits of
       A1:B2:C3:D4:E5:F6 is E5F6); the Device panel compares it with the DIS serial.
+    * Log 0x0007 (device log, notify) is optional: radio firmware before it has none. Then the
+      page logs "no Log characteristic (older radio firmware)" and everything else works. Each
+      notification is a <= 32-byte chunk of the device's UTF-8 log stream; lines end with '\n' and
+      may span notifications; text is best-effort (a line may be cut short, then still ends with
+      '\n'). MCU lines are "[uptime_ms] tag: text", radio lines "radio: text". The Device log panel
+      reassembles and shows them; the Front end card shows the once-per-second "ecg:" / "ppg:"
+      evidence lines of fw/app/src/app.c (log_evidence).
 
   Code layout (one <script>, sections in this order):
     CODEC      pure functions, no DOM: UUIDs, payload parsers/encoders, continuity, unwrap,
-               display filters, capture file format. Between the BEGIN/END CODEC markers so
+               display filters, capture file format, device log line reassembly and parser,
+               FFT / amplitude spectrum. Between the BEGIN/END CODEC markers so
                tools/tests/test_ble_client.mjs can evaluate it in Node.
-    DEMOSIG    pure synthetic ECG/PPG/event generator that emits wire-format payloads.
-    STATE      ring buffers (typed arrays), integrity counters, event log, recorder.
+    DEMOSIG    pure synthetic ECG/PPG/event generator that emits wire-format payloads, and a
+               device log stream (evidence lines once per second, transitions, radio lines)
+               cut into <= 32-byte Log notifications.
+    STATE      ring buffers (typed arrays), integrity counters, event log, device log, recorder.
     TRANSPORT  BleTransport (Web Bluetooth) and DemoTransport; both call the same onNotify().
-    RENDER     canvas strips (requestAnimationFrame, min/max decimation per pixel column).
+    RENDER     canvas strips (requestAnimationFrame, min/max decimation per pixel column) and the
+               ECG amplitude spectrum (2048 raw samples = 4.1 s, Hann, every 333 ms while shown).
     UI         DOM wiring.
-  URL parameters: ?demo=1 starts the simulator, ?theme=light|dark forces a theme.
+  URL parameters: ?demo=1 starts the simulator, ?theme=light|dark forces a theme,
+    ?spectrum=1 shows the ECG spectrum in place of the PPG strip (?spectrum=both: both),
+    ?nolog=1 makes the simulator behave like radio firmware without the Log characteristic.
 
   ---- Capture file (.ecgcap), written by "Save capture" ----------------------------------
   All little-endian.
@@ -70,7 +83,8 @@
                f64 t_ms   receive time, ms since t0_unix_ms (browser monotonic clock)
                u8  payload[len]   exactly the bytes of the notification / write / read
   Channel ids: 0x0002 ECG stream, 0x0003 PPG stream, 0x0004 Events, 0x0005 Status (notify
-  or read), 0x0006 Control (bytes this page wrote), 0x2A37 Heart Rate Measurement,
+  or read), 0x0006 Control (bytes this page wrote), 0x0007 Log (device log text chunks exactly
+  as notified, <= 32 B; a line may span records), 0x2A37 Heart Rate Measurement,
   0x2A19 Battery Level, 0xFFFF client note (UTF-8 text, e.g. "connected", "disconnected").
   Python: hdr = json.loads(b[12:12+H]); then struct.unpack_from("<HHd", b, off), off += 12+len.
 
@@ -80,6 +94,13 @@
     <base>.events.csv  rx_s,time_s,kind,fields          (fields is JSON)
   Rows are in arrival order. index/frame are the stream indices (unwrapped across u32 wrap);
   "run" increments when a stream restarts at index 0. fine is unwrapped modulo 2^16 per run.
+    <base>.log.txt     device log of the recording ("log.txt" button), reassembled from the
+                       0x0007 records: two "#" header lines, then per line
+                       rx_s<TAB>local_time<TAB>line   (rx_s = s since record start of the
+                       notification that completed the line; local_time "YYYY-MM-DD HH:MM:SS.mmm");
+                       client notes appear as "# note: ..." in the line column.
+  The Device log panel's Copy / Download .txt give "<local_time>  <line>" for the collected lines
+  that match its filter (all lines when the filter is empty).
 -->
 <html lang="en">
 <head>
@@ -98,6 +119,7 @@
   --plot-bg: #ffffff; --grid-major: #e3b9b9; --grid-minor: #f5e4e4; --grid-plain: #e4e7eb;
   --axis-text: #5a636f; --gap: rgba(120, 128, 140, 0.16);
   --ecg: #0068a8; --ppg: #c85000; --coarse: #8a4a9e; --marker: #1a1e24;
+  --m50: #a8650a; --m60: #2f8a5b;
   --mono: ui-monospace, "SF Mono", "Cascadia Mono", "DejaVu Sans Mono", Menlo, Consolas, monospace;
   --sans: system-ui, -apple-system, "Segoe UI", Roboto, "Noto Sans", "DejaVu Sans", sans-serif;
 }
@@ -111,6 +133,7 @@
     --plot-bg: #0b0d11; --grid-major: #4a2a2e; --grid-minor: #24181b; --grid-plain: #252b33;
     --axis-text: #9ba5b2; --gap: rgba(150, 160, 175, 0.14);
     --ecg: #56b4e9; --ppg: #e69f00; --coarse: #cc79a7; --marker: #e4e8ee;
+    --m50: #e2a33a; --m60: #5cc48a;
   }
 }
 :root[data-theme="dark"] {
@@ -122,6 +145,7 @@
   --plot-bg: #0b0d11; --grid-major: #4a2a2e; --grid-minor: #24181b; --grid-plain: #252b33;
   --axis-text: #9ba5b2; --gap: rgba(150, 160, 175, 0.14);
   --ecg: #56b4e9; --ppg: #e69f00; --coarse: #cc79a7; --marker: #e4e8ee;
+  --m50: #e2a33a; --m60: #5cc48a;
 }
 * { box-sizing: border-box; }
 html, body { margin: 0; height: 100%; }
@@ -143,7 +167,7 @@ input[type="text"], input[type="search"] { background: var(--panel); border: 1px
 .ok { color: var(--ok); } .warn { color: var(--warn); } .err { color: var(--err); }
 
 /* layout */
-.app { display: grid; grid-template-rows: auto auto 1fr auto; height: 100vh; }
+.app { display: grid; grid-template-rows: auto auto 1fr auto auto; height: 100vh; }
 header.top {
   display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
   padding: 7px 12px; background: var(--panel); border-bottom: 1px solid var(--border);
@@ -164,13 +188,13 @@ header.top h1 { font-size: 14px; margin: 0 6px 0 0; font-weight: 650; letter-spa
 .banner[hidden] { display: none; }
 main.body { display: grid; grid-template-columns: minmax(0, 1fr) 340px; min-height: 0; }
 .plots { display: flex; flex-direction: column; min-width: 0; min-height: 0; border-right: 1px solid var(--border); }
-.toolbar { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; padding: 6px 10px; background: var(--panel); border-bottom: 1px solid var(--border); }
+.toolbar { display: flex; align-items: center; gap: 6px 7px; flex-wrap: wrap; padding: 6px 10px; background: var(--panel); border-bottom: 1px solid var(--border); }
 .toolbar label { display: inline-flex; align-items: center; gap: 5px; color: var(--muted); }
 .toolbar .seg { display: inline-flex; }
 .toolbar .seg button { border-radius: 0; margin-left: -1px; min-width: 38px; }
 .toolbar .seg button:first-child { border-radius: 5px 0 0 5px; margin-left: 0; }
 .toolbar .seg button:last-child { border-radius: 0 5px 5px 0; }
-#history { width: 160px; }
+#history { width: 96px; }
 .strips { flex: 1; display: flex; flex-direction: column; min-height: 0; background: var(--plot-bg); outline: none; }
 .strip { position: relative; flex: 1 1 0; min-height: 90px; border-bottom: 1px solid var(--border); }
 .strip.coarse { flex: 0.6 1 0; }
@@ -249,14 +273,52 @@ ol.list li.cmd .c { color: var(--accent); }
 .logfilters input[type="search"] { flex: 1; min-width: 90px; min-height: 22px; font-size: 12px; }
 .empty { color: var(--faint); padding: 6px 8px; font-size: 12px; }
 
+/* spectrum strip */
+.strip.spec canvas { cursor: default; touch-action: auto; }
+
+/* front-end readout (from the device log evidence lines) */
+.fesec + .fesec { margin-top: 7px; padding-top: 6px; border-top: 1px solid var(--border); }
+.fehead { display: flex; align-items: center; gap: 7px; margin-bottom: 3px; }
+.fehead b { font-size: 12px; font-weight: 650; }
+.fehead .st { font: 600 11.5px/1.5 var(--mono); padding: 0 6px; border-radius: 4px; background: var(--panel-2); color: var(--muted); }
+.fehead .st.good { color: var(--ok); background: var(--ok-bg); }
+.fehead .st.mid { color: var(--warn); background: var(--warn-bg); }
+.fehead .st.bad { color: var(--err); background: var(--err-bg); }
+.fehead .age { margin-left: auto; font: 11.5px var(--mono); color: var(--faint); white-space: nowrap; }
+.fe { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 3px 8px; }
+.fe .k { font-size: 10.5px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.fe .v { font: 12.5px/1.3 var(--mono); font-variant-numeric: tabular-nums; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.fe .v.hot { color: var(--warn); background: var(--warn-bg); font-weight: 650; border-radius: 3px; padding: 0 4px; margin-left: -4px; width: fit-content; max-width: calc(100% + 4px); }
+.fesec.stale .v { color: var(--faint); }
+.fesec.stale .v.hot { background: transparent; }
+.fenote { font-size: 11.5px; color: var(--faint); margin-top: 4px; }
+
+/* device log console */
+.dlpanel { padding: 0 12px 10px; height: 24vh; min-height: 170px; display: flex; flex-direction: column; }
+.dlbox { flex: 1; min-height: 0; display: flex; flex-direction: column; border: 1px solid var(--border); border-radius: 8px; overflow: hidden; }
+.dltools { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 6px; padding: 4px 8px; background: var(--panel-2); border-bottom: 1px solid var(--border); font-size: 12px; }
+.dltools input[type="search"] { flex: 1 1 180px; min-width: 120px; max-width: 380px; min-height: 24px; font-size: 12px; }
+.dltools button { min-height: 22px; padding: 0 8px; font-size: 12px; }
+.dltools label { display: inline-flex; gap: 4px; align-items: center; color: var(--muted); white-space: nowrap; }
+.dltools .cnt { margin-left: auto; font-family: var(--mono); font-size: 11.5px; color: var(--muted); white-space: nowrap; }
+.devlog { background: var(--plot-bg); font: 11.5px/1.45 var(--mono); overflow-anchor: auto; }
+.devlog .l { padding: 0 8px 0 calc(8px + 13ch); text-indent: -13ch; white-space: pre-wrap; overflow-wrap: anywhere; }
+.devlog .l:hover { background: var(--panel-2); }
+.devlog .l .t { color: var(--faint); }
+.devlog .l.radio { color: var(--muted); }
+.devlog .l.radio .m { font-style: italic; }
+.app:has(#devlogPanel[open]) .ipanel { height: 25vh; min-height: 190px; }
+
 @media (max-width: 900px) {
-  .app { height: auto; min-height: 100vh; grid-template-rows: auto auto auto auto; }
+  .app { height: auto; min-height: 100vh; grid-template-rows: auto auto auto auto auto; }
+  .app:has(#devlogPanel[open]) .ipanel { height: auto; }
+  .dlpanel { height: 55vh; min-height: 260px; }
   main.body { grid-template-columns: 1fr; }
   .plots { border-right: 0; height: 64vh; min-height: 340px; }
   .side { overflow: visible; }
   .ipanel { grid-template-columns: 1fr; height: auto; }
   .ipanel > section { max-height: 46vh; }
-  #history { width: 110px; }
+  #history { width: 96px; }
   details.bottom > summary { flex-wrap: wrap; gap: 2px 10px; }
   details.bottom > summary .sumline { flex-basis: 100%; padding-left: 16px; }
 }
@@ -306,6 +368,9 @@ ol.list li.cmd .c { color: var(--accent); }
           <option value="raw">raw fine</option><option value="hp" selected>HP 0.3 Hz</option>
         </select></label>
         <label><input id="chkCoarse" type="checkbox"> coarse</label>
+        <label title="Lower plot: the PPG strip, the ECG amplitude spectrum in its place, or both (also ?spectrum=1 or ?spectrum=both)">Show <select id="selLower">
+          <option value="ppg">PPG</option><option value="spec">Spectrum</option><option value="both">Both</option>
+        </select></label>
       </div>
       <div class="strips" id="strips" tabindex="0" aria-label="Plot area. Space pauses; arrow keys scroll when paused.">
         <div class="strip" id="stripEcg"><canvas></canvas>
@@ -317,6 +382,8 @@ ol.list li.cmd .c { color: var(--accent); }
         <div class="strip coarse" id="stripCoarse" hidden><canvas></canvas>
           <div class="shead"><span class="name"><span class="swatch" style="background:var(--coarse)"></span>PPG coarse nA</span><span class="val" data-val></span>
             <span class="ctl"><button data-act="lock">Auto</button><button data-act="zin">+</button><button data-act="zout">&minus;</button></span></div></div>
+        <div class="strip spec" id="stripSpec" hidden><canvas></canvas>
+          <div class="shead"><span class="name" title="Amplitude (peak) spectrum of the raw ECG (uV, before the display filter), last 2048 samples = 4.1 s, Hann window, mean removed. Dashed lines: 50 Hz and 60 Hz harmonics. Readout: peak amplitude within +-0.3 Hz of 50 / 60 Hz."><span class="swatch" style="background:var(--ecg)"></span>ECG spectrum</span><span class="val" data-val></span></div></div>
       </div>
     </section>
 
@@ -342,6 +409,11 @@ ol.list li.cmd .c { color: var(--accent); }
         <div class="chips" id="chips"></div>
       </div>
 
+      <div class="card" id="cardFe" title="From the ecg: / ppg: evidence lines of the device log (Log characteristic), once per second during a measurement">
+        <h2>Front end <span class="right mono" id="feInfo"></span></h2>
+        <div id="feBody"></div>
+      </div>
+
       <div class="card" id="cardCtl">
         <h2>Control <span class="right"><span class="mono muted" id="queueInfo"></span> <button id="btnRetry" disabled title="Send the last command that got no result again">Retry</button></span></h2>
         <div class="btnrow">
@@ -365,6 +437,7 @@ ol.list li.cmd .c { color: var(--accent); }
           <button id="btnRec">Record</button>
           <button id="btnCsv" disabled title="Download ECG, PPG and event CSV files">Export CSV</button>
           <button id="btnCap" disabled title="Download the raw capture (.ecgcap, original payloads)">Save capture</button>
+          <button id="btnLogTxt" disabled title="Download the device log lines of the recording (.log.txt: seconds since record start, local receive time, line)">log.txt</button>
           <button id="btnRecClear" disabled>Discard</button>
         </div>
         <div class="res" id="resRec"></div>
@@ -401,6 +474,24 @@ ol.list li.cmd .c { color: var(--accent); }
       </section>
     </div>
   </details>
+
+  <details class="bottom" id="devlogPanel" open>
+    <summary>Device log <span class="sumline" id="dlSum"></span></summary>
+    <div class="dlpanel">
+      <div class="dlbox">
+        <div class="dltools">
+          <input id="dlFilter" type="search" placeholder="filter (substring, any case)" aria-label="Filter device log lines">
+          <button id="dlPause" title="Freeze the view; lines keep being collected">Pause</button>
+          <label title="Keep the newest line in view (turns off when you scroll up)"><input id="dlFollow" type="checkbox" checked> auto-scroll</label>
+          <button id="dlCopy" title="Copy the collected lines that match the filter (all lines when the filter is empty), with receive time">Copy</button>
+          <button id="dlSave" title="Download the collected lines that match the filter (all lines when the filter is empty) as .txt, with receive time">Download .txt</button>
+          <button id="dlClear">Clear</button>
+          <span class="cnt" id="dlCount"></span>
+        </div>
+        <div class="scroll devlog" id="dlScroll"><div id="dlList"></div><div class="empty" id="dlEmpty">No device log lines yet.</div></div>
+      </div>
+    </div>
+  </details>
 </div>
 <script>
 "use strict";
@@ -415,11 +506,11 @@ const Codec = (() => {
   const uuid = (shortId) => "d578" + shortId.toString(16).padStart(4, "0") + "-8a28-493a-ad8d-6b741ba09ea7";
   const SERVICE_UUID = uuid(0x0001);
   const CHAR = Object.freeze({ ECG: 0x0002, PPG: 0x0003, EVENTS: 0x0004, STATUS: 0x0005, CONTROL: 0x0006,
-    HRM: 0x2a37, BATTERY: 0x2a19, NOTE: 0xffff });
+    LOG: 0x0007, HRM: 0x2a37, BATTERY: 0x2a19, NOTE: 0xffff });
   const CHAR_UUID = Object.freeze({ ECG: uuid(CHAR.ECG), PPG: uuid(CHAR.PPG), EVENTS: uuid(CHAR.EVENTS),
-    STATUS: uuid(CHAR.STATUS), CONTROL: uuid(CHAR.CONTROL) });
+    STATUS: uuid(CHAR.STATUS), CONTROL: uuid(CHAR.CONTROL), LOG: uuid(CHAR.LOG) });
   const CHAR_NAME = { [CHAR.ECG]: "ECG", [CHAR.PPG]: "PPG", [CHAR.EVENTS]: "Events", [CHAR.STATUS]: "Status",
-    [CHAR.CONTROL]: "Control", [CHAR.HRM]: "HR 2A37", [CHAR.BATTERY]: "Batt 2A19", [CHAR.NOTE]: "note" };
+    [CHAR.CONTROL]: "Control", [CHAR.LOG]: "Log", [CHAR.HRM]: "HR 2A37", [CHAR.BATTERY]: "Batt 2A19", [CHAR.NOTE]: "note" };
   const DEVICE_NAME_PREFIX = "ECG Card";
 
   // ---- timing (tools/ecgcard/record.py) ----
@@ -801,6 +892,139 @@ const Codec = (() => {
     return s;
   }
 
+  // ---- device log: Log characteristic 0x0007 (link_fmt.h STREAM_LOG) ----
+  // Each notification is a chunk (<= 32 B) of a UTF-8 text stream; lines end with '\n' and may
+  // span chunks. Best-effort: a line may be cut short (it is still ended by '\n').
+  const LOG_LINE_MAX = 512;
+  /** Line reassembler. push(Uint8Array | DataView | ArrayBuffer | string) returns the lines this
+   *  chunk completes: split on '\n', '\r' and NUL removed, empty / blank lines dropped, a partial
+   *  line (and a UTF-8 character split across chunks) held for the next chunk, and a partial line
+   *  longer than maxLen flushed in maxLen pieces. flush() returns what is pending as a line. */
+  function newLineAssembler(maxLen = LOG_LINE_MAX) {
+    let dec = new TextDecoder("utf-8"), part = "";
+    const emit = (out, s) => {
+      s = s.replace(/[\r\0]/g, "");
+      for (let i = 0; i < s.length; i += maxLen) { const p = s.slice(i, i + maxLen); if (/\S/.test(p)) out.push(p); }
+    };
+    return {
+      push(chunk) {
+        let s;
+        if (typeof chunk === "string") s = chunk;
+        else {
+          const u8 = chunk instanceof Uint8Array ? chunk : ArrayBuffer.isView(chunk)
+            ? new Uint8Array(chunk.buffer, chunk.byteOffset, chunk.byteLength) : new Uint8Array(chunk);
+          s = dec.decode(u8, { stream: true });
+        }
+        const out = [];
+        part += s;
+        let j;
+        while ((j = part.indexOf("\n")) >= 0) { emit(out, part.slice(0, j)); part = part.slice(j + 1); }
+        while (part.length > maxLen) { emit(out, part.slice(0, maxLen)); part = part.slice(maxLen); }
+        return out;
+      },
+      flush() { const out = []; emit(out, part + dec.decode()); part = ""; return out; },
+      reset() { dec = new TextDecoder("utf-8"); part = ""; },
+      get pending() { return part; },
+    };
+  }
+  const LOG_MCU_RE = /^\[(\d+)\]\s?([^\s:\[\]]+):\s?(.*)$/;   // "[123456] tag: text" (uptime ms)
+  const LOG_RADIO_RE = /^radio:\s?(.*)$/;                       // "radio: text" (no timestamp)
+  const LOG_TAG_RE = /^([A-Za-z][\w.-]*):\s?(.*)$/;
+  const LOG_TRANS_RE = /^(\w+)\s*->\s*(\w+)(?:\s*\((.*)\))?\s*$/;  // "wait -> settle (why)"
+  const LOG_NUM_RE = /^[-+]?\d+(?:\.\d+)?$/;
+  const LOG_RANGE_RE = /^([-+]?\d+(?:\.\d+)?)\/([-+]?\d+(?:\.\d+)?)-([-+]?\d+(?:\.\d+)?)$/; // mean/min-max
+  /** Parses one device log line (fw/app/src/app.c log_evidence / log_transition formats). Returns
+   *  { t_ms (uptime ms or null), src "mcu"|"radio", tag, kind (tag lower-cased), text (after the
+   *  tag), state, from, why, transition, evidence, nodata, fields {key: number | string}, words }.
+   *  Values: "68%" -> 68; "1944/1869-2046" -> hi, hi_min, hi_max; other numbers (also negative) ->
+   *  numbers; anything else stays a string. Unknown, reordered or missing fields are fine. */
+  function parseLogLine(line) {
+    const s = String(line);
+    const r = { t_ms: null, src: "mcu", tag: null, kind: null, text: s, state: null, from: null, why: null,
+      transition: false, evidence: false, nodata: false, fields: {}, words: [] };
+    let m;
+    if ((m = LOG_RADIO_RE.exec(s))) {
+      r.src = "radio"; r.text = m[1];
+      const t = LOG_TAG_RE.exec(r.text); if (t) { r.tag = t[1]; r.text = t[2]; }
+    } else if ((m = LOG_MCU_RE.exec(s))) { r.t_ms = +m[1]; r.tag = m[2]; r.text = m[3]; }
+    r.kind = r.tag ? r.tag.toLowerCase() : null;
+    const body = r.text, sig = r.src === "mcu" && (r.kind === "ecg" || r.kind === "ppg");
+    if (sig && (m = LOG_TRANS_RE.exec(body))) {
+      r.transition = true; r.from = m[1]; r.state = m[2]; r.why = m[3] ?? null;
+      return r;
+    }
+    const toks = body.split(/\s+/);
+    for (let i = 0; i < toks.length; i++) {
+      const tok = toks[i]; if (!tok) continue;
+      const eq = tok.indexOf("=");
+      if (eq <= 0) { r.words.push(tok); if (sig && r.state === null && !Object.keys(r.fields).length && r.words.length === 1) r.state = tok; continue; }
+      const k = tok.slice(0, eq), v = tok.slice(eq + 1);
+      let mm;
+      if (v.endsWith("%") && LOG_NUM_RE.test(v.slice(0, -1))) r.fields[k] = +v.slice(0, -1);
+      else if ((mm = LOG_RANGE_RE.exec(v))) { r.fields[k] = +mm[1]; r.fields[k + "_min"] = +mm[2]; r.fields[k + "_max"] = +mm[3]; }
+      else if (LOG_NUM_RE.test(v)) r.fields[k] = +v;
+      else r.fields[k] = v;
+    }
+    r.nodata = /\bno (samples|frames)\b/.test(body);
+    r.evidence = sig && (r.nodata || Object.keys(r.fields).length > 0);
+    return r;
+  }
+
+  // ---- spectrum: radix-2 FFT, Hann-windowed amplitude spectrum ----
+  /** In-place complex FFT (forward, no scaling) of re/im (Float64Array, length a power of two). */
+  function fft(re, im) {
+    const n = re.length;
+    if (n < 1 || (n & (n - 1)) || im.length !== n) throw new Error("fft: length must be a power of two");
+    for (let i = 1, j = 0; i < n; i++) {
+      let bit = n >> 1;
+      for (; j & bit; bit >>= 1) j ^= bit;
+      j ^= bit;
+      if (i < j) { let t = re[i]; re[i] = re[j]; re[j] = t; t = im[i]; im[i] = im[j]; im[j] = t; }
+    }
+    for (let len = 2; len <= n; len <<= 1) {
+      const half = len >> 1, ang = -2 * Math.PI / len;
+      for (let k = 0; k < half; k++) {
+        const wr = Math.cos(ang * k), wi = Math.sin(ang * k);
+        for (let i = k; i < n; i += len) {
+          const b = i + half, tr = re[b] * wr - im[b] * wi, ti = re[b] * wi + im[b] * wr;
+          re[b] = re[i] - tr; im[b] = im[i] - ti; re[i] += tr; im[i] += ti;
+        }
+      }
+    }
+  }
+  const hann = (i, n) => 0.5 - 0.5 * Math.cos(2 * Math.PI * i / n);   // periodic Hann
+  /** Amplitude spectrum of x (length L <= N, zero padded to N; the last N samples if longer): mean
+   *  removed, Hann window over the L samples, scaled so a sinusoid of amplitude A (peak) at a bin
+   *  centre reads A. Returns { amp: Float64Array(N/2 + 1), df: fs / N, N, n: L }. */
+  function amplitudeSpectrum(x, fs, N) {
+    if (!N) { N = 1; while (N < x.length) N <<= 1; }
+    if (x.length > N) x = x.subarray ? x.subarray(x.length - N) : x.slice(x.length - N);
+    const L = x.length, re = new Float64Array(N), im = new Float64Array(N);
+    let mean = 0, ws = 0;
+    for (let i = 0; i < L; i++) mean += x[i];
+    mean /= L || 1;
+    for (let i = 0; i < L; i++) { const w = hann(i, L); re[i] = (x[i] - mean) * w; ws += w; }
+    fft(re, im);
+    const amp = new Float64Array(N / 2 + 1), k = ws > 0 ? 1 / ws : 0;
+    for (let i = 0; i <= N / 2; i++) amp[i] = Math.hypot(re[i], im[i]) * k * (i === 0 || i === N / 2 ? 1 : 2);
+    return { amp, df: fs / N, N, n: L };
+  }
+  /** Amplitude (peak) of the component at exactly f Hz: mean removed, Hann window, one DFT term. */
+  function toneAmplitude(x, fs, f) {
+    const L = x.length; if (!L) return 0;
+    let mean = 0; for (let i = 0; i < L; i++) mean += x[i]; mean /= L;
+    let sr = 0, si = 0, ws = 0;
+    const w0 = 2 * Math.PI * f / fs;
+    for (let i = 0; i < L; i++) { const w = hann(i, L), v = (x[i] - mean) * w; sr += v * Math.cos(w0 * i); si -= v * Math.sin(w0 * i); ws += w; }
+    return ws > 0 ? 2 * Math.hypot(sr, si) / ws : 0;
+  }
+  /** Largest toneAmplitude within f0 +- span (step Hz): tolerates a mains frequency a little off. */
+  function peakToneAmplitude(x, fs, f0, span = 0.3, step = 0.05) {
+    let best = { amp: -1, f: f0 };
+    for (let f = f0 - span; f <= f0 + span + 1e-9; f += step) { const a = toneAmplitude(x, fs, f); if (a > best.amp) best = { amp: a, f }; }
+    return best;
+  }
+
   return {
     uuid, SERVICE_UUID, CHAR, CHAR_UUID, CHAR_NAME, DEVICE_NAME_PREFIX,
     ECG_HZ, PPG_HZ, ECG_T0_S, ECG_ANALOG_DELAY_S, PPG_ON_SAMPLE_S, ecgTime, ecgIndexAt, ppgTime, ppgIndexAt,
@@ -815,6 +1039,7 @@ const Codec = (() => {
     clampI16, wrapI16, diffI16, diffU32, Unwrap16, CONT, Continuity,
     HighPass1, Biquad, EcgDisplayFilter,
     CAP_MAGIC, CAP_REC_HDR, encodeCaptureHeader, writeCaptureRecord, parseCapture, hex,
+    LOG_LINE_MAX, newLineAssembler, parseLogLine, fft, amplitudeSpectrum, toneAmplitude, peakToneAmplitude,
   };
 })();
 // ==== END CODEC ====
@@ -826,8 +1051,14 @@ const Codec = (() => {
 // blocks (gaps), a duplicate block, a truncated payload and an unknown event kind.
 class DemoDevice {
   constructor(emit, seed = 12345) {
-    this.emit = emit;                 // emit(charId, Uint8Array)
+    this.nSent = 0;
+    this.emit = (ch, u8) => { this.nSent++; emit(ch, u8); };   // emit(charId, Uint8Array)
     this.rng = mulberry32(seed);
+    // device log (Log 0x0007): one byte stream, cut into <= 32-byte notifications by _logPump()
+    this.logQ = new Uint8Array(8192); this.logLen = 0; this.logDropped = 0;
+    this.upMs0 = 17 * 60000 + 4321;   // device uptime (ms) when the simulation starts
+    this.logCutAt = 13; this.lastRadioT = 0; this.lastBattLogT = 0; this.lastEvT = 0;
+    this.ecgState = null; this.dg = null;
     this.st = { proto: 1, mode: 0, meas: 255, battPct: 82, flags: 0, gain: 0, notch: 0, rld: 0, ledLimit: 2, sweep: 1,
       notchHz: 50, hrBpm: 0, battMv: 3930, fw: "0.3.1", uptimeMin: 17 };
     this.t = 0;                       // device clock, s since power-up of the simulation
@@ -846,10 +1077,80 @@ class DemoDevice {
     this.beats = []; this.nextBeatT = 0.35; this.pendR = []; this.pendP = [];
     this.fineStepAcc = 0; this.led = 600; this.lead = 1;
     this.dropEcgAt = 6 + 10 * this.rng(); this.dropPpgAt = 9 + 12 * this.rng(); this.dupAt = 21; this.badAt = 33;
+    // front-end evidence counters (fw/app/src/app.c log_evidence): "so far" values and the per-second window
+    this.ecgLost = 0; this.ppgLost = 0; this.beatsN = 0; this.pulsesN = 0; this.lastPr = 0; this.agcSteps = 0;
+    this.dccSteps = 0; this.dac12 = 1290; this.hiRef = NaN; this.resyncs = 0;
+    this.ecgState = "wait"; this.lastEvT = this.t; this._newWindow();
+    this._logLine("session", `start ${["", "ecg", "ppg", "both"][mode] || mode}`);
     this.emit(Codec.CHAR.EVENTS, Codec.encodeEvent(Codec.EV.STATE, { mode, notchHz: this.st.notchHz, midCode: 2048, batt: this.st.battPct, flags: this.st.flags & 3 }));
     this.sendStatus();
   }
+  _newWindow() {
+    this.dg = { en: 0, rail: 0, min: 4095, max: 0, sum: 0, fr: 0, mainsA: 0, pn: 0, lsum: 0, lmin: Infinity, lmax: -Infinity, csum: 0 };
+  }
+  /** Appends one line to the log byte stream; best-effort like the firmware (cut short now and then). */
+  _logRaw(text) {
+    const b = new TextEncoder().encode(text + "\n");
+    if (this.logLen + b.length > this.logQ.length) { this.logDropped++; return; }
+    this.logQ.set(b, this.logLen); this.logLen += b.length;
+  }
+  _logLine(tag, text) {
+    let s = `[${Math.round(this.upMs0 + this.t * 1000)}] ${tag}: ${text}`;
+    if (this.t >= this.logCutAt) { this.logCutAt = this.t + 17 + 12 * this.rng(); s = s.slice(0, 24 + Math.floor(30 * this.rng())); this.logDropped++; }
+    this._logRaw(s);
+  }
+  logRadio(text) { this._logRaw("radio: " + text); }
+  /** Sends the queued log bytes as Log notifications of at most 32 bytes (a notification may hold
+   *  the end of one line and the start of the next). */
+  _logPump() {
+    for (let k = 0; k < 12 && this.logLen > 0; k++) {
+      const n = Math.min(Codec.NOTIFY_MAX_LEN, this.logLen);
+      const chunk = this.logQ.slice(0, n);
+      this.logQ.copyWithin(0, n, this.logLen); this.logLen -= n;
+      this.emit(Codec.CHAR.LOG, chunk);
+    }
+  }
+  /** Once per second while a session runs: ecg: / ppg: evidence lines (app.c log_evidence). */
+  _evidence() {
+    const d = this.dg, mode = this.st.mode, R = this.rng;
+    if (mode & 1) {
+      const codes = d.en ? ` rail=${Math.round(100 * d.rail / d.en)}% min=${d.min} max=${d.max} avg=${Math.round(d.sum / d.en)}` : " no samples";
+      const mains = Math.round(2 * d.mainsA * (1 + 0.04 * gauss(R)) + 4 + 2 * R());
+      this._logLine("ecg", `${this.ecgState}${codes} fr=${d.fr} beats=${this.beatsN} hr=${this.st.hrBpm} mains=${mains} lost=${this.ecgLost} rs=${this.resyncs}`);
+    }
+    if (mode & 2) {
+      const nf = this._noFingerAt(this.mt), state = nf ? "off" : mode === 3 ? "on" : this.mt > 4 ? "run" : "set";
+      let mid = "";
+      if (d.pn) {
+        const lm = d.lsum / d.pn;
+        if (!isFinite(this.hiRef)) this.hiRef = lm;
+        const hiOf = (l) => Math.max(0, Math.min(4095, Math.round(1950 + (l - this.hiRef) * 0.25)));
+        let hi = hiOf(lm);
+        if (!nf && Math.abs(hi - 1950) > 70) { this.dac12 += hi > 1950 ? 9 : -9; this.dccSteps++; this.hiRef = lm; hi = hiOf(lm); }
+        const dk = Math.round(304 + 3 * gauss(R)), c = Math.round(d.csum / d.pn);
+        mid = ` dk=${dk} on=${dk + c} hi=${hi}/${hiOf(d.lmin)}-${hiOf(d.lmax)} c=${c}`;
+      } else mid = " no frames";
+      this._logLine("ppg", `${state} led=${this.led} dac=${this.dac12}${mid} agc=${this.agcSteps} dcc=${this.dccSteps} p=${this.pulsesN} pr=${this.lastPr} lost=${this.ppgLost}`);
+    }
+    this._newWindow();
+  }
+  /** ECG state token as app.c logs it, with "a -> b (why)" lines on a change. */
+  _ecgStateUpdate() {
+    if (!(this.st.mode & 1)) return;
+    const mt = this.mt, off = this._leadOffAt(mt);
+    const want = off ? "hold" : mt < 0.3 ? "wait" : mt < 2 ? "settle" : "run";
+    if (want === this.ecgState) return;
+    const why = want === "run" ? (this.ecgState === "settle" ? " (settled, beat)" : " (stable)") : want === "hold" ? " (rail)" : "";
+    this._logLine("ecg", `${this.ecgState} -> ${want}${why}`);
+    this.ecgState = want;
+  }
+  /** Mains pickup amplitude (uV peak) at stream time t: low, with a pickup episode every 37 s. */
+  _mainsUv(t) {
+    const p = t % 37;
+    return 14 + (t > 8 && p > 20 && p < 29 ? 700 * Math.pow(Math.sin(Math.PI * (p - 20) / 9), 2) : 0);
+  }
   stop() {
+    if (this.dg) this._logLine("session", `end user run_ms=${Math.round(this.mt * 1000)} beats=${this.beatsN} hr=${this.st.hrBpm} pulses=${this.pulsesN}`);
     this.sessionChangeT = this.t;
     this.st.mode = 0; this.st.meas = 255; this.st.hrBpm = 0;
     this.emit(Codec.CHAR.EVENTS, Codec.encodeEvent(Codec.EV.STATE, { mode: 0, notchHz: this.st.notchHz, midCode: 2048, batt: this.st.battPct, flags: this.st.flags & 3 }));
@@ -906,6 +1207,15 @@ class DemoDevice {
     }
     if (t - this.lastStatusT >= 5) { this.st.uptimeMin = 17 + Math.floor(t / 60); this.sendStatus(); }
     if (t - this.lastBattT >= 30) { this.lastBattT = t; this.emit(Codec.CHAR.BATTERY, Uint8Array.of(this.st.battPct)); }
+    if (t - this.lastRadioT >= 10) {
+      this.lastRadioT = t;
+      this.logRadio(`ble: sent ${this.nSent} notif, dropped 0, log dropped ${this.logDropped}, int 20 ms, mtu 247`);
+    }
+    if (t - this.lastBattLogT >= 30) { this.lastBattLogT = t; this._logLine("batt", `mv=${this.st.battMv} pct=${this.st.battPct} usb=0`); }
+    this._advanceSession(t);
+    this._logPump();
+  }
+  _advanceSession(t) {
     if (this.st.mode === 0) return;
     const ecgOn = (this.st.mode & 1) !== 0, ppgOn = (this.st.mode & 2) !== 0;
     // beats on the measurement timeline (stream R time)
@@ -927,7 +1237,7 @@ class DemoDevice {
       const b = this.pendR.shift();
       if (!ecgOn || this._leadOffAt(b.tr) || b.tr < 1.2) continue;
       const hr = Math.round(60 / b.rr);
-      this.st.hrBpm = hr;
+      this.st.hrBpm = hr; this.beatsN++;
       this.emit(Codec.CHAR.EVENTS, Codec.encodeEvent(Codec.EV.R_PEAK, { index: Math.round(Codec.ecgIndexAt(b.tr)), hr }));
       this.emit(Codec.CHAR.HRM, Codec.encodeHrm(hr));
     }
@@ -936,6 +1246,7 @@ class DemoDevice {
       const tf = p.tr + p.pat;
       if (!ppgOn || this._noFingerAt(tf) || tf < 1.5) continue;
       const pr = Math.round(60 / p.rr);
+      this.pulsesN++; this.lastPr = pr;
       const patMs = ecgOn && !this._leadOffAt(p.tr) ? Math.round((p.pat + Codec.ECG_ANALOG_DELAY_S) * 1000) : 0;
       this.emit(Codec.CHAR.EVENTS, Codec.encodeEvent(Codec.EV.PULSE, { index: Math.round(Codec.ecgIndexAt(tf)), pulse: pr, pat: patMs, pi: 11 }));
       if (!ecgOn) this.emit(Codec.CHAR.HRM, Codec.encodeHrm(pr));
@@ -950,6 +1261,8 @@ class DemoDevice {
       if (!lead) this.emit(Codec.CHAR.EVENTS, Codec.encodeEvent(Codec.EV.BUTTON, { button: 2, press: 0 }));
       this.sendStatus();
     }
+    this._ecgStateUpdate();
+    if (this.t - this.lastEvT >= 1) { this.lastEvT += 1; if (this.t - this.lastEvT > 1) this.lastEvT = this.t; this._evidence(); }
   }
   _leadOffAt(t) { const p = t % 47; return t > 10 && p > 40 && p < 42; }
   _noFingerAt(t) { const p = t % 61; return t > 10 && p > 52 && p < 55; }
@@ -961,25 +1274,33 @@ class DemoDevice {
       if (d < -0.4 || d > 0.6) continue;
       v += 110 * g(d + 0.19, 0.022) - 90 * g(d + 0.028, 0.009) + 1150 * g(d, 0.0105) - 260 * g(d - 0.03, 0.011) + 290 * g(d - 0.27, 0.048);
     }
-    v += 70 * Math.sin(2 * Math.PI * 0.21 * t) + 14 * Math.sin(2 * Math.PI * this.st.notchHz * t) + 9 * gauss(this.rng);
+    const fm = this.st.notchHz, am = this._mainsUv(t);
+    v += 70 * Math.sin(2 * Math.PI * 0.21 * t) + am * Math.sin(2 * Math.PI * fm * t) + 0.12 * am * Math.sin(2 * Math.PI * 3 * fm * t + 0.7) + 9 * gauss(this.rng);
     return v;
   }
   _ecgBlock() {
-    const s0 = this.ecgNext, hi = this.gainHi();
-    const k = 8 * (hi ? Codec.GAIN_HI : Codec.GAIN_LO) / Codec.UV_PER_CODE;   // stream units per uV
+    const s0 = this.ecgNext, hi = this.gainHi(), gain = hi ? Codec.GAIN_HI : Codec.GAIN_LO;
+    const k = 8 * gain / Codec.UV_PER_CODE;   // stream units per uV
     let flags = hi ? Codec.ECG_F.GAIN_HI : 0;
     const t0 = Codec.ecgTime(s0);
     if (t0 < 1.0) flags |= Codec.ECG_F.SETTLING;
     const off = this._leadOffAt(t0);
     if (off) flags |= Codec.ECG_F.LEAD_OFF;
-    const s = this._ecgBuf || (this._ecgBuf = new Float64Array(10));
+    const s = this._ecgBuf || (this._ecgBuf = new Float64Array(10)), d = this.dg;
     for (let i = 0; i < 10; i++) {
       const t = Codec.ecgTime(s0 + i);
-      s[i] = off ? (1400 * Math.sin(2 * Math.PI * 1.3 * t) + 300 * gauss(this.rng)) * k : this._ecgUv(t) * k;
+      const uv = off ? 1700 * Math.sin(2 * Math.PI * 1.3 * t) + 300 * gauss(this.rng) : this._ecgUv(t);
+      s[i] = uv * k;
+      // raw ADC code (12-bit) for the evidence line: mid-scale offset + input * gain / 805.7 uV per code
+      const code = Math.max(0, Math.min(4095, Math.round(2010 + 25 * Math.sin(t / 3) + uv * gain / Codec.UV_PER_CODE)));
+      d.en++; d.sum += code; if (code < d.min) d.min = code; if (code > d.max) d.max = code;
+      if (code <= 2 || code >= 4093) d.rail++;
     }
+    if (!off) d.mainsA = Math.max(d.mainsA, this._mainsUv(t0));
+    else if (this.rng() < 0.03) d.fr++;               // FAST_RESTORE pulses while railing
     this.ecgNext += 10;
     const mt = this.mt;
-    if (mt > this.dropEcgAt) { this.dropEcgAt = mt + 14 + 12 * this.rng(); if (this.rng() < 0.5) this.ecgNext += 10; return; } // lost block(s)
+    if (mt > this.dropEcgAt) { this.dropEcgAt = mt + 14 + 12 * this.rng(); const two = this.rng() < 0.5; if (two) this.ecgNext += 10; this.ecgLost += two ? 20 : 10; return; } // lost block(s)
     const pay = Codec.encodeEcg(s0, flags, s);
     this.emit(Codec.CHAR.ECG, pay);
     if (mt > this.dupAt) { this.dupAt = mt + 40; this.emit(Codec.CHAR.ECG, pay); }
@@ -1006,7 +1327,7 @@ class DemoDevice {
       const nf = this._noFingerAt(t);
       if (nf) flags |= Codec.PPG_F.NO_FINGER;
       // AGC step every 25 s: LED code changes, the frame is flagged disturbed
-      if (Math.floor(t / 25) !== Math.floor((t - 0.01) / 25) && t > 5) { this.agcUp = !this.agcUp; this.led += this.agcUp ? 24 : -24; flags |= j ? Codec.PPG_F.DIST1 : Codec.PPG_F.DIST0; }
+      if (Math.floor(t / 25) !== Math.floor((t - 0.01) / 25) && t > 5) { this.agcUp = !this.agcUp; this.led += this.agcUp ? 24 : -24; this.agcSteps++; flags |= j ? Codec.PPG_F.DIST1 : Codec.PPG_F.DIST0; }
       let p = 0;
       for (const b of this.beats) p += this._pulse(t - (b.tr + b.pat), b.rr);
       const ledScale = this.led / 600;
@@ -1015,10 +1336,13 @@ class DemoDevice {
       const light = nf ? 900 + 40 * gauss(this.rng) : dc * (1 - 0.011 * p) + 6 * gauss(this.rng);
       fine[j] = -light;                                 // fine = minus photocurrent: systole up, wraps on the wire
       coarse[j] = light * Codec.NA_PER_FINE / Codec.NA_PER_COARSE + 1.5 * gauss(this.rng);
+      const d = this.dg;
+      d.pn++; d.lsum += light; d.csum += coarse[j];
+      if (light < d.lmin) d.lmin = light; if (light > d.lmax) d.lmax = light;
     }
     this.ppgNext += 2;
     const mt = this.mt;
-    if (mt > this.dropPpgAt) { this.dropPpgAt = mt + 18 + 15 * this.rng(); return; }
+    if (mt > this.dropPpgAt) { this.dropPpgAt = mt + 18 + 15 * this.rng(); this.ppgLost += 2; return; }
     this.emit(Codec.CHAR.PPG, Codec.encodePpg(k0, this.led, flags, coarse, fine));
   }
 }
@@ -1105,7 +1429,7 @@ const S = {
   devInfo: {}, malformed: 0, exceptions: 0,
   latestT: -Infinity,                       // newest data time on the common axis
 };
-for (const id of [C.CHAR.ECG, C.CHAR.PPG, C.CHAR.EVENTS, C.CHAR.STATUS, C.CHAR.HRM, C.CHAR.BATTERY]) S.chars[id] = newCharStats();
+for (const id of [C.CHAR.ECG, C.CHAR.PPG, C.CHAR.EVENTS, C.CHAR.STATUS, C.CHAR.LOG, C.CHAR.HRM, C.CHAR.BATTERY]) S.chars[id] = newCharStats();
 
 // ---- log ----
 const LOG_CATS = [["conn", "conn"], ["cmd", "cmd"], ["status", "status"], ["state", "state"], ["lead", "lead"],
@@ -1128,6 +1452,44 @@ const GapList = {
   },
 };
 
+// ---- device log (Log characteristic): reassembled lines and the front-end readout ----
+const DEVLOG_CAP = 5000;
+const DevLog = {
+  entries: [], seq: 0, listeners: [], asm: C.newLineAssembler(),
+  /** One Log notification: reassemble, store, parse ecg:/ppg: lines for the front-end card. */
+  ingest(u8, tRx) {
+    for (const line of this.asm.push(u8)) this.add(line, tRx);
+  },
+  /** End of a connection: the rest of a pending line will not come, show what there is. */
+  endOfStream(tRx) { for (const line of this.asm.flush()) this.add(line, tRx); this.asm.reset(); },
+  add(text, tRx) {
+    const p = C.parseLogLine(text);
+    const e = { id: ++this.seq, wall: performance.timeOrigin + tRx, text, radio: p.src === "radio", lc: null };
+    this.entries.push(e);
+    if (this.entries.length > DEVLOG_CAP + 500) this.entries.splice(0, this.entries.length - DEVLOG_CAP);
+    if (p.src === "mcu" && (p.kind === "ecg" || p.kind === "ppg")) FrontEnd.take(p.kind, p, tRx);
+    for (const fn of this.listeners) fn(e);
+  },
+  /** Stored lines (the newest DEVLOG_CAP) matching a lower-case substring filter ("" = all). */
+  select(f) {
+    const a = this.entries.length > DEVLOG_CAP ? this.entries.slice(-DEVLOG_CAP) : this.entries;
+    return f ? a.filter((e) => (e.lc || (e.lc = e.text.toLowerCase())).includes(f)) : a.slice();
+  },
+  count() { return Math.min(DEVLOG_CAP, this.entries.length); },
+  clear() { this.entries.length = 0; for (const fn of this.listeners) fn(null); },
+};
+/** Latest ecg: / ppg: evidence line per signal (fields of that line only) and the state from
+ *  evidence or transition lines ("ecg: wait -> settle"). */
+const FrontEnd = {
+  ecg: null, ppg: null,
+  take(kind, p, tRx) {
+    const cur = this[kind] || (this[kind] = { state: null, stateRx: 0, fields: null, nodata: false, rx: 0, t_ms: null });
+    if (p.state) { cur.state = p.state; cur.stateRx = tRx; }
+    if (p.evidence) { cur.fields = p.fields; cur.nodata = p.nodata; cur.rx = tRx; cur.t_ms = p.t_ms; }
+  },
+  clear() { this.ecg = this.ppg = null; },
+};
+
 // ---- recorder: raw payloads in 1 MiB chunks (see capture format at the top) ----
 const Recorder = {
   on: false, chunks: [], cur: null, off: 0, bytes: 0, records: 0, t0Perf: 0, t0Unix: 0, header: null, stoppedAt: 0,
@@ -1136,7 +1498,7 @@ const Recorder = {
     this.t0Perf = performance.now(); this.t0Unix = Date.now();
     this.header = Object.assign({ format: "ecgcard-ble-capture", version: 1, t0_unix_ms: this.t0Unix,
       created_utc: new Date(this.t0Unix).toISOString(),
-      channels: { "2": "ecg", "3": "ppg", "4": "events", "5": "status", "6": "control_write", "10807": "hrm_2a37", "10777": "battery_2a19", "65535": "note" },
+      channels: { "2": "ecg", "3": "ppg", "4": "events", "5": "status", "6": "control_write", "7": "log", "10807": "hrm_2a37", "10777": "battery_2a19", "65535": "note" },
       user_agent: navigator.userAgent }, header);
     this.on = true;
     this.note("record start");
@@ -1193,6 +1555,7 @@ function onNotify(ch, dv, tRx) {
       }
       case C.CHAR.HRM: { const h = C.parseHrm(dv); if (h.err) return bad(ch, h.err, dv); S.hrSvc = h; S.hrSvcRx = tRx; break; }
       case C.CHAR.BATTERY: { const b = C.parseBattery(dv); if (b.err) return bad(ch, b.err, dv); S.batterySvc = b.pct; break; }
+      case C.CHAR.LOG: DevLog.ingest(new Uint8Array(dv.buffer, dv.byteOffset, dv.byteLength), tRx); break;
       default: Log.add("error", `notification on unexpected characteristic 0x${ch.toString(16)}: ${C.hex(dv)}`);
     }
   } catch (err) {
@@ -1481,6 +1844,10 @@ class BleTransport {
       try { this.chars[key] = await this.op(() => svc.getCharacteristic(C.CHAR_UUID[key])); }
       catch (e) { h.log("error", `characteristic ${key} (${C.CHAR_UUID[key]}) not found: ${e.message}`); }
     }
+    // Log (0x0007) is optional: radio firmware before the device log over BLE has none
+    this.hasLog = false;
+    try { this.chars.LOG = await this.op(() => svc.getCharacteristic(C.CHAR_UUID.LOG)); }
+    catch (e) { h.log("info", "no Log characteristic (older radio firmware): device log and front-end readout unavailable"); }
     // One handler function per characteristic id for the life of this transport: Chrome may hand
     // back the same characteristic objects after a reconnect, and addEventListener ignores a
     // listener that is already registered, so notifications are never delivered twice.
@@ -1489,7 +1856,7 @@ class BleTransport {
       const fn = this.handlers[id] || (this.handlers[id] = (ev) => h.notify(id, ev.target.value, ev.timeStamp > 0 ? ev.timeStamp : performance.now()));
       c.addEventListener("characteristicvaluechanged", fn);
     };
-    for (const [key, id] of [["ECG", C.CHAR.ECG], ["PPG", C.CHAR.PPG], ["EVENTS", C.CHAR.EVENTS], ["STATUS", C.CHAR.STATUS]])
+    for (const [key, id] of [["ECG", C.CHAR.ECG], ["PPG", C.CHAR.PPG], ["EVENTS", C.CHAR.EVENTS], ["STATUS", C.CHAR.STATUS], ["LOG", C.CHAR.LOG]])
       if (this.chars[key]) listen(this.chars[key], id);
     // standard services are optional for the client
     try {
@@ -1515,10 +1882,10 @@ class BleTransport {
     } catch (e) { h.log("info", `Device Information service not available: ${e.message}`); }
     h.info(info);
     h.state("connecting", "subscribing");
-    for (const key of ["ECG", "PPG", "EVENTS", "STATUS", "HRM", "BATT"]) {
+    for (const key of ["ECG", "PPG", "EVENTS", "STATUS", "HRM", "BATT", "LOG"]) {
       if (!this.chars[key]) continue;
-      try { await this.op(() => this.chars[key].startNotifications()); }
-      catch (e) { h.log("error", `startNotifications(${key}) failed: ${e.name}: ${e.message}`); }
+      try { await this.op(() => this.chars[key].startNotifications()); if (key === "LOG") this.hasLog = true; }
+      catch (e) { h.log(key === "LOG" ? "info" : "error", `startNotifications(${key}) failed: ${e.name}: ${e.message}`); }
     }
     // reads fire characteristicvaluechanged too, so the listeners above handle the values
     if (this.chars.STATUS) await this.op(() => this.chars.STATUS.readValue()).catch((e) => h.log("error", `Status read failed: ${e.message}`));
@@ -1540,10 +1907,13 @@ class BleTransport {
 }
 
 class DemoTransport {
-  constructor(h) {
+  /** opts.log = false simulates radio firmware without the Log characteristic (?nolog=1). */
+  constructor(h, opts = {}) {
     this.h = h; this.kind = "demo"; this.connectedFlag = false; this.started = false; this.services = [];
+    this.hasLog = opts.log !== false;
     this.device = { name: "ECG Card 3F2A", id: "demo-device" };
     this.dev = new DemoDevice((ch, u8) => {
+      if (ch === C.CHAR.LOG && !this.hasLog) return;
       if (this.connectedFlag) this.h.notify(ch, new DataView(u8.buffer, u8.byteOffset, u8.byteLength), performance.now());
     });
     this.dev.onBleOff = () => {            // SET_ITEM_BLE = off: the radio goes away
@@ -1563,6 +1933,8 @@ class DemoTransport {
     this.connectedFlag = true;
     this.services = ["ECG Card", "Heart Rate", "Battery", "Device Information"];
     this.h.info({ manufacturer: "Simulator", model: "ECG Card (demo)", serial: "C0:FF:EE:00:3F:2A", firmware: "radio 0.2.0 (demo)", software: "0.3.1 (demo)" });
+    if (!this.hasLog) this.h.log("info", "no Log characteristic (older radio firmware): device log and front-end readout unavailable");
+    this.dev.logRadio("ble: connected, int 20 ms, latency 0, mtu 247, phy 2M");
     this.dev.sendStatus();
     this.h.notify(C.CHAR.BATTERY, new DataView(Uint8Array.of(this.dev.st.battPct).buffer), performance.now());
     if (!this.started) {          // as if BUTTON1 started ECG + PPG on the card
@@ -1590,7 +1962,9 @@ const View = { win: 10, live: true, tRight: 0, dispT: NaN, lastNow: 0, theme: {}
 function readTheme() {
   const cs = getComputedStyle(document.documentElement), v = (n) => cs.getPropertyValue(n).trim();
   View.theme = { bg: v("--plot-bg"), major: v("--grid-major"), minor: v("--grid-minor"), plain: v("--grid-plain"), axis: v("--axis-text"),
-    gap: v("--gap"), ecg: v("--ecg"), ppg: v("--ppg"), coarse: v("--coarse"), marker: v("--marker"), faint: v("--faint"), mono: v("--mono") };
+    gap: v("--gap"), ecg: v("--ecg"), ppg: v("--ppg"), coarse: v("--coarse"), marker: v("--marker"), faint: v("--faint"), mono: v("--mono"),
+    m50: v("--m50"), m60: v("--m60") };
+  Spec.dirty = true;
 }
 
 /** Source descriptors: how to read a ring as (time, value, dimmed). */
@@ -1832,6 +2206,137 @@ function fmtTime(t, step) {
   return `${t.toFixed(d)} s`;
 }
 
+/** ECG amplitude spectrum of the newest SPEC_N raw samples (uV, before the display filter), or of
+ *  the samples up to the right edge of the view when paused. Hann window, mean removed, 0-250 Hz,
+ *  log amplitude axis with 50 / 60 Hz harmonic markers. Recomputed every SPEC_MS while visible
+ *  (not per frame); frame() only redraws when something changed. */
+const SPEC_N = 2048, SPEC_MS = 333, SPEC_MIN = 256, SPEC_FMAX = 250;
+const SPEC_H50 = [50, 100, 150, 200, 250], SPEC_H60 = [60, 120, 180, 240];
+const Spec = {
+  el: null, canvas: null, ctx: null, valEl: null, w: 1, h: 1, dpr: 1,
+  x: new Float64Array(SPEC_N), sp: null, a50: null, a60: null, lastKey: "", dirty: true, msg: "No ECG data",
+  lo: NaN, hi: NaN, info: "", lastVal: "",
+  init(el) {
+    this.el = el; this.canvas = el.querySelector("canvas"); this.ctx = this.canvas.getContext("2d");
+    this.valEl = el.querySelector("[data-val]");
+    new ResizeObserver(() => this.resize()).observe(el);
+  },
+  resize() {
+    const r = this.el.getBoundingClientRect(), dpr = window.devicePixelRatio || 1;
+    this.w = Math.max(1, Math.floor(r.width)); this.h = Math.max(1, Math.floor(r.height)); this.dpr = dpr;
+    this.canvas.width = Math.round(this.w * dpr); this.canvas.height = Math.round(this.h * dpr);
+    this.dirty = true;
+  },
+  visible() { return !!this.el && !this.el.hidden && !document.hidden; },
+  compute() {
+    if (!this.visible()) return;
+    const r = S.ecg;
+    if (r.empty) { if (this.sp || this.msg !== "No ECG data") { this.sp = null; this.msg = "No ECG data"; this.dirty = true; } return; }
+    let end = r.hi - 1;
+    if (!View.live) end = Math.min(end, Math.floor(C.ecgIndexAt(View.tRight)));
+    const start = Math.max(r.oldest(), end - SPEC_N + 1), key = `${start}:${end}`;
+    if (key === this.lastKey) return;
+    this.lastKey = key;
+    const L = end - start + 1;
+    if (L < SPEC_MIN) { this.sp = null; this.msg = "Collecting ECG samples for the spectrum"; this.dirty = true; return; }
+    // missing samples (gaps) are held at the previous value; flagged samples are counted
+    const x = this.x.subarray(0, L);
+    let last = NaN, miss = 0, flagged = 0;
+    for (let u = start; u <= end; u++) {
+      const s = u & r.mask;
+      if (r.own[s] === u) { last = r.val[s]; if (r.fl[s] & (C.ECG_F.SETTLING | C.ECG_F.LEAD_OFF)) flagged++; } else miss++;
+      x[u - start] = last;
+    }
+    let first = 0; while (first < L && !(x[first] === x[first])) first++;   // leading gap: first valid value
+    for (let i = 0; i < first; i++) x[i] = x[first] ?? 0;
+    this.sp = C.amplitudeSpectrum(x, C.ECG_HZ, SPEC_N);
+    this.a50 = C.peakToneAmplitude(x, C.ECG_HZ, 50); this.a60 = C.peakToneAmplitude(x, C.ECG_HZ, 60);
+    this.info = `${(L / C.ECG_HZ).toFixed(1)} s Hann, Δf ${(C.ECG_HZ / SPEC_N).toFixed(2)} Hz` +
+      (miss ? `, ${miss} missing` : "") + (flagged ? `, ${Math.round(100 * flagged / L)}% settling/lead-off` : "");
+    this.msg = ""; this.dirty = true;
+  },
+  draw() {
+    this.dirty = false;
+    const ctx = this.ctx, W = this.w, H = this.h, th = View.theme;
+    ctx.setTransform(this.dpr, 0, 0, this.dpr, 0, 0);
+    ctx.fillStyle = th.bg; ctx.fillRect(0, 0, W, H);
+    const gl = 50, gr = 10, top = 32, bot = H - 17, pw = Math.max(10, W - gl - gr), ph = Math.max(10, bot - top);
+    const X = (f) => gl + f / SPEC_FMAX * pw;
+    let txt = "";
+    const sp = this.sp;
+    if (sp) {
+      // auto range on log10(uV): top from the largest bin above 0.5 Hz, bottom from a low percentile
+      const a = sp.amp, k0 = Math.max(1, Math.ceil(0.5 / sp.df)), k1 = Math.min(a.length - 1, Math.floor(SPEC_FMAX / sp.df));
+      let mx = 1e-6; const vals = [];
+      for (let k = k0; k <= k1; k++) { if (a[k] > mx) mx = a[k]; if ((k & 7) === 0) vals.push(a[k]); }
+      vals.sort((p, q) => p - q);
+      const p5 = Math.max(1e-4, vals[Math.floor(vals.length * 0.05)] || 1e-3);
+      let thi = Math.log10(mx) + 0.25, tlo = Math.log10(p5) - 0.3;
+      if (thi - tlo < 2) tlo = thi - 2; if (thi - tlo > 5) tlo = thi - 5;
+      if (!isFinite(this.lo)) { this.lo = tlo; this.hi = thi; }
+      else {
+        this.hi = thi > this.hi ? thi : this.hi + (thi - this.hi) * 0.15;
+        this.lo = tlo < this.lo ? tlo : this.lo + (tlo - this.lo) * 0.15;
+      }
+    }
+    const lo = isFinite(this.lo) ? this.lo : -1, hi = isFinite(this.hi) ? this.hi : 3;
+    const Y = (v) => top + (hi - Math.log10(Math.max(v, 1e-9))) / (hi - lo) * ph;
+    const line = (c, x0, y0, x1, y1) => { ctx.strokeStyle = c; ctx.beginPath(); ctx.moveTo(x0, y0); ctx.lineTo(x1, y1); ctx.stroke(); };
+    ctx.save(); ctx.lineWidth = 1;
+    // grid: decades (with 2x and 5x minor lines) and every 25 Hz
+    ctx.font = `11px ${th.mono || "monospace"}`; ctx.fillStyle = th.axis; ctx.textBaseline = "middle"; ctx.textAlign = "right";
+    for (let d = Math.floor(lo); d <= Math.ceil(hi); d++) {
+      for (const m of [1, 2, 5]) {
+        const v = m * Math.pow(10, d), y = Math.round(Y(v)) + 0.5;
+        if (y < top - 0.5 || y > bot + 0.5) continue;
+        line(m === 1 ? th.plain : th.minor, gl, y, gl + pw, y);
+        if (m === 1 && y > top + 5 && y < bot - 4) ctx.fillText(fmtUv(v), gl - 5, y);
+      }
+    }
+    const labEvery = pw >= 520 ? 25 : 50;
+    ctx.textAlign = "center"; ctx.textBaseline = "alphabetic";
+    for (let f = 0; f <= SPEC_FMAX; f += 25) {
+      const x = Math.round(X(f)) + 0.5;
+      line(th.plain, x, top, x, bot);
+      if (f % labEvery === 0) ctx.fillText(f === SPEC_FMAX ? `${f} Hz` : String(f), Math.min(x, W - 22), H - 4);
+    }
+    // mains markers: 50 Hz family and 60 Hz family, labels on two rows
+    ctx.font = `10px ${th.mono || "monospace"}`; ctx.textBaseline = "top";
+    for (const [fam, col, row] of [[SPEC_H50, th.m50, 0], [SPEC_H60, th.m60, 1]]) {
+      for (const f of fam) {
+        const x = Math.round(X(f)) + 0.5;
+        ctx.globalAlpha = 0.55; ctx.setLineDash([3, 3]); line(col, x, top + 12 * (row + 1), x, bot); ctx.setLineDash([]);
+        ctx.globalAlpha = 0.95; ctx.fillStyle = col; ctx.fillText(String(f), Math.min(Math.max(x, gl + 8), W - 12), top + 12 * row);
+      }
+    }
+    ctx.globalAlpha = 1;
+    // trace: per pixel column the largest bin (keeps narrow peaks visible)
+    if (sp) {
+      const a = sp.amp, kmax = Math.min(a.length - 1, Math.floor(SPEC_FMAX / sp.df));
+      ctx.beginPath(); ctx.rect(gl, top - 1, pw, ph + 2); ctx.clip();
+      ctx.strokeStyle = th.ecg; ctx.lineWidth = 1.3; ctx.lineJoin = "round"; ctx.beginPath();
+      let col = -1, cmax = 0, started = false;
+      const put = (c, v) => { const xx = gl + c + 0.5, yy = Y(v); if (!started) { ctx.moveTo(xx, yy); started = true; } else ctx.lineTo(xx, yy); };
+      if (kmax > pw) {
+        for (let k = 1; k <= kmax; k++) {
+          const c = Math.min(pw - 1, Math.floor((k * sp.df) / SPEC_FMAX * pw));
+          if (c !== col) { if (col >= 0) put(col, cmax); col = c; cmax = a[k]; } else if (a[k] > cmax) cmax = a[k];
+        }
+        if (col >= 0) put(col, cmax);
+      } else for (let k = 1; k <= kmax; k++) { const xx = X(k * sp.df), yy = Y(a[k]); if (!started) { ctx.moveTo(xx, yy); started = true; } else ctx.lineTo(xx, yy); }
+      ctx.stroke();
+      const f2 = (o) => `${fmtNum(o.amp)} µV (${fmtNum(2 * o.amp)} µVpp)`;
+      txt = `50 Hz ${f2(this.a50)}  60 Hz ${f2(this.a60)}  |  ${this.info}`;
+    } else {
+      ctx.fillStyle = th.faint; ctx.font = "12px system-ui, sans-serif"; ctx.textAlign = "center"; ctx.textBaseline = "middle";
+      ctx.fillText(this.msg || "No ECG data", gl + pw / 2, top + ph / 2);
+    }
+    ctx.restore();
+    if (txt !== this.lastVal) { this.valEl.textContent = txt; this.valEl.title = txt; this.lastVal = txt; }
+  },
+};
+function fmtUv(v) { return v >= 1000 ? `${fmtNum(v / 1000)} mV` : `${fmtNum(v)} µV`; }
+
 const strips = [];
 function visibleStrips() { return strips.filter((s) => !s.el.hidden); }
 /** Range of times the buffers can show (for scroll-back). */
@@ -1861,6 +2366,7 @@ function frame(now) {
   if (!isFinite(tR)) tR = View.win;
   const t0 = tR - View.win, vs = visibleStrips();
   for (let i = 0; i < vs.length; i++) vs[i].draw(t0, tR, i === vs.length - 1);
+  if (Spec.dirty && Spec.visible()) Spec.draw();
 }
 
 // ==== UI: DOM wiring ====
@@ -1927,6 +2433,7 @@ const handlers = {
     if (tr !== App.tr || App.conn === "disconnected" || App.conn === "lost") return;
     Cmd.transport = null; Cmd.abortAll("disconnected");
     if (Recorder.on) Recorder.note(byUser ? "disconnected (by user)" : "disconnected (link lost)");
+    DevLog.endOfStream(performance.now());
     const bleOff = performance.now() - (App.bleOffAt || -1e9) < 10000;
     Log.add(byUser ? "conn" : "error", byUser ? "Disconnected" : bleOff
       ? "Disconnected: Bluetooth was turned off on the card. Turn it back on in the card's Settings screen, then Reconnect."
@@ -1941,6 +2448,7 @@ async function connectWith(tr) {
     App.everConnected = true; App.connectedAt = performance.now();
     Cmd.transport = tr;
     S.resumeEcg = !S.ecg.empty; S.resumePpg = !S.ppg.empty;
+    DevLog.asm.reset();
     Cmd.lastLost = null;
     const bleSel = setSelects[C.SET_ITEM_BLE]; if (bleSel) { bleSel.value = "1"; delete bleSel.dataset.pending; }
     Log.add("conn", `Connected to ${tr.name}${tr.kind === "demo" ? " (simulator)" : ""}; services: ${tr.services.join(", ") || "?"}`);
@@ -1970,7 +2478,7 @@ $("btnDemo").addEventListener("click", () => startDemo());
 function startDemo() {
   if (App.tr) { try { App.tr.destroy(); } catch (_) {} }
   App.conn = "idle";
-  connectWith(new DemoTransport(handlers));
+  connectWith(new DemoTransport(handlers, { log: params.get("nolog") !== "1" }));
 }
 
 // ---- controls ----
@@ -2047,7 +2555,7 @@ function pan(dt) { if (View.live) setLive(false); View.tRight = clampRight(View.
 (function plotPointer() {
   const area = $("strips");
   let drag = null;
-  area.addEventListener("pointerdown", (e) => { if (e.target.tagName !== "CANVAS") return; drag = { x: e.clientX, t: View.live ? View.dispT : View.tRight, w: e.target.clientWidth, moved: false }; e.target.setPointerCapture(e.pointerId); });
+  area.addEventListener("pointerdown", (e) => { if (e.target.tagName !== "CANVAS" || e.target.closest("#stripSpec")) return; drag = { x: e.clientX, t: View.live ? View.dispT : View.tRight, w: e.target.clientWidth, moved: false }; e.target.setPointerCapture(e.pointerId); });
   area.addEventListener("pointermove", (e) => {
     if (!drag) return;
     const dx = e.clientX - drag.x;
@@ -2058,6 +2566,7 @@ function pan(dt) { if (View.live) setLive(false); View.tRight = clampRight(View.
   const end = () => { drag = null; };
   area.addEventListener("pointerup", end); area.addEventListener("pointercancel", end);
   area.addEventListener("wheel", (e) => {
+    if (e.target.closest && e.target.closest("#stripSpec")) return;
     const d = Math.abs(e.deltaX) > Math.abs(e.deltaY) ? e.deltaX : e.deltaY;
     if (!d) return;
     e.preventDefault();
@@ -2073,6 +2582,15 @@ function pan(dt) { if (View.live) setLive(false); View.tRight = clampRight(View.
 $("selEcgFilt").addEventListener("change", (e) => { S.ecgFilt.configure(e.target.value, S.ecgFilt.notchHz); refilterEcg(); strips[0].resetScale = true; });
 $("selPpgFilt").addEventListener("change", (e) => { S.ppgFiltMode = e.target.value; refilterPpg(); strips[1].resetScale = true; });
 $("chkCoarse").addEventListener("change", (e) => { $("stripCoarse").hidden = !e.target.checked; });
+/** Lower plot: "ppg" (PPG strip), "spec" (ECG spectrum in its place) or "both". */
+function setLower(v) {
+  if (!["ppg", "spec", "both"].includes(v)) v = "ppg";
+  $("stripPpg").hidden = v === "spec";
+  $("stripSpec").hidden = v === "ppg";
+  $("selLower").value = v;
+  if (v !== "ppg") { Spec.lastKey = ""; Spec.compute(); }
+}
+$("selLower").addEventListener("change", (e) => setLower(e.target.value));
 hooks.onRun = () => { View.dispT = NaN; strips.forEach((s) => { s.resetScale = true; }); };
 
 // ---- recording ----
@@ -2099,6 +2617,39 @@ $("btnCsv").addEventListener("click", () => {
   download(b + ".ecg.csv", r.ecg, "text/csv"); download(b + ".ppg.csv", r.ppg, "text/csv"); download(b + ".events.csv", r.ev, "text/csv");
   sinkFor($("resRec"))(`CSV: ${r.nE} ECG rows, ${r.nP} PPG rows, ${r.nV} events (${Math.round(performance.now() - t)} ms)`, "ok");
 });
+$("btnLogTxt").addEventListener("click", () => {
+  const r = exportLogTxt();
+  download(baseName() + ".log.txt", r.parts, "text/plain");
+  sinkFor($("resRec"))(r.n ? `log.txt: ${r.n} device log lines from ${r.chunks} Log notifications` : "log.txt: no Log notifications in this recording (older radio firmware?)", r.n ? "ok" : "warn");
+});
+/** Device log lines of the recording, reassembled from the Log (0x0007) records, one per line:
+ *  "<s since record start>\t<local receive time>\t<line>". The receive time is that of the
+ *  notification that completed the line. Client notes (connected / disconnected) appear as
+ *  "# note: ..." lines; a pending partial line is flushed at a disconnect note. */
+function exportLogTxt() {
+  const asm = C.newLineAssembler(), td = new TextDecoder(), t0 = Recorder.t0Unix;
+  const parts = [`# ECG Card device log (Log characteristic 0x0007), record start ${new Date(t0).toISOString()}\n# rx_s\tlocal_time\tline\n`];
+  let n = 0, chunks = 0, rows = [];
+  const row = (tMs, line) => rows.push(`${(tMs / 1000).toFixed(3)}\t${localStamp(t0 + tMs)}\t${line}\n`);
+  Recorder.each((ch, tMs, p) => {
+    if (ch === C.CHAR.LOG) { chunks++; for (const line of asm.push(p)) { row(tMs, line); n++; } }
+    else if (ch === C.CHAR.NOTE) {
+      const txt = td.decode(p);
+      if (/^(connected|disconnected)/.test(txt)) { for (const line of asm.flush()) { row(tMs, line); n++; } asm.reset(); }
+      row(tMs, "# note: " + txt);
+    }
+    if (rows.length > 5000) { parts.push(rows.join("")); rows = []; }
+  });
+  const end = Recorder.durationS() * 1000;
+  for (const line of asm.flush()) { row(end, line); n++; }
+  parts.push(rows.join(""));
+  return { parts, n, chunks };
+}
+/** Local date and time with milliseconds, "2026-11-13 10:22:01.123". */
+function localStamp(ms) {
+  const d = new Date(ms), p = (v, n = 2) => String(v).padStart(n, "0");
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}.${p(d.getMilliseconds(), 3)}`;
+}
 function baseName() {
   const d = new Date(Recorder.t0Unix || Date.now()), p = (n) => String(n).padStart(2, "0");
   return `ecgcard_${d.getFullYear()}${p(d.getMonth() + 1)}${p(d.getDate())}_${p(d.getHours())}${p(d.getMinutes())}${p(d.getSeconds())}`;
@@ -2171,7 +2722,7 @@ function updateRec() {
   $("recInfo").className = "right mono " + (r.on ? "err" : "");
   $("btnRec").textContent = r.on ? "Stop recording" : "Record";
   $("btnRec").classList.toggle("on", r.on);
-  $("btnCsv").disabled = $("btnCap").disabled = !r.has() || r.on;
+  $("btnCsv").disabled = $("btnCap").disabled = $("btnLogTxt").disabled = !r.has() || r.on;
   $("btnRecClear").disabled = !r.has() || r.on;
 }
 
@@ -2220,6 +2771,7 @@ function updateNumbers() {
     ["Manufacturer", di.manufacturer || "--"], ["Model", di.model || "--"], ["Serial", di.serial || "--"],
     ["Name vs serial", nameCheck(tr ? tr.name : "", di.serial)],
     ["Uptime", st ? `${st.uptimeMin} min` : "--"],
+    ["Device log", !tr || App.conn !== "connected" ? "--" : tr.hasLog ? "Log 0x0007 subscribed" : "no Log characteristic (older radio firmware)"],
     ["MTU / interval / PHY", "not visible to a web page"],
   ];
   const dh = rows.map(([k, v]) => `<dt>${k}</dt><dd>${escapeHtml(String(v))}</dd>`).join("");
@@ -2242,7 +2794,7 @@ function nameCheck(name, serial) {
 function escapeHtml(s) { return s.replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c])); }
 
 // ---- integrity panel (1 Hz) ----
-const CHAR_ROWS = [C.CHAR.ECG, C.CHAR.PPG, C.CHAR.EVENTS, C.CHAR.STATUS, C.CHAR.HRM, C.CHAR.BATTERY];
+const CHAR_ROWS = [C.CHAR.ECG, C.CHAR.PPG, C.CHAR.EVENTS, C.CHAR.STATUS, C.CHAR.LOG, C.CHAR.HRM, C.CHAR.BATTERY];
 function updateIntegrity() {
   const now = performance.now();
   const tb = $("tblChars").tBodies[0];
@@ -2314,12 +2866,183 @@ const LogView = {
 Log.listeners.push((e) => { if (e === null) LogView.rebuild(); else if (LogView.matches(e)) LogView.pending.push(e); });
 $("btnLogClear").addEventListener("click", () => Log.clear());
 
+// ---- front-end readout card (from FrontEnd, i.e. the ecg: / ppg: device log lines; 4 Hz) ----
+const feN = (v, unit = "") => (typeof v === "number" ? v + unit : v === undefined ? "--" : String(v));
+const feJoin = (vals, unit = "") => (vals.every((v) => v === undefined) ? "--" : vals.map((v) => feN(v)).join(" / ") + unit);
+const FE_RAIL_HOT = 20, FE_MAINS_HOT = 1000;
+const FE_ROWS = {   // [label, tooltip, format(fields), hot(fields)]
+  ecg: [
+    ["rail", "Raw samples on a rail in the last second (warn at 20 %)", (f) => feN(f.rail, " %"), (f) => f.rail >= FE_RAIL_HOT],
+    ["mains", "Mains amplitude, uV peak-to-peak (warn above 1000)", (f) => feN(f.mains, " \u00b5Vpp"), (f) => f.mains > FE_MAINS_HOT],
+    ["FAST_RESTORE", "FAST_RESTORE pulses in the last second", (f) => feN(f.fr)],
+    ["code min\u2013max", "Raw ADC codes (12-bit, 0..4095), last second", (f) => (f.min === undefined && f.max === undefined ? "--" : `${feN(f.min)}\u2013${feN(f.max)}`)],
+    ["code avg", "Mean raw ADC code, last second", (f) => feN(f.avg)],
+    ["beats / HR", "R-peaks so far / heart rate (bpm)", (f) => feJoin([f.beats, f.hr])],
+    ["lost", "Samples re-filled so far", (f) => feN(f.lost)],
+    ["resyncs", "Acquisition resyncs so far", (f) => feN(f.rs)],
+  ],
+  ppg: [
+    ["LED", "LED DAC code and current (code x 3.718 uA)", (f) => (typeof f.led === "number" ? `${f.led} ${(f.led * C.LED_UA_PER_CODE / 1000).toFixed(2)}mA` : "--")],
+    ["DAC12", "DAC12 offset code", (f) => feN(f.dac)],
+    ["coarse", "On minus dark (codes, may be negative)", (f) => feN(f.c)],
+    ["dark / on", "Dark and LED-on means (codes)", (f) => feJoin([f.dk, f.on])],
+    ["hi", "High-gain channel mean during LED on (codes)", (f) => feN(f.hi)],
+    ["hi min\u2013max", "High-gain channel min and max during LED on", (f) => (f.hi_min === undefined ? "--" : `${f.hi_min}\u2013${f.hi_max}`)],
+    ["AGC / DCC", "LED steps / DAC12 steps so far", (f) => feJoin([f.agc, f.dcc])],
+    ["pulses / rate", "Pulses so far / pulse rate (bpm)", (f) => feJoin([f.p, f.pr])],
+    ["lost", "Frames lost so far", (f) => feN(f.lost)],
+  ],
+};
+const FE_STATE_CLS = { run: "good", on: "good", wait: "mid", settle: "mid", set: "mid", hold: "bad", off: "bad", end: "bad" };
+const FE_EL = {};
+(function buildFrontEnd() {
+  const body = $("feBody");
+  for (const sig of ["ecg", "ppg"]) {
+    const sec = document.createElement("div"); sec.className = "fesec stale";
+    sec.innerHTML = `<div class="fehead"><b>${sig.toUpperCase()}</b><span class="st" title="State (from the evidence or transition lines)">--</span><span class="age">no data</span></div><div class="fe"></div>`;
+    const grid = sec.querySelector(".fe"), dds = [];
+    for (const [label, title] of FE_ROWS[sig]) {
+      const cell = document.createElement("div"), k = document.createElement("div"), v = document.createElement("div");
+      k.className = "k"; v.className = "v"; k.textContent = label; v.textContent = "--"; cell.title = title;
+      cell.append(k, v); grid.appendChild(cell); dds.push(v);
+    }
+    body.appendChild(sec);
+    FE_EL[sig] = { sec, st: sec.querySelector(".st"), age: sec.querySelector(".age"), dds };
+  }
+  const note = document.createElement("div"); note.className = "fenote"; note.id = "feNote"; body.appendChild(note);
+})();
+function updateFrontEnd() {
+  const now = performance.now(), tr = App.tr, conn = App.conn === "connected", noLog = conn && tr && !tr.hasLog;
+  setText($("feInfo"), noLog ? "no Log characteristic" : "");
+  let any = false;
+  for (const sig of ["ecg", "ppg"]) {
+    const d = FrontEnd[sig], el = FE_EL[sig], f = d && d.fields;
+    const state = d && d.state ? d.state : "--";
+    setText(el.st, state);
+    const cls = "st " + (FE_STATE_CLS[state] || "");
+    if (el.st.className !== cls) el.st.className = cls;
+    setText(el.age, d && d.rx ? `${ago(d.rx)} ago` : d ? "no evidence line yet" : "no data");
+    el.sec.classList.toggle("stale", !f || now - d.rx > 3000);
+    FE_ROWS[sig].forEach(([, , fmt, hot], i) => {
+      const dd = el.dds[i];
+      setText(dd, f ? fmt(f) : "--");
+      dd.classList.toggle("hot", !!(f && hot && hot(f)));
+    });
+    if (d) any = true;
+  }
+  setText($("feNote"), any ? "" : noLog ? "This radio firmware has no Log characteristic, so there is no front-end data."
+    : "Updates once per second from the device log during a measurement.");
+}
+
+// ---- device log console ----
+const DevLogView = {
+  filter: "", paused: false, pending: [], pausedNew: 0, raf: 0, rebuildDue: false,
+  matches(e) { return !this.filter || (e.lc || (e.lc = e.text.toLowerCase())).includes(this.filter); },
+  row(e) {
+    const d = document.createElement("div"), t = document.createElement("span"), m = document.createElement("span");
+    d.className = e.radio ? "l radio" : "l"; t.className = "t"; m.className = "m";
+    t.textContent = clock(e.wall) + " "; m.textContent = e.text;
+    d.append(t, m); return d;
+  },
+  onAdd(e) {
+    if (e === null) { this.rebuild(); return; }
+    if (!this.matches(e)) return;
+    if (this.paused) { this.pausedNew++; return; }
+    this.pending.push(e);
+    if (this.pending.length > DEVLOG_CAP) { this.pending.length = 0; this.rebuildDue = true; }
+    if (!this.raf) this.raf = requestAnimationFrame(() => { this.raf = 0; this.flush(); });
+  },
+  /** Appends the lines that arrived since the last animation frame (one DOM update per frame). */
+  flush() {
+    if (this.paused) return;
+    if (this.rebuildDue) { this.rebuild(); return; }
+    if (!this.pending.length) return;
+    const list = $("dlList"), fr = document.createDocumentFragment();
+    for (const e of this.pending) fr.appendChild(this.row(e));
+    this.pending.length = 0;
+    list.appendChild(fr);
+    for (let extra = list.childElementCount - DEVLOG_CAP; extra > 0; extra--) list.firstChild.remove();
+    this.after();
+  },
+  rebuild() {
+    this.rebuildDue = false; this.pending.length = 0; this.pausedNew = 0;
+    const list = $("dlList"), fr = document.createDocumentFragment();
+    for (const e of DevLog.select(this.filter)) fr.appendChild(this.row(e));
+    list.textContent = ""; list.appendChild(fr);
+    this.after();
+  },
+  after() {
+    const has = $("dlList").childElementCount > 0;
+    $("dlEmpty").hidden = has;
+    if (!has) setText($("dlEmpty"), DevLog.entries.length ? "No lines match the filter." : "No device log lines yet.");
+    if ($("dlFollow").checked) { const sc = $("dlScroll"); sc.scrollTop = sc.scrollHeight; }
+  },
+  setPaused(p) {
+    this.paused = p;
+    $("dlPause").classList.toggle("on", p);
+    if (!p) this.rebuild();
+    this.status();
+  },
+  /** Lines to copy / download: everything collected that matches the filter. */
+  text() {
+    const sel = DevLog.select(this.filter);
+    return { n: sel.length, text: sel.map((e) => `${localStamp(e.wall)}  ${e.text}\n`).join("") };
+  },
+  status() {
+    setText($("dlPause"), this.paused ? `Resume${this.pausedNew ? " (+" + this.pausedNew + ")" : ""}` : "Pause");
+    let m = DevLog.count();
+    if (this.filter) { m = 0; const a = DevLog.entries, i0 = Math.max(0, a.length - DEVLOG_CAP); for (let i = i0; i < a.length; i++) if (this.matches(a[i])) m++; }
+    setText($("dlCount"), `${DevLog.count()} lines` + (this.filter ? `, ${m} match` : "") + (this.paused ? ", view paused" : ""));
+    const tr = App.tr, ls = S.chars[C.CHAR.LOG];
+    setText($("dlSum"), App.conn === "connected" && tr && !tr.hasLog ? "no Log characteristic (older radio firmware)"
+      : `${DevLog.count()} lines, ${ls.rate} notif/s, ${ls.bps} B/s`);
+  },
+};
+DevLog.listeners.push((e) => DevLogView.onAdd(e));
+(function wireDevLog() {
+  let tmr = 0;
+  $("dlFilter").addEventListener("input", (e) => {
+    clearTimeout(tmr);
+    tmr = setTimeout(() => { DevLogView.filter = e.target.value.trim().toLowerCase(); DevLogView.rebuild(); DevLogView.status(); }, 120);
+  });
+  $("dlPause").addEventListener("click", () => DevLogView.setPaused(!DevLogView.paused));
+  $("dlFollow").addEventListener("change", (e) => { if (e.target.checked) { const sc = $("dlScroll"); sc.scrollTop = sc.scrollHeight; } });
+  $("dlScroll").addEventListener("scroll", () => {
+    const sc = $("dlScroll"), atBottom = sc.scrollHeight - sc.scrollTop - sc.clientHeight < 30;
+    if ($("dlFollow").checked !== atBottom) $("dlFollow").checked = atBottom;
+  });
+  const flash = (btn, msg) => { const old = btn.dataset.label || (btn.dataset.label = btn.textContent); btn.textContent = msg; setTimeout(() => { btn.textContent = old; }, 1500); };
+  $("dlCopy").addEventListener("click", async () => {
+    const { n, text } = DevLogView.text(), btn = $("dlCopy");
+    try { await navigator.clipboard.writeText(text); }
+    catch (_) {
+      const ta = document.createElement("textarea"); ta.value = text; ta.style.position = "fixed"; ta.style.opacity = "0";
+      document.body.appendChild(ta); ta.select();
+      let ok = false; try { ok = document.execCommand("copy"); } catch (_) {}
+      ta.remove();
+      if (!ok) { flash(btn, "Copy failed"); return; }
+    }
+    flash(btn, `Copied ${n}`);
+  });
+  $("dlSave").addEventListener("click", () => {
+    const { n, text } = DevLogView.text(), f = DevLogView.filter;
+    const d = new Date(), p = (v) => String(v).padStart(2, "0");
+    const name = `ecgcard_devlog_${d.getFullYear()}${p(d.getMonth() + 1)}${p(d.getDate())}_${p(d.getHours())}${p(d.getMinutes())}${p(d.getSeconds())}.txt`;
+    download(name, [`# ECG Card device log, ${f ? `${n} lines matching "${f}"` : `all ${n} lines`}, saved ${d.toISOString()}; local receive time, line\n`, text], "text/plain");
+    flash($("dlSave"), `Saved ${n}`);
+  });
+  $("dlClear").addEventListener("click", () => DevLog.clear());
+})();
+
 // ---- start ----
 (function init() {
   let theme = params.get("theme");
   if (!theme) { try { theme = localStorage.getItem("ecgcard.theme"); } catch (_) {} }
   applyTheme(theme || "auto");
   strips.push(new Strip($("stripEcg"), "ecg"), new Strip($("stripPpg"), "ppg"), new Strip($("stripCoarse"), "coarse"));
+  Spec.init($("stripSpec"));
+  const sp = params.get("spectrum");
+  setLower(sp === "both" ? "both" : sp === "1" || sp === "only" ? "spec" : "ppg");
   App.btProblem = webBluetoothProblem();
   if (App.btProblem) {
     const [head, ...rest] = App.btProblem.split(/(?<=\.) /);
@@ -2335,7 +3058,9 @@ $("btnLogClear").addEventListener("click", () => Log.clear());
   Log.add("info", `ECG Card client ${PAGE_VERSION}; protocol ${C.PROTO_VERSION}; secure context: ${window.isSecureContext}; Web Bluetooth: ${App.btProblem ? "unavailable" : "available"}`);
   setConn("idle");
   setLive(true);
-  setInterval(() => { LogView.flush(); updateNumbers(); setText($("logCount"), `${Log.entries.length}`); }, 250);
+  setInterval(() => { LogView.flush(); updateNumbers(); updateFrontEnd(); DevLogView.status(); setText($("logCount"), `${Log.entries.length}`); }, 250);
+  setInterval(() => Spec.compute(), SPEC_MS);
+  DevLogView.after(); updateFrontEnd();
   setInterval(() => { tickStats(performance.now()); updateIntegrity(); }, 1000);
   updateIntegrity();
   requestAnimationFrame(frame);

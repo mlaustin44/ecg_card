@@ -25,6 +25,13 @@ void ble_app_status(const rl_status_t *st);
 /* STREAM_ECG_BLOCK / STREAM_PPG_BLOCK / STREAM_EVENT payload from the MCU. */
 void ble_app_stream(uint8_t type, const uint8_t *p, size_t n);
 
+/* Device log for the Log characteristic (rl_log.h): an MCU STREAM_LOG
+ * frame (link seq, payload <= 32 bytes) and one of the radio's own lines
+ * (text without '\n'; sent as "radio: " + text + '\n'). Queued only while a
+ * phone has Log enabled and the notification queue has room to spare. */
+void ble_app_log_mcu(uint8_t seq, const uint8_t *p, size_t n);
+void ble_app_log_own(const char *text, size_t n);
+
 /* Current LINK_CONN_STATE contents. */
 void ble_app_conn_state(rl_conn_state_t *cs);
 

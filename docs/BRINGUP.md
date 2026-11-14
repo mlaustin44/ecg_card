@@ -439,6 +439,14 @@ supply 3.3 V (brief "Programming"), and the browser client `tools/ble_client.htm
   (blinking = advertising, rune with `!` = fault). Start ECG from the client: the card shows
   the ECG screen; data, events and the status arrive in the client. Page 6 `drop` and `crc`
   should stay 0 (`drop <ours>/<radio's>`).
+- Device log without the J-Link (its ground disturbs the ECG): the client subscribes to the Log
+  characteristic (`d5780007-...`, radio firmware with Log only; older radio firmware simply has
+  no log panel data) and shows the same lines as RTT channel 0 in its **Device log** panel,
+  plus the radio's own `radio: ...` lines, and parses the once-per-second `ecg:` / `ppg:`
+  evidence lines into the **Front end** readout. The ECG amplitude spectrum (`Show` selector in the
+  plot toolbar: PPG, Spectrum or Both) shows 50/60 Hz pickup. Best-effort: under load whole lines are dropped (counted;
+  the radio logs `ble: log mcu .. drop ..` every 10 s), data blocks always have priority, and
+  RTT output is unchanged.
 - Scope (optional): `RADIO_EN` (R67 pad) rises before PA10 (pin 18) goes high, and PA10 is
   low before `RADIO_EN` falls (STANDBY, Bluetooth Off, 2 min advertising timeout).
 - Not covered: the CH585's sleep / wake handshake (protocol 1 keeps it awake while powered)

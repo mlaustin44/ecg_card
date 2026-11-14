@@ -8,6 +8,10 @@
 #include "stream.h"
 
 #define RX_CHUNK 64u
+/* Device log tee: a line goes out only if the estimated TX backlog after it
+ * stays within this; the rest of the ring is the data blocks' (one pass
+ * sends at most ~115 wire bytes of blocks, events, STATUS and ACK). */
+#define RADIO_LOG_TX_MAX (HAL_UART_TX_RING - 128u)
 #define OFF_NOW_MAX_PASSES 200u /* radio_off_now(): ~1 ms each, >> LINK_SHUTDOWN_WAIT_MS */
 
 static struct {
@@ -23,6 +27,7 @@ static struct {
     bool status_due;        /* send LINK_STATUS at the next chance */
     uint32_t t_status;
     uint8_t last_status[LINK_STATUS_LEN];
+    bool log_torn;          /* a teed line lost its tail: next text starts with '\n' */
 } R;
 
 static const char *const k_names[RADIO_STATE_COUNT] = {
@@ -247,6 +252,8 @@ static void on_conn_state(const uint8_t *p, size_t n)
     i->mtu = rd16(p + 1);
     i->interval = rd16(p + 3);
     i->subs = p[0] == LINK_CS_CONNECTED ? p[5] : 0u;
+    if ((i->subs & LINK_SUB_LOG) && !(subs_was & LINK_SUB_LOG))
+        R.log_torn = false; /* a new Log subscriber starts clean */
     i->radio_dropped = rd16(p + 6);
     i->phy = p[8];
     if (p[0] == LINK_CS_CONNECTED) {
@@ -306,7 +313,45 @@ static void on_log(const uint8_t *p, size_t n)
         m--;
     t[m] = '\0';
     R.info.radio_logs++;
-    log_line("radio", t);
+    log_line_local("radio", t); /* the radio tees its own lines to Log */
+}
+
+/* ---- device log tee (Log characteristic) -------------------------------------
+ * Every applog line, while a phone is connected with LINK_SUB_LOG, in
+ * STREAM_LOG frames of <= LINK_LOG_CHUNK_MAX bytes straight from the line
+ * buffer. Lowest priority: the whole line must fit under RADIO_LOG_TX_MAX of
+ * estimated TX backlog, else it is dropped whole; if the ring refuses a
+ * chunk anyway, the rest of the line is dropped (the head already sent is
+ * then ended by a '\n' in front of the next teed text). Never retried, never
+ * waits, counted in log_drops. */
+static void log_tee(const char *s, size_t n)
+{
+    if (R.info.state != RADIO_CONNECTED || !(R.info.subs & LINK_SUB_LOG) || n == 0)
+        return;
+    size_t total = n + (R.log_torn ? 1u : 0u);
+    size_t chunks = (total + LINK_LOG_CHUNK_MAX - 1u) / LINK_LOG_CHUNK_MAX;
+    if (link_tx_backlog() + total + chunks * LINK_WIRE_LEN(0) > RADIO_LOG_TX_MAX) {
+        R.info.log_drops++;
+        return;
+    }
+    uint8_t c[LINK_LOG_CHUNK_MAX];
+    size_t k = 0;
+    while (k < n) {
+        size_t m = 0;
+        if (k == 0 && R.log_torn)
+            c[m++] = '\n';
+        size_t take = n - k < LINK_LOG_CHUNK_MAX - m ? n - k : LINK_LOG_CHUNK_MAX - m;
+        memcpy(c + m, s + k, take);
+        if (!link_send(STREAM_LOG, c, m + take)) {
+            R.info.log_drops++;
+            if (k)
+                R.log_torn = true;
+            return;
+        }
+        R.log_torn = false;
+        k += take;
+    }
+    R.info.log_lines++;
 }
 
 static void on_frame(void *ctx, uint8_t type, uint8_t seq, const uint8_t *p, size_t n)
@@ -345,6 +390,7 @@ void radio_init(const radio_ops_t *ops)
     R.ops = ops;
     link_rx_init(&R.rx);
     link_init();
+    log_set_tee(log_tee);
     R.info.state = RADIO_OFF;
     hal_radio_power(false); /* already the hal_init() state */
 }

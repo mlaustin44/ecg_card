@@ -94,6 +94,24 @@ static struct {
 
 static const char k_boot_log[] = "CH585 link up";
 
+/* Text the phone received on the Log characteristic (kept outside R, which
+ * radio_reset() clears with a memset; 1 MB). */
+#define PHONE_LOG_CAP (1u << 20)
+static char s_phone_log[PHONE_LOG_CAP + 1];
+static size_t s_phone_log_n;
+static uint32_t s_phone_log_lost;
+
+static void phone_log_add(const void *p, size_t n)
+{
+    if (s_phone_log_n + n > PHONE_LOG_CAP) {
+        s_phone_log_lost += (uint32_t)n;
+        return;
+    }
+    memcpy(s_phone_log + s_phone_log_n, p, n);
+    s_phone_log_n += n;
+    s_phone_log[s_phone_log_n] = 0;
+}
+
 sim_radio_cfg_t sim_radio_defaults(void)
 {
     sim_radio_cfg_t c;
@@ -418,9 +436,11 @@ static void on_frame(const uint8_t *f, size_t len)
         R.info.after_shutdown++;
         return;
     }
-    if (type != STREAM_ECG_BLOCK && type != STREAM_PPG_BLOCK) log_frame(type, seq, p, n);
+    if (type != STREAM_ECG_BLOCK && type != STREAM_PPG_BLOCK && type != STREAM_LOG)
+        log_frame(type, seq, p, n);
     uint64_t now = sim_now_us();
-    if ((type == STREAM_ECG_BLOCK || type == STREAM_PPG_BLOCK || type == STREAM_EVENT) && n > 32)
+    if ((type == STREAM_ECG_BLOCK || type == STREAM_PPG_BLOCK || type == STREAM_EVENT ||
+         type == STREAM_LOG) && n > LINK_LOG_CHUNK_MAX)
         R.info.oversize_notify++; /* the CH585 forwards at most 32 bytes */
     switch (type) {
     case STREAM_ECG_BLOCK:
@@ -474,7 +494,13 @@ static void on_frame(const uint8_t *f, size_t len)
         }
         break;
     case LINK_RADIO_CTRL: on_ctrl(seq, p, n); break;
-    case STREAM_LOG: break;
+    case STREAM_LOG:
+        /* device log tee: forwarded to Log while subscribed, else dropped */
+        R.info.log_frames++;
+        R.info.log_bytes += (uint32_t)n;
+        if (!subscribed(LINK_SUB_LOG)) R.info.unsolicited++;
+        else if (n <= LINK_LOG_CHUNK_MAX) phone_log_add(p, n);
+        break;
     default: R.info.unknown_types++; break;
     }
 }
@@ -717,6 +743,7 @@ void radio_reset(void)
 {
     memset(&R, 0, sizeof R);
     R.cfg = sim_radio_defaults();
+    sim_phone_log_clear();
 }
 
 /* ------------------------------------------------------------------------ */
@@ -870,7 +897,30 @@ void sim_radio_send_raw(const uint8_t *bytes, size_t n)
     if (R.info.powered) out_push(bytes, n);
 }
 
-void sim_radio_log(const char *text) { sim_radio_send_frame(STREAM_LOG, (const uint8_t *)text, strlen(text)); }
+void sim_radio_log(const char *text)
+{
+    sim_radio_send_frame(STREAM_LOG, (const uint8_t *)text, strlen(text));
+    /* as the CH585: its own lines also go to Log, prefixed, between MCU lines */
+    if (R.info.powered && R.cfg.present && subscribed(LINK_SUB_LOG) &&
+        (s_phone_log_n == 0 || s_phone_log[s_phone_log_n - 1] == '\n')) {
+        phone_log_add("radio: ", 7);
+        phone_log_add(text, strlen(text));
+        phone_log_add("\n", 1);
+    }
+}
+
+const char *sim_phone_log_text(size_t *len)
+{
+    if (len) *len = s_phone_log_n;
+    return s_phone_log;
+}
+
+void sim_phone_log_clear(void)
+{
+    s_phone_log_n = 0;
+    s_phone_log[0] = 0;
+    s_phone_log_lost = 0;
+}
 
 void sim_uart_stall_tx(bool stall)
 {

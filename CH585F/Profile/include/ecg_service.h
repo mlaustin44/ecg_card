@@ -6,6 +6,7 @@
  *   Events   d5780004  notify          STREAM_EVENT payload
  *   Status   d5780005  read, notify    LINK_STATUS payload (20 bytes)
  *   Control  d5780006  write (with response), 1..16 bytes -> LINK_CMD
+ *   Log      d5780007  notify          device log text (<= 32-byte chunks)
  *
  * Written in the style of WCH's gattprofile.c / ble_uart_service.c. */
 #ifndef ECG_SERVICE_H
@@ -17,7 +18,8 @@
 #define ECS_CHAR_PPG    1u
 #define ECS_CHAR_EVENTS 2u
 #define ECS_CHAR_STATUS 3u
-#define ECS_NUM_NOTIFY  4u
+#define ECS_CHAR_LOG    4u
+#define ECS_NUM_NOTIFY  5u
 
 /* A CCCD of this service was written (subscriptions may have changed). */
 typedef void (*ecsCccdChangeCB_t)(void);

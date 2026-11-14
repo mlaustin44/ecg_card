@@ -7,7 +7,9 @@
  * Every notification goes through one bounded queue (rl_queue.c): it is
  * filled from MCU frames and drained here in bursts. When the stack has no
  * buffer the pump backs off for APP_NOTIFY_BACKOFF instead of retrying;
- * when the queue is full the oldest entry is dropped and counted. */
+ * when the queue is full the oldest entry is dropped and counted. Device
+ * log text (Log characteristic) shares the queue at the lowest priority,
+ * with its own rules for what goes in and out (rl_log.c). */
 #include <stdbool.h>
 
 #include "CONFIG.h"
@@ -17,6 +19,7 @@
 #include "ecg_service.h"
 #include "link_mgr.h"
 #include "rl_ble_fmt.h"
+#include "rl_log.h"
 #include "rl_queue.h"
 #include "std_services.h"
 
@@ -25,9 +28,10 @@
 #define BA_EVT_PARAM_UPDATE 0x0002
 #define BA_EVT_NOTIFY       0x0004
 
-/* Queue entry kinds: ECS_CHAR_* (0..3), then these */
-#define Q_HR   4u
-#define Q_BATT 5u
+/* Queue entry kinds: ECS_CHAR_* (0..4), then these. Log entries carry
+ * their chunk index in the upper bits (rl_log.h). */
+#define Q_HR   (ECS_NUM_NOTIFY + 0u)
+#define Q_BATT (ECS_NUM_NOTIFY + 1u)
 
 /* Advertising phase */
 #define ADV_OFF  0u
@@ -50,6 +54,7 @@ static bool s_shutdown;
 static bool s_backoff;    /* waiting for stack buffers */
 
 static rl_queue_t s_q;
+static rl_log_t s_log;
 static rl_hr_sel_t s_hr;
 static uint32_t s_unsub;    /* frames/entries for an unsubscribed characteristic */
 static uint32_t s_busy;     /* back-offs: no stack buffer */
@@ -104,6 +109,7 @@ void ble_app_init(const uint8_t addr[6])
 
     s_task = TMOS_ProcessEventRegister(ba_process_event);
     rl_queue_init(&s_q);
+    rl_log_init(&s_log, ECS_CHAR_LOG);
     tmos_memcpy(s_boot_addr, addr, B_ADDR_LEN);
 
     rl_ble_name(addr, name);
@@ -151,7 +157,8 @@ void ble_app_init(const uint8_t addr[6])
     Dis_AddService();
     Bas_AddService(ba_cccd_changed);
     Hrs_AddService(ba_cccd_changed);
-    Ecs_AddService(ba_cccd_changed, ba_control_write);
+    if (Ecs_AddService(ba_cccd_changed, ba_control_write) != SUCCESS)
+        link_log("ble: ECG Card service NOT registered");
 
     {
         uint8_t status[LINK_STATUS_LEN];
@@ -256,6 +263,7 @@ void ble_app_shutdown(void)
     if (connected())
         GAPRole_TerminateLink(s_conn);
     rl_queue_flush(&s_q);
+    rl_log_tx_reset(&s_log);
 }
 
 void ble_app_set_sw_rev(const uint8_t *text, size_t len)
@@ -280,6 +288,8 @@ static uint8_t ba_subscriptions(void)
         m |= LINK_SUB_STATUS;
     if (Hrs_GetCccd(s_conn) & GATT_CLIENT_CFG_NOTIFY)
         m |= LINK_SUB_HR;
+    if (Ecs_GetCccd(s_conn, ECS_CHAR_LOG) & GATT_CLIENT_CFG_NOTIFY)
+        m |= LINK_SUB_LOG;
     return m;
 }
 
@@ -318,11 +328,16 @@ static void ba_backoff(void)
     tmos_start_task(s_task, BA_EVT_NOTIFY, APP_NOTIFY_BACKOFF);
 }
 
+static void ba_kick(void)
+{
+    if (!s_backoff && rl_queue_count(&s_q))
+        tmos_set_event(s_task, BA_EVT_NOTIFY);
+}
+
 static void ba_enqueue(uint8_t kind, const uint8_t *p, size_t n)
 {
     rl_queue_push(&s_q, kind, p, n);
-    if (!s_backoff)
-        tmos_set_event(s_task, BA_EVT_NOTIFY);
+    ba_kick();
 }
 
 static bStatus_t ba_notify(uint8_t kind, attHandleValueNoti_t *noti)
@@ -333,8 +348,13 @@ static bStatus_t ba_notify(uint8_t kind, attHandleValueNoti_t *noti)
     case Q_BATT:
         return Bas_Notify(s_conn, noti);
     default:
-        return Ecs_Notify(s_conn, kind, noti);
+        return Ecs_Notify(s_conn, kind & RL_LOG_KIND_MASK, noti);
     }
+}
+
+static bool ba_is_log(const rl_qent_t *e)
+{
+    return (e->kind & RL_LOG_KIND_MASK) == ECS_CHAR_LOG;
 }
 
 static void ba_pump(void)
@@ -343,30 +363,58 @@ static void ba_pump(void)
 
     s_backoff = FALSE;
     for (i = 0; i < APP_NOTIFY_BURST; i++) {
+        static const uint8_t nl = '\n';
         const rl_qent_t *e = rl_queue_peek(&s_q);
         attHandleValueNoti_t noti;
         bStatus_t st;
+        bool is_log, newline = false;
+        const uint8_t *data;
 
         if (e == NULL)
             return;
         if (!connected()) {
             rl_queue_flush(&s_q);
+            rl_log_tx_reset(&s_log);
             return;
         }
-        if ((uint16_t)(e->len + 3u) > ATT_GetMTU(s_conn)) {
+        data = e->data;
+        noti.len = e->len;
+        is_log = ba_is_log(e);
+        if (is_log) {
+            /* never a log tail without its start; end a cut head first */
+            rl_log_tx_t d = rl_log_tx(&s_log, e);
+            if (d == RL_LOG_TX_SKIP) {
+                rl_log_tx_skip(&s_log);
+                rl_queue_discard_head(&s_q);
+                continue;
+            }
+            if (d == RL_LOG_TX_NEWLINE) {
+                newline = true;
+                data = &nl;
+                noti.len = 1;
+            }
+        }
+        if ((uint16_t)(noti.len + 3u) > ATT_GetMTU(s_conn)) {
             s_mtu_big++;
+            if (is_log)
+                rl_log_tx_lost(&s_log);
             rl_queue_drop_head(&s_q);
             continue;
         }
-        noti.len = e->len;
         noti.pValue = GATT_bm_alloc(s_conn, ATT_HANDLE_VALUE_NOTI, noti.len, NULL, 0);
         if (noti.pValue == NULL) {
             ba_backoff();
             return;
         }
-        tmos_memcpy(noti.pValue, e->data, e->len);
+        tmos_memcpy(noti.pValue, data, noti.len);
         st = ba_notify(e->kind, &noti);
         if (st == SUCCESS) {
+            if (newline) {
+                rl_log_tx_sent(&s_log, NULL); /* the entry itself goes next */
+                continue;
+            }
+            if (is_log)
+                rl_log_tx_sent(&s_log, e);
             rl_queue_pop(&s_q);
             continue;
         }
@@ -374,6 +422,11 @@ static void ba_pump(void)
         if (st == MSG_BUFFER_NOT_AVAIL || st == bleMemAllocError || st == blePending) {
             ba_backoff();
             return;
+        }
+        if (is_log) {
+            if (newline)
+                rl_log_tx_sent(&s_log, NULL);
+            rl_log_tx_lost(&s_log);
         }
         if (st == bleIncorrectMode) { /* unsubscribed meanwhile */
             s_unsub++;
@@ -437,6 +490,26 @@ void ble_app_status(const rl_status_t *st)
     }
 }
 
+/* ---- device log (Log characteristic) ------------------------------------ */
+
+static bool ba_log_on(void)
+{
+    return !s_shutdown && connected() &&
+           (Ecs_GetCccd(s_conn, ECS_CHAR_LOG) & GATT_CLIENT_CFG_NOTIFY);
+}
+
+void ble_app_log_mcu(uint8_t seq, const uint8_t *p, size_t n)
+{
+    rl_log_mcu(&s_log, &s_q, ba_log_on(), seq, p, n, link_now_ms());
+    ba_kick();
+}
+
+void ble_app_log_own(const char *text, size_t n)
+{
+    rl_log_own(&s_log, &s_q, ba_log_on(), text, n, link_now_ms());
+    ba_kick();
+}
+
 static void ba_control_write(uint16_t connHandle, const uint8_t *pValue, uint16_t len)
 {
     (void)connHandle;
@@ -447,12 +520,19 @@ static void ba_control_write(uint16_t connHandle, const uint8_t *pValue, uint16_
 void ble_app_tick(uint32_t now_ms)
 {
     ba_cccd_changed();
+    rl_log_poll(&s_log, &s_q, ba_log_on(), now_ms);
+    ba_kick();
     if (connected() && (uint32_t)(now_ms - s_last_stats_ms) >= APP_STATS_PERIOD_MS) {
         s_last_stats_ms = now_ms;
         link_log("ble: sent %u drop %u q %u busy %u unsub %u big %u err %u/0x%02X",
                  (unsigned)s_q.sent, (unsigned)s_q.dropped, rl_queue_count(&s_q),
                  (unsigned)s_busy, (unsigned)s_unsub, (unsigned)s_mtu_big,
                  (unsigned)s_noti_err, s_last_err);
+        if (s_subscribed & LINK_SUB_LOG)
+            link_log("ble: log mcu %u drop %u own %u drop %u out %u skip %u",
+                     (unsigned)s_log.in_chunks, (unsigned)s_log.in_drops,
+                     (unsigned)s_log.own_lines, (unsigned)s_log.own_drops,
+                     (unsigned)s_log.tx_chunks, (unsigned)s_log.tx_skips);
     }
 }
 
@@ -478,6 +558,7 @@ static void ba_link_established(gapRoleEvent_t *pEvent)
     /* if the role resumes advertising after a link loss, start fast */
     ba_set_adv_params(ADV_FAST);
     rl_queue_flush(&s_q);
+    rl_log_tx_reset(&s_log);
 
     if (s_shutdown) {
         GAPRole_TerminateLink(s_conn);
@@ -519,6 +600,7 @@ static void ba_link_terminated(gapRoleEvent_t *pEvent)
     s_subscribed = 0;
     tmos_stop_task(s_task, BA_EVT_PARAM_UPDATE);
     lost = rl_queue_flush(&s_q);
+    rl_log_tx_reset(&s_log);
 
     if (!s_shutdown)
         link_log("ble: disconnected reason 0x%02X, %u queued dropped", event->reason, lost);

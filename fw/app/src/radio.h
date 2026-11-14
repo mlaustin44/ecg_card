@@ -34,7 +34,16 @@
  * 15, events <= 11). An unexpected HELLO (the radio restarted, e.g. its
  * ~0.5 s watchdog: reset_reason 2) is logged and the link set up again. LINK_STATUS goes out in ADVERTISING and CONNECTED: on change (at
  * most every RADIO_STATUS_MIN_MS), every LINK_STATUS_PERIOD_MS and after
- * LINK_CMD_GET_STATUS. Radio STREAM_LOG lines are printed as "radio: ...". */
+ * LINK_CMD_GET_STATUS. Radio STREAM_LOG lines are printed as "radio: ...".
+ *
+ * Device log: while CONNECTED with LINK_SUB_LOG, every applog line (RTT
+ * channel 0) is also sent as STREAM_LOG frames of <= LINK_LOG_CHUNK_MAX
+ * bytes for the Log characteristic, except the "radio: ..." lines (the
+ * radio tees its own). RTT is unaffected. Lowest priority on the UART: a
+ * line is sent only if the estimated TX backlog (link_tx_backlog) after it
+ * stays <= HAL_UART_TX_RING - 128, else dropped whole; if the ring still
+ * refuses a chunk, the rest of that line is dropped and the next teed text
+ * starts with '\n'. Dropped lines are counted (log_drops), never retried. */
 #ifndef APP_RADIO_H
 #define APP_RADIO_H
 
@@ -88,6 +97,8 @@ typedef struct {
     uint32_t acks, naks;       /* radio ACKs to LINK_RADIO_CTRL (naks: result != OK) */
     uint32_t radio_logs;
     uint32_t data_drops;       /* data frames for the phone that did not fit the TX ring */
+    uint32_t log_lines;        /* log lines teed to the phone in full */
+    uint32_t log_drops;        /* ... dropped whole or cut short (TX backlog) */
     link_rx_stats_t rx;
 } radio_info_t;
 

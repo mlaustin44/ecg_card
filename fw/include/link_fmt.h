@@ -60,6 +60,21 @@
  * STREAM_LOG (0x30) both directions: UTF-8 text. The radio has no debug
  *   port, so its log lines travel to the MCU, which prints them on RTT
  *   channel 0 prefixed "radio: ".
+ *   MCU -> radio (device log over BLE): only while LINK_CONN_STATE reports a
+ *   connection with LINK_SUB_LOG. The MCU tees its RTT channel 0 text (not
+ *   the "radio: " lines it prints for the radio) as a byte stream cut into
+ *   frames of at most 32 payload bytes; lines end with '\n' and a line may
+ *   span several frames, sent back to back (consecutive seq: a gap inside
+ *   a line tells the radio a piece was lost). The radio forwards each payload unchanged as one
+ *   Log notification while Log is subscribed and drops it otherwise. The
+ *   radio also emits its own log lines on Log, while subscribed, as
+ *   "radio: " + text + '\n' in chunks of at most 32 bytes, between MCU
+ *   lines. Best-effort on both ends: under back-pressure log text is
+ *   dropped (never retried) and counted, and it never delays or displaces
+ *   ECG / PPG / Events / Status data. Text is dropped as whole lines or as
+ *   the rest of a line (never a tail without its start); a line cut short
+ *   is ended by a '\n' before the next text, so a client can show it as a
+ *   short line.
  *
  * LINK_RADIO_CTRL (0x40) MCU -> radio: u8 op, then arguments:
  *   LINK_RC_ADV_START (1): start connectable advertising. The radio runs
@@ -103,8 +118,16 @@
  *   Events         d5780004-...  notify            STREAM_EVENT payload
  *   Status         d5780005-...  read, notify      LINK_STATUS payload
  *   Control        d5780006-...  write (with response)  LINK_CMD payload
+ *   Log            d5780007-...  notify            device log text (UTF-8,
+ *                                                  STREAM_LOG chunks, <= 32 B)
  * A Control write is accepted at ATT level if it is 1..16 bytes; the command
  * result arrives on Events as STREAM_EV_CMD_RESULT.
+ * Log is optional for clients (radio firmware before it has no 0x0007). It
+ * has the lowest priority: the radio starts queueing a line only while its
+ * notification queue is at most half full (else the line, or its rest, is
+ * dropped), log text never makes it drop data, and log text it refuses is
+ * counted apart from LINK_CONN_STATE.dropped (which still counts queued
+ * entries of any kind lost when the queue overflows).
  * If notifications back up (link stall), the radio keeps about 1 s of data,
  * drops the oldest blocks and counts them in LINK_CONN_STATE.dropped.
  *
@@ -199,6 +222,12 @@
 #define LINK_SUB_EVENTS 0x04u
 #define LINK_SUB_STATUS 0x08u
 #define LINK_SUB_HR     0x10u
+#define LINK_SUB_LOG    0x20u
+
+/* STREAM_LOG frames on the link carry at most this many payload bytes when
+ * they are meant for the Log characteristic (the MCU's tee, the radio's own
+ * lines on Log). */
+#define LINK_LOG_CHUNK_MAX 32u
 
 /* STREAM_EVENT kind added by the link: { u8 cmd, u8 result } */
 #define STREAM_EV_CMD_RESULT 6u
@@ -224,5 +253,6 @@
 #define LINK_UUID_EVENTS  0x0004u
 #define LINK_UUID_STATUS  0x0005u
 #define LINK_UUID_CONTROL 0x0006u
+#define LINK_UUID_LOG     0x0007u
 
 #endif
