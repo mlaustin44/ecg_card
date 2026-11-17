@@ -64,7 +64,10 @@ void dsp_qrs_reset(dsp_qrs_t *q)
 void dsp_qrs_skip(dsp_qrs_t *q, uint32_t n)
 {
     q->t += n;
-    q->flags &= (uint8_t)~F_PRIMED;
+    /* thresholds, polarity and the RR history stay; the beat before the gap
+     * is forgotten (no interval across the gap, no refractory / T-wave test
+     * against it, no stale search-back candidate) */
+    q->flags &= (uint8_t)~(F_PRIMED | F_HAVE | F_SB);
 }
 
 /* (a - b) in 1/256 samples, saturated to +-2^30. */
@@ -342,7 +345,15 @@ static void step(dsp_qrs_t *q, int16_t xin, sink_t *k)
         dsp_bq_reset(&q->lp, 0, 0);
         for (unsigned i = 0; i < DSP_QRS_RING; i++)
             q->cr[i] = xin;
-        q->flags |= F_PRIMED;
+        /* band-pass, derivative and MWI start from rest (after a gap they
+         * hold samples from before it) */
+        for (unsigned i = 0; i < DSP_QRS_DRING; i++)
+            q->br[i] = q->dr[i] = 0;
+        q->mwi = 0;
+        q->cand_v = 0;
+        q->cand_t = t;
+        q->flags |= F_PRIMED | F_FALLING;
+        q->decay_t = t + DECAY_START; /* the gap is no reason to lower thresholds */
     }
     int32_t c = dsp_bq_step(&q->clean[0], &c_clean[0], x);
     c = dsp_bq_step(&q->clean[1], &c_clean[1], c);

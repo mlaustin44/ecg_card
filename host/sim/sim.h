@@ -301,6 +301,11 @@ bool sim_oled_save_png(const char *path, int scale);
  * Only used while the thumbs are on and BODY_EN is high. */
 typedef int32_t (*sim_ecg_fn)(uint64_t t_us, void *ctx);
 void sim_set_ecg_source(sim_ecg_fn fn, void *ctx);
+/* Replay of a recorded session: while the thumbs are on (and BODY_EN high),
+ * ECG_ADC = VMID + fn() microvolts (x ECG_GAIN_HI / ECG_GAIN_LO with GAIN_HI
+ * high), clamped to the rails; the analog chain model is bypassed. NULL
+ * restores the model. */
+void sim_set_ecg_output(sim_ecg_fn fn, void *ctx);
 /* The chain while the thumbs are on (BODY_EN high):
  *   electrodes: v = source + electrode offset (DC, see below)
  *   U5 (ecg-fw.md ECG chain 2): y1 = v + 20 * HP(v), HP with tau 0.5 s (the

@@ -141,16 +141,16 @@ TEST(ecg_autoscale_steps_and_hysteresis)
     CHECK_EQ(trace_ecg_steps_uv[s->step], 2000);
     push_alt(UI_TRACE_ECG, 300, n);
     CHECK_EQ(trace_ecg_steps_uv[s->step], 1000);
-    /* inside the hysteresis band: fits 1 mV but without 20 % to spare */
+    /* inside the hysteresis band: fits 1.5 mV but without 25 % to spare */
     push_alt(UI_TRACE_ECG, 750, n);
     CHECK_EQ(trace_ecg_steps_uv[s->step], 2000);
     for (int i = 0; i < 4; i++) {
-        push_alt(UI_TRACE_ECG, 380, n); /* p2p 0.76 mV */
+        push_alt(UI_TRACE_ECG, 550, n); /* p2p 1.1 mV */
         CHECK_EQ(trace_ecg_steps_uv[s->step], 2000);
     }
     /* an interrupted run of small sweeps does not step down */
     push_alt(UI_TRACE_ECG, 300, n);
-    push_alt(UI_TRACE_ECG, 380, n);
+    push_alt(UI_TRACE_ECG, 550, n);
     push_alt(UI_TRACE_ECG, 300, n);
     CHECK_EQ(trace_ecg_steps_uv[s->step], 2000);
     /* saturates at the largest step */
@@ -163,6 +163,50 @@ TEST(ecg_autoscale_steps_and_hysteresis)
     CHECK_EQ(s->step, ECG_STEP_DEFAULT);
     push_alt(UI_TRACE_ECG, 15000, 1);
     CHECK_EQ(s->step, ECG_STEPS - 1);
+}
+
+/* With the median QRS known, the scale follows it (QRS at 70-75 % of the
+ * height) and artifacts no longer zoom out; a gap leaves empty columns. */
+TEST(ecg_scale_follows_qrs)
+{
+    ui_trace_reset(3000);
+    const trace_state_t *s = trace_state(UI_TRACE_ECG);
+    const uint32_t n = 1500;
+    ui_trace_ecg_ref(1400, false);
+    push_alt(UI_TRACE_ECG, 3000, n); /* a 6 mV artifact sweep */
+    CHECK_EQ(trace_ecg_steps_uv[s->step], 2000); /* 1.4 mV QRS = 70 % */
+    push_alt(UI_TRACE_ECG, 3000, n);
+    CHECK_EQ(trace_ecg_steps_uv[s->step], 2000);
+    /* a smaller QRS: down after two sweeps, to the step it fills <= 70 % of */
+    ui_trace_ecg_ref(500, false);
+    push_alt(UI_TRACE_ECG, 250, n);
+    CHECK_EQ(trace_ecg_steps_uv[s->step], 2000);
+    push_alt(UI_TRACE_ECG, 250, n);
+    CHECK_EQ(trace_ecg_steps_uv[s->step], 1000);
+    /* a larger one: up at once */
+    ui_trace_ecg_ref(2600, false);
+    push_alt(UI_TRACE_ECG, 1300, n);
+    CHECK_EQ(trace_ecg_steps_uv[s->step], 5000);
+    /* baseline (the sweep mean) at 30 % of the height from the R side */
+    ui_trace_ecg_ref(1400, false);
+    push_const(UI_TRACE_ECG, 100, n);
+    push_const(UI_TRACE_ECG, 100, n);
+    CHECK_EQ(trace_ecg_steps_uv[s->step], 2000);
+    CHECK_EQ(s->center, 100 + 2000 / 5);
+    ui_trace_ecg_ref(1400, true);
+    push_const(UI_TRACE_ECG, 100, n);
+    CHECK_EQ(s->center, 100 - 2000 / 5);
+    /* a gap: the pen advances over empty columns */
+    ui_trace_ecg_ref(0, false);
+    ui_trace_reset(3000);
+    push_const(UI_TRACE_ECG, 0, 300);
+    uint16_t p0 = s->pen;
+    ui_trace_gap(UI_TRACE_ECG, 300);
+    CHECK(s->pen > p0 + 20);
+    for (int c = p0 + 1; c < s->pen; c++)
+        CHECK(col_empty(s, c));
+    push_const(UI_TRACE_ECG, 0, 100);
+    CHECK(!col_empty(s, s->pen - 1));
 }
 
 TEST(ecg_baseline_follows_data)
@@ -283,6 +327,7 @@ int main(void)
     RUN(sweep_wraps_exactly);
     RUN(erase_bar);
     RUN(ecg_autoscale_steps_and_hysteresis);
+    RUN(ecg_scale_follows_qrs);
     RUN(ecg_baseline_follows_data);
     RUN(ppg_autoscale);
     RUN(ppg_first_sweep_opens_on_clip);

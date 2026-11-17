@@ -67,7 +67,7 @@ static void s_pulse(uint32_t i, uint16_t b, uint16_t pat, uint16_t pi)
 }
 static void s_contact(bool on) { if (on) C.contacts++; }
 static void s_settled(bool on) { if (on) C.settles++; }
-static const acq_sink_t sink = {s_ecg, s_ppg, NULL, NULL, s_beat, s_pulse, s_contact, s_settled};
+static const acq_sink_t sink = {s_ecg, s_ppg, NULL, NULL, s_beat, s_pulse, s_contact, s_settled, NULL};
 
 static void boot(void)
 {
@@ -117,7 +117,8 @@ static void run_until(uint64_t t_ms)
 
 static acq_cfg_t cfg(bool ecg, bool ppg)
 {
-    acq_cfg_t c = {ecg, ppg, false, RLD_BOTH, NOTCH_AUTO, 15, RESTORE_FAST};
+    acq_cfg_t c = {.ecg = ecg, .ppg = ppg, .gain_hi = false, .gain_auto = false, .rld = RLD_BOTH,
+                   .notch = NOTCH_AUTO, .led_limit_ma = 15, .restore = RESTORE_FAST};
     return c;
 }
 
@@ -169,13 +170,21 @@ TEST(ecg_session)
     uint32_t idx = acq_status()->ecg_samples;
     CHECK_NEAR((double)(idx - idx0), 500.0, 1); /* 1 s of 500 Hz despite the loss */
     CHECK(!C.ecg_gap);
-    /* thumbs off: a rail is "hold still" first, the end of contact after
-     * ACQ_ECG_LOST_END_MS without a stable signal */
+    /* thumbs off: a rail is a blip first (RUN goes on, the trace shows a
+     * gap), "hold still" after ACQ_ECG_BLIP_MS, the end of contact after
+     * ACQ_ECG_LOST_END_MS on the rail */
     sim_set_thumbs(false);
     run_until(22000);
     CHECK(acq_status()->contact);
+    CHECK(acq_status()->settled);
+    CHECK_EQ(acq_status()->ecg_state, ACQ_ECG_RUN);
+    CHECK(acq_status()->blip);
+    CHECK_EQ(acq_status()->blips, 1);
+    run_until(23500);
+    CHECK(acq_status()->contact);
+    CHECK(!acq_status()->settled);
     CHECK_EQ(acq_status()->ecg_state, ACQ_ECG_HOLD);
-    run_until(24000);
+    run_until(25500);
     CHECK(!acq_status()->contact);
     CHECK_EQ(acq_status()->ecg_state, ACQ_ECG_END);
     CHECK_EQ(acq_status()->ecg_why, ACQ_WHY_NO_STABLE);

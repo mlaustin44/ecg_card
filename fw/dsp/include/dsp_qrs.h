@@ -95,9 +95,12 @@ void dsp_qrs_init(dsp_qrs_t *q, uint32_t start_index);
  * re-learn; the sample index keeps counting. */
 void dsp_qrs_reset(dsp_qrs_t *q);
 
-/* Lead-off: advance the timeline by n samples without processing them (the
- * filters re-prime on the next processed sample). Call dsp_qrs_reset() on
- * re-contact. */
+/* A gap (the front end on a rail): advance the timeline by n samples without
+ * processing them. The filters re-prime on the next processed sample; the
+ * learned thresholds, R polarity and RR history are kept, so detection
+ * resumes at once after a short excursion. The first beat after the gap has
+ * rr_ms = 0 (no interval across it). Call dsp_qrs_reset() for a new contact
+ * or a gain change. */
 void dsp_qrs_skip(dsp_qrs_t *q, uint32_t n);
 
 /* Process n stream samples; writes up to max_beats detected beats (in R-peak

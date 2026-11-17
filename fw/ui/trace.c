@@ -4,8 +4,18 @@
 
 #include "gfx.h"
 
-const uint16_t trace_ecg_steps_uv[ECG_STEPS] = {500, 1000, 2000, 5000, 10000};
-static const uint16_t ecg_bar_uv[ECG_STEPS] = {200, 500, 1000, 2000, 5000};
+const uint16_t trace_ecg_steps_uv[ECG_STEPS] = {500, 1000, 1500, 2000, 3000, 5000, 7500, 10000};
+/* the largest 1-2-5 value not above half of each step */
+static const uint16_t ecg_bar_uv[ECG_STEPS] = {200, 500, 500, 1000, 1000, 2000, 2000, 5000};
+
+static uint16_t ref_uv;  /* median QRS, uV (0: unknown) */
+static bool ref_down;    /* R waves point down */
+
+void ui_trace_ecg_ref(uint16_t qrs_uv, bool r_down)
+{
+    ref_uv = qrs_uv;
+    ref_down = r_down;
+}
 
 #define PPG_RANGE_DEFAULT 4096
 #define PPG_RANGE_MIN     16
@@ -70,16 +80,25 @@ static inline uint8_t norm(const trace_state_t *s, int32_t x, bool *clip)
 
 static void rescale_ecg(trace_state_t *s)
 {
-    int32_t p2p = (int32_t)s->smax - s->smin;
-    int32_t need = p2p + p2p / 4 + 1; /* 25 % headroom */
+    int32_t need, comfy_need;
+    if (ref_uv) {
+        /* QRS at most 75 % of the height; a smaller step only with the QRS
+         * at most 70 % of it (the median of 5 beats barely jitters) */
+        need = ((int32_t)ref_uv * 4 + 2) / 3;
+        comfy_need = ((int32_t)ref_uv * 10 + 6) / 7;
+    } else {
+        int32_t p2p = (int32_t)s->smax - s->smin;
+        need = p2p + p2p / 4 + 1; /* 25 % headroom */
+        comfy_need = need + need / 4;
+    }
     uint8_t fit = 0, comfy = 0;
     while (fit < ECG_STEPS - 1 && trace_ecg_steps_uv[fit] < need)
         fit++;
-    /* a smaller step is taken only with 20 % to spare, two sweeps running */
-    while (comfy < ECG_STEPS - 1 && (int32_t)trace_ecg_steps_uv[comfy] * 4 < need * 5)
+    /* a smaller step is taken only with room to spare, two sweeps running */
+    while (comfy < ECG_STEPS - 1 && trace_ecg_steps_uv[comfy] < comfy_need)
         comfy++;
     uint8_t old = s->step;
-    if (s->wraps == 1) {
+    if (s->wraps == 1 && !ref_uv) {
         s->step = fit;
         s->down = 0;
     } else if (fit > s->step) {
@@ -94,9 +113,18 @@ static void rescale_ecg(trace_state_t *s)
         s->down = 0;
     }
     int32_t range = trace_ecg_steps_uv[s->step];
-    int32_t mid = ((int32_t)s->smax + s->smin) / 2;
+    int32_t mid;
+    if (ref_uv && s->cnt) {
+        /* baseline (the sweep mean) at 30 % of the height from the side the
+         * R waves start from */
+        int32_t mean = s->sum / (int32_t)s->cnt;
+        mid = ref_down ? mean - range / 5 : mean + range / 5;
+    } else {
+        mid = ((int32_t)s->smax + s->smin) / 2;
+    }
     int32_t dc = mid - s->center;
-    if (s->step != old || s->wraps == 1 || dc > range / 8 || dc < -range / 8)
+    int32_t tol = ref_uv ? range / 16 : range / 8;
+    if (s->step != old || s->wraps == 1 || dc > tol || dc < -tol)
         s->center = mid;
     set_range(s, range);
 }
@@ -140,6 +168,8 @@ static void advance(trace_state_t *s, ui_trace_t t)
         }
         s->any = false;
         s->clipped = 0;
+        s->sum = 0;
+        s->cnt = 0;
     } else if (s->clipped && s->wraps == 0 && t == UI_TRACE_PPG) {
         /* first PPG sweep: open the range as soon as the signal clips */
         int32_t p2p = (int32_t)s->smax - s->smin;
@@ -155,6 +185,23 @@ static void advance(trace_state_t *s, ui_trace_t t)
     s->lo[s->pen] = 0xFF; /* fresh column (already clear except after reset) */
     s->hi[s->pen] = 0;
     s->col_has = false;
+}
+
+void ui_trace_gap(ui_trace_t t, uint16_t n)
+{
+    if (t >= UI_TRACE_COUNT)
+        return;
+    trace_state_t *s = &tr_[t];
+    if (!s->n_sweep)
+        ui_trace_reset(3000u);
+    for (uint16_t i = 0; i < n; i++) {
+        s->acc += TRACE_W;
+        while (s->acc >= s->n_sweep) {
+            s->acc -= s->n_sweep;
+            s->col_has = true; /* leave the column empty: no hold-previous fill */
+            advance(s, t);
+        }
+    }
 }
 
 void ui_trace_push(ui_trace_t t, const int16_t *samples, uint16_t n)
@@ -173,6 +220,10 @@ void ui_trace_push(ui_trace_t t, const int16_t *samples, uint16_t n)
             s->smin = x;
         } else if (x > s->smax) {
             s->smax = x;
+        }
+        if (s->cnt < UINT16_MAX) {
+            s->sum += x;
+            s->cnt++;
         }
         bool clip = false;
         uint8_t v = norm(s, x, &clip);

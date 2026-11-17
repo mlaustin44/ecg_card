@@ -15,7 +15,9 @@ typedef enum { SWEEP_1S5, SWEEP_3S, SWEEP_6S, SWEEP_COUNT } sweep_t;
 /* Bluetooth: Off, or On = radio powered and advertising while the card is
  * awake (fw/app/src/radio.h has the full policy). */
 typedef enum { BLE_OFF, BLE_ON, BLE_MODE_COUNT } ble_mode_t;
-/* ECG FAST_RESTORE policy (bench A/B, fw/acq/include/acq.h):
+/* ECG FAST_RESTORE policy (fw/acq/include/acq.h). Default OFF: on the first
+ * board every release left a random-sign step at the high-pass node, and the
+ * 250 ms repeats kept the output on a rail (bench, 2026-11-17):
  *   FAST  pulse after 50 ms on a rail, repeat every 250 ms, plus one in-range
  *         recheck (the original behaviour);
  *   SLOW  pulse only after 2 s continuously on a rail, at most every 2 s, no
@@ -47,7 +49,7 @@ typedef struct {
 } settings_t;
 
 #define SETTINGS_DEFAULTS \
-    { GAIN_AUTO, NOTCH_AUTO, RLD_BOTH, LED_LIMIT_15MA, SWEEP_3S, BLE_ON, RESTORE_FAST }
+    { GAIN_AUTO, NOTCH_AUTO, RLD_BOTH, LED_LIMIT_15MA, SWEEP_3S, BLE_ON, RESTORE_OFF }
 
 /* Milliseconds for one full sweep across the trace area. */
 static inline uint16_t sweep_ms(uint8_t sweep)

@@ -84,10 +84,10 @@ settings_load_t settings_decode(const uint8_t *b, settings_t *out)
         s = (settings_t){b[4], b[5], b[6], b[7], b[8], b[9], b[10]};
     } else if (b[2] == 3u && b[3] == V3_PAYLOAD_LEN && crc_ok(b, V3_BLOB_LEN - 2u)) {
         /* version 3 (before restore): keep the values, restore default */
-        s = (settings_t){b[4], b[5], b[6], b[7], b[8], b[9], RESTORE_FAST};
+        s = (settings_t){b[4], b[5], b[6], b[7], b[8], b[9], RESTORE_OFF};
     } else if (b[2] == 2u && b[3] == V2_PAYLOAD_LEN && crc_ok(b, V2_BLOB_LEN - 2u)) {
         /* version 2 (before Bluetooth): keep the values, Bluetooth default */
-        s = (settings_t){b[4], b[5], b[6], b[7], b[8], BLE_ON, RESTORE_FAST};
+        s = (settings_t){b[4], b[5], b[6], b[7], b[8], BLE_ON, RESTORE_OFF};
     } else {
         return SETTINGS_CORRUPT;
     }

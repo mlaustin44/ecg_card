@@ -7,7 +7,7 @@
  * Blank (0xFF), bad magic/version/length/CRC or any out-of-range field ->
  * defaults. A version-2 blob (11 bytes, no ble) is still read: its values
  * are kept and Bluetooth gets the default (On); a version-3 blob (12 bytes,
- * no restore) keeps its values with restore = Fast. The next save writes v4. Never written during acquisition (the caller's job: hal_nv_write
+ * no restore) keeps its values with restore = Off (the default). The next save writes v4. Never written during acquisition (the caller's job: hal_nv_write
  * stalls the CPU for tens of ms). */
 #ifndef APP_SETTINGS_STORE_H
 #define APP_SETTINGS_STORE_H

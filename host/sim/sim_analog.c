@@ -25,6 +25,8 @@ static struct {
     /* configuration */
     sim_ecg_fn ecg_fn;
     void *ecg_ctx;
+    sim_ecg_fn out_fn;              /* replay: ECG_ADC directly (bypasses the chain) */
+    void *out_ctx;
     sim_ppg_fn ppg_fn;
     void *ppg_ctx;
     double contact_off_uv, contact_tr_uv, mains_hz, mains_uv, noise_uv;
@@ -207,6 +209,10 @@ static double ecg_out_v_at(uint64_t t)
     if (!ana()) return 0.0;
     double vm = vmid_at(t);
     if (!contact()) return sim_pin(PIN_FAST_RESTORE) ? vm : float_v(t);
+    if (A.out_fn) {
+        double gain_ratio = sim_pin(PIN_GAIN_HI) ? (double)ECG_GAIN_HI / ECG_GAIN_LO : 1.0;
+        return clampd(vm + 1e-6 * gain_ratio * A.out_fn(t, A.out_ctx), RAIL_LO, RAIL_HI);
+    }
     model_to(t);
     return clampd(vm + A.l2, RAIL_LO, RAIL_HI);
 }
@@ -237,6 +243,7 @@ double sim_ppg_hi_v(void) { return hi_v_from(sim_ppg_tia_v()); }
 /* configuration                                                             */
 
 void sim_set_ecg_source(sim_ecg_fn fn, void *ctx) { A.ecg_fn = fn; A.ecg_ctx = ctx; }
+void sim_set_ecg_output(sim_ecg_fn fn, void *ctx) { A.out_fn = fn; A.out_ctx = ctx; }
 void sim_set_ppg_source(sim_ppg_fn fn, void *ctx) { A.ppg_fn = fn; A.ppg_ctx = ctx; }
 void sim_ecg_set_contact_offset_uv(int32_t uv) { an_sync(); A.contact_off_uv = (double)uv; }
 void sim_ecg_set_contact_transient_uv(int32_t uv)

@@ -138,7 +138,7 @@ static struct {
     ui_summary_t summary;
     bool have_session;
     acq_summary_t last;
-    bool gain_auto_hi;      /* auto-gain advice remembered for the next record */
+    uint8_t log_gain_sw;    /* acq gain_switches already logged */
 
     /* battery */
     bool gauge_ok;
@@ -277,6 +277,7 @@ static void send_state(void)
 
 static void k_ecg_trace(const int16_t *uv, size_t n) { ui_trace_push(UI_TRACE_ECG, uv, (uint16_t)n); }
 static void k_ppg_trace(const int16_t *v, size_t n) { ui_trace_push(UI_TRACE_PPG, v, (uint16_t)n); }
+static void k_ecg_gap(size_t n) { ui_trace_gap(UI_TRACE_ECG, (uint16_t)n); }
 
 /* The 30 s disarm counts from the arming or from the end of the last
  * contact; in ECG modes only a contact that delivered a beat restarts it
@@ -301,7 +302,7 @@ static void k_settled(bool on)
 
 static const acq_sink_t k_sink = {
     stream_ecg_block, stream_ppg_block, k_ecg_trace, k_ppg_trace,
-    stream_ev_r_peak, stream_ev_pulse, k_contact, k_settled,
+    stream_ev_r_peak, stream_ev_pulse, k_contact, k_settled, k_ecg_gap,
 };
 
 /* ======================================================================== */
@@ -478,12 +479,6 @@ static bool end_session(end_t why)
     S.ses = SES_NONE;
     S.last = *acq_summary();
     S.have_session = true;
-    if (S.settings.gain == GAIN_AUTO && mode_has_ecg(S.mode)) {
-        if (S.last.gain_advice > 0)
-            S.gain_auto_hi = true;
-        else if (S.last.gain_advice < 0)
-            S.gain_auto_hi = false;
-    }
     make_summary(why);
     log_session_end(why);
     S.last_input_ms = S.now; /* the timeouts restart after a session */
@@ -520,6 +515,13 @@ static uint8_t log_token(const acq_status_t *st)
 
 static void log_transition(const acq_status_t *st)
 {
+    if (mode_has_ecg(S.mode) && st->gain_switches != S.log_gain_sw) {
+        S.log_gain_sw = st->gain_switches;
+        log_begin("ecg");
+        log_s(" auto-gain -> ");
+        log_u(st->gain_hi ? (uint32_t)ECG_GAIN_HI : (uint32_t)ECG_GAIN_LO);
+        log_end();
+    }
     uint8_t t = log_token(st);
     if (t == S.log_state)
         return;
@@ -656,7 +658,8 @@ static uint8_t start_session(ui_mode_t mode)
     memset(&c, 0, sizeof c);
     c.ecg = mode_has_ecg(mode);
     c.ppg = mode_has_ppg(mode);
-    c.gain_hi = S.settings.gain == GAIN_HI || (S.settings.gain == GAIN_AUTO && S.gain_auto_hi);
+    c.gain_hi = S.settings.gain == GAIN_HI;
+    c.gain_auto = S.settings.gain == GAIN_AUTO; /* starts low, switches in the session */
     c.rld = S.settings.rld;
     c.notch = S.settings.notch;
     c.led_limit_ma = led_limit_ma(S.settings.led_limit);
@@ -675,6 +678,9 @@ static uint8_t start_session(ui_mode_t mode)
     log_u((uint32_t)mode);
     log_s(" gain=");
     log_u(c.gain_hi ? (uint32_t)ECG_GAIN_HI : (uint32_t)ECG_GAIN_LO);
+    if (c.gain_auto)
+        log_s(" auto");
+    S.log_gain_sw = 0;
     if (c.ecg) {
         static const char *const rld_names[] = {"both", "left", "right", "off"};
         static const char *const restore_names[] = {"fast", "slow", "off"};
@@ -1389,6 +1395,8 @@ static void build_model(void)
         l->notch_hz = st->notch_hz;
         l->elapsed_s = secs_u16(st->running_ms);
         l->settle_pct = st->settle_pct;
+        /* ECG trace scale: the median QRS (0 until the first beats) */
+        ui_trace_ecg_ref(mode_has_ecg(S.mode) ? st->qrs_uv : 0u, st->qrs_neg);
     }
     M.summary = S.summary;
 

@@ -50,7 +50,7 @@ TEST(both_session)
     uint64_t t_off = sim_now_ms();
     sim_set_thumbs(false);
     sim_set_finger(false);
-    CHECK(scen_run_cond(is_summary, 4000));
+    CHECK(scen_run_cond(is_summary, ACQ_ECG_LOST_END_MS + 1000));
     scen_run_ms(100);
     const ui_summary_t *s = &scen_m()->summary;
     testsrc_truth_t tr = testsrc_truth((double)t_run / 1000.0, (double)t_off / 1000.0);

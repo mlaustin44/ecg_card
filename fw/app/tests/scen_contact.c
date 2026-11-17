@@ -108,7 +108,10 @@ TEST(touch_150mv)
     CHECK(run_watch(8000));
     printf("  touch -> settling %llu ms, -> running %llu ms\n",
            (unsigned long long)(W.t_settle - t_on), (unsigned long long)(W.t_run - t_on));
-    CHECK(W.t_run - t_on <= 4500);
+    /* Restore Off (the default): the 150 mV tail decays on its own (~2.2 s)
+     * before the 2.5 s settling. The simulator's FAST_RESTORE is an ideal
+     * reset and would be faster here; on the board it was not. */
+    CHECK(W.t_run - t_on <= 5000);
     CHECK_EQ(W.wait_after_settle, 0);
     CHECK_EQ(W.to_settle, 1);
     W.stop_at = (acq_ecg_state_t)255;
@@ -123,8 +126,9 @@ TEST(touch_150mv)
     sim_set_thumbs(false);
 }
 
-/* Three thumb adjustments (new offset steps) while settling: RUNNING comes
- * later, the screen stays on "Hold still". */
+/* Three thumb adjustments (new offset steps) while settling: the settling
+ * pauses and goes on (it may complete between adjustments); never back to
+ * "place thumbs". */
 TEST(adjust_while_settling)
 {
     scen_boot(false);
@@ -146,24 +150,29 @@ TEST(adjust_while_settling)
         uint8_t pct = acq_status()->settle_pct;
         sim_ecg_thumb_adjust(step[k], 0); /* ... the thumb moves */
         run_watch(300);
-        CHECK(acq_status()->settle_pct < pct); /* settling restarted */
-        CHECK_EQ(scen_live_state(), UI_MEAS_SETTLING);
-        /* back to stable: the settling restarts */
-        while (acq_status()->railed || acq_status()->settle_pct == 0)
-            if (!run_watch(10) && sim_now_ms() - t_on > 30000) break;
+        (void)pct; /* in-range moments between rails still count */
+        CHECK(acq_status()->ecg_state == ACQ_ECG_SETTLE || acq_status()->ecg_state == ACQ_ECG_RUN);
+        CHECK(scen_live_state() == UI_MEAS_SETTLING || scen_live_state() == UI_MEAS_RUNNING);
+        /* stable again (500 ms in range) before the next adjustment */
+        uint32_t in_ms = 0;
+        while (in_ms < 500 && sim_now_ms() - t_on < 30000) {
+            run_watch(10);
+            in_ms = acq_status()->railed ? 0 : in_ms + 10;
+        }
     }
     W.stop_at = ACQ_ECG_RUN;
     CHECK(run_watch(8000));
     printf("  touch -> running %llu ms with 3 adjustments while settling\n",
            (unsigned long long)(W.t_run - t_on));
-    CHECK(W.t_run - t_on > 8000);
+    CHECK(W.t_run - t_on >= 2500); /* never before the settling time */
     CHECK_EQ(W.wait_after_settle, 0);
     CHECK_EQ(W.to_settle, 1);
     scen_tap(1);
     sim_set_thumbs(false);
 }
 
-/* A thumb movement while RUNNING: "Hold still" (HOLD), the session goes on. */
+/* A thumb movement while RUNNING: a blip (the trace goes on with a gap),
+ * "Hold still" only if the rail outlasts ACQ_ECG_BLIP_MS; the session goes on. */
 TEST(adjust_while_running)
 {
     scen_boot(false);
@@ -179,25 +188,26 @@ TEST(adjust_while_running)
     uint32_t beats0 = acq_status()->ecg_beats;
     sim_ecg_thumb_adjust(150000, 0);
     run_watch(500);
-    CHECK_EQ(acq_status()->ecg_state, ACQ_ECG_HOLD);
-    CHECK_EQ(scen_live_state(), UI_MEAS_SETTLING);
+    CHECK_EQ(acq_status()->ecg_state, ACQ_ECG_RUN);
+    CHECK(acq_status()->blip);
+    CHECK_EQ(scen_live_state(), UI_MEAS_RUNNING);
     uint64_t t_adj = sim_now_ms() - 500;
-    W.stop_at = ACQ_ECG_RUN;
-    CHECK(run_watch(8000));
-    printf("  thumb moved while running: back to running after %llu ms\n",
-           (unsigned long long)(sim_now_ms() - t_adj));
+    while (!(acq_status()->ecg_state == ACQ_ECG_RUN && !acq_status()->blip) &&
+           sim_now_ms() - t_adj < 8000)
+        run_watch(10);
+    printf("  thumb moved while running: clean again after %llu ms (%u hold)\n",
+           (unsigned long long)(sim_now_ms() - t_adj), (unsigned)W.to_hold);
     CHECK(sim_now_ms() - t_adj < 6000);
     CHECK_EQ(W.wait_after_settle, 0);
     CHECK(W.t_end == 0);
-    W.stop_at = (acq_ecg_state_t)255;
-    run_watch(5000);
+    run_watch(8000);
     CHECK(acq_status()->ecg_beats > beats0 + 5);
     scen_tap(1);
     CHECK(scen_m()->summary.valid);
     sim_set_thumbs(false);
 }
 
-/* Thumbs lifted after RUNNING: the summary in 3-4 s at most, despite the
+/* Thumbs lifted after RUNNING: the summary in about 4 s, despite the
  * floating-input excursions (which kept the old app from ever ending). */
 static uint64_t lift_to_summary(sim_float_model_t model, double ex_rate)
 {
@@ -234,7 +244,8 @@ TEST(lift_ends_session)
     printf("  lift -> summary: excursions 1/s %llu ms, 4/s %llu ms, rail %llu ms, quiet "
            "mid-scale %llu ms\n", (unsigned long long)d1, (unsigned long long)d3,
            (unsigned long long)dr, (unsigned long long)dm);
-    CHECK(d1 <= 3000 && d3 <= 3000 && dr <= 3000);
+    CHECK(d1 <= ACQ_ECG_LOST_END_MS + 300 && d3 <= ACQ_ECG_LOST_END_MS + 300 &&
+          dr <= ACQ_ECG_LOST_END_MS + 300);
     /* open inputs at mid-scale: only the missing beats tell (no beat for
      * ACQ_ECG_NO_BEAT_MS after the last one, up to one RR before the lift) */
     CHECK(dm >= ACQ_ECG_NO_BEAT_MS - 1000 && dm <= ACQ_ECG_NO_BEAT_MS + 400);
@@ -342,7 +353,7 @@ TEST(struggle_then_hold)
            (unsigned long long)(sim_now_ms() - t_lift));
     CHECK(ran);
     CHECK(flips <= 8);
-    CHECK(t_run <= t_hold || t_run - t_hold <= 4500);
+    CHECK(t_run <= t_hold || t_run - t_hold <= 5000); /* as touch_150mv, Restore Off */
     CHECK_EQ(scen_screen(), UI_SCREEN_SUMMARY);
     /* the RTT log: transitions only, one evidence line per second, well
      * under the budget of the 1 KB buffer */

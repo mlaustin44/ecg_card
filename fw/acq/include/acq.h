@@ -20,26 +20,35 @@
  * for DSP_LEAD_STABLE_MS, FAST_RESTORE pulses and DSP_LEAD_BLANK_MS after
  * them excluded) is evidence of contact.
  *   WAIT    no contact. -> SETTLE on a stable signal.
- *   SETTLE  "settling": RUNNING once the current in-range run has lasted
- *           ECG_SETTLE_MS (the first-stage tail, brief step 8) and a beat
- *           was accepted in it (ACQ_ECG_MIN_QRS_UV), at most
- *           ACQ_ECG_NO_BEAT_MS ago. A rail
- *           excursion restarts the settling but stays here; -> WAIT after
+ *   SETTLE  "settling": in-range time accumulates; a rail excursion shorter
+ *           than ACQ_ECG_BLIP_MS pauses it, a longer one starts it over.
+ *           RUNNING once ECG_SETTLE_MS have accumulated (the first-stage
+ *           tail, brief step 8) and a beat was accepted (ACQ_ECG_MIN_QRS_UV)
+ *           at most ACQ_ECG_NO_BEAT_MS of in-range time ago. -> WAIT after
  *           ACQ_ECG_LOST_WAIT_MS without a stable signal, or when settling
- *           completed but no beat came within ACQ_ECG_NO_BEAT_MS (open inputs
- *           that sit quietly at mid-scale must not pass as a measurement).
- *   RUN     settled: display samples, session statistics. -> HOLD when the
- *           signal is no longer stable (a rail excursion).
+ *           completed but ACQ_ECG_NO_BEAT_MS of in-range signal passed without
+ *           a beat (open inputs that sit quietly at mid-scale must not pass as
+ *           a measurement; time on a rail does not count).
+ *   RUN     settled: display samples, session statistics. A rail excursion
+ *           shorter than ACQ_ECG_BLIP_MS is a blip: RUN continues, the trace
+ *           shows a gap (sink ecg_gap) and the QRS detector resumes with its
+ *           learned thresholds (dsp_qrs_skip). -> HOLD when the output stays
+ *           on a rail for ACQ_ECG_BLIP_MS, or there is no stable signal for
+ *           ACQ_ECG_BLIP_MS + DSP_LEAD_STABLE_MS (choppy: floating inputs).
  *   HOLD    settling again after RUNNING began ("Hold still"): the session
- *           continues, back to RUN as from SETTLE.
+ *           continues. -> RUN after ACQ_ECG_RESUME_MS in range with a beat
+ *           in that time.
  *   END     end of contact after RUNNING began: no stable signal for
- *           ACQ_ECG_LOST_END_MS (excursions shorter than the stability time
- *           do not restart this), or no accepted beat for ACQ_ECG_NO_BEAT_MS
- *           while the signal is stable. The app shows the summary.
+ *           ACQ_ECG_LOST_END_MS (floating inputs make short in-range
+ *           excursions, so this is not a rail-run length), or no accepted beat
+ *           in ACQ_ECG_NO_BEAT_MS of in-range signal (RUN) /
+ *           ACQ_ECG_HOLD_END_MS of wall time (HOLD). The app
+ *           shows the summary.
  * Brief excursions while waiting, or floating inputs, therefore never reach
- * SETTLE, and a thumb movement while RUNNING costs a few seconds of HOLD.
- * The QRS detector re-learns from each return in range (EV_INRANGE); beats
- * are reported from SETTLE on.
+ * SETTLE, and a thumb movement while RUNNING costs a gap in the trace, or
+ * about a second of HOLD after a longer one. The QRS detector learns from
+ * each new contact (WAIT -> SETTLE); after an excursion it resumes (beats
+ * are reported from SETTLE on).
  * FAST_RESTORE: pulsed (ECG_FAST_RESTORE_MS) while the output has been on a
  *   rail for ACQ_FR_RAIL_MS, at most every ACQ_FR_REPEAT_MS, so it is back in
  *   range as soon as U5 has decayed far enough; in range only once,
@@ -84,8 +93,15 @@
 /* Contact timing, multiples of U5's tau1 = 0.5 s: a 150 mV offset step
  * needs ~1.5 s (3 tau1) before a pulse leaves the output in range, + 0.5 s
  * to be stable. */
-#define ACQ_ECG_LOST_WAIT_MS 3000u /* SETTLE (never RUNNING): no stable signal -> WAIT */
-#define ACQ_ECG_LOST_END_MS  2500u /* after RUNNING began: no stable signal -> END */
+/* SETTLE (never RUNNING): no stable signal -> WAIT. Longer than the rail after
+ * a 150 mV thumb adjustment (about 3 s), so adjusting does not mean "place thumbs". */
+#define ACQ_ECG_LOST_WAIT_MS 4000u
+#define ACQ_ECG_LOST_END_MS  4000u /* after RUNNING began: no stable signal -> END */
+/* A rail excursion shorter than this is a blip: RUN continues with a gap in
+ * the trace (a thumb shifting; at 558x the window is only +-2.9 mV). */
+#define ACQ_ECG_BLIP_MS      2000u
+#define ACQ_ECG_RESUME_MS    1000u /* HOLD -> RUN: in range this long, with a beat */
+#define ACQ_ECG_HOLD_END_MS  8000u /* HOLD: no accepted beat this long -> END */
 /* No accepted beat for 5 s (2.5 beats at 30 bpm) while stable: not a person.
  * "Accepted" = a QRS of at least ACQ_ECG_MIN_QRS_UV input-referred (a thumb
  * lead I QRS is 0.5-1.5 mV); the detector's adaptive thresholds also find
@@ -100,9 +116,25 @@
  * of freezing at the last value. 5 s = 2.5 beats at 30 bpm. */
 #define ACQ_PULSE_TIMEOUT_MS 5000u
 
+/* ECG auto-gain (acq_cfg_t.gain_auto): the session starts at ECG_GAIN_LO.
+ * Up once to ECG_GAIN_HI after ACQ_GAIN_WIN_MS of RUN with at least
+ * ACQ_GAIN_MIN_BEATS beats, no rail sample, and the largest excursion from
+ * mid (QRS + wander) still within ACQ_GAIN_UP_PCT % of half-scale once
+ * multiplied by ECG_GAIN_HI / ECG_GAIN_LO. Down at once when the output at
+ * ECG_GAIN_HI leaves the range for longer than a clip (a blip, or HOLD), or
+ * the excursion passes ACQ_GAIN_DOWN_PCT % of half-scale; after a step down
+ * the gain stays low for the session. A switch re-learns the QRS
+ * detector (about 2 s) but keeps the session running. */
+#define ACQ_GAIN_WIN_MS    5000u
+#define ACQ_GAIN_MIN_BEATS 4u
+#define ACQ_GAIN_UP_PCT    60u
+#define ACQ_GAIN_DOWN_PCT  90u
+#define ACQ_GAIN_BLANK_MS  20u   /* samples after a switch: no evidence */
+
 typedef struct {
     bool ecg, ppg;
-    bool gain_hi;         /* ECG gain 1098x */
+    bool gain_hi;         /* ECG gain ECG_GAIN_HI (fixed, or the start if gain_auto) */
+    bool gain_auto;       /* ECG auto-gain (above); starts at ECG_GAIN_LO */
     uint8_t rld;          /* rld_mode_t */
     uint8_t notch;        /* notch_mode_t (AUTO: 60 Hz until the detector decides) */
     uint8_t led_limit_ma; /* per-LED limit for the AGC */
@@ -149,6 +181,7 @@ typedef struct {
     uint8_t quality;         /* 0..4 */
     uint8_t beat_seq;        /* +1 per ECG beat (ECG, BOTH) or pulse (PPG) */
     bool gain_hi;
+    uint8_t gain_switches;   /* auto-gain changes this session */
     uint8_t notch_hz;        /* notch in use */
     uint16_t mid_code;       /* VMID_MON code (ECG modes) */
     uint16_t led_code, dac12;
@@ -158,6 +191,10 @@ typedef struct {
     uint8_t ecg_state;       /* acq_ecg_state_t (ECG, BOTH) */
     uint8_t ecg_why;         /* acq_why_t of the last change */
     bool railed;             /* dsp_lead_railed() now */
+    bool blip;               /* RUN, output on a rail for less than ACQ_ECG_BLIP_MS so far */
+    uint16_t blips;          /* blips this session */
+    uint16_t qrs_uv;         /* median QRS peak-to-peak of the last 5 accepted beats, uV (0 = none) */
+    bool qrs_neg;            /* R waves point down (detector polarity vote) */
     uint16_t mains_uvpp;     /* dsp_mains_residual_uvpp(), last 0.5 s window */
     uint16_t ecg_beats;      /* beats reported this session */
     bool contact_beat;       /* an accepted beat (ACQ_ECG_MIN_QRS_UV) in the current / last contact */
@@ -214,6 +251,9 @@ typedef struct {
     void (*pulse)(uint32_t foot_ecg_index, uint16_t pulse_bpm, uint16_t pat_ms, uint16_t pi_permille);
     void (*contact)(bool on);  /* primary contact edges */
     void (*settled)(bool on);  /* RUNNING begins / ends */
+    /* ECG samples while settled that have no display value (a blip: the
+     * output on a rail), in place of ecg_trace, so the sweep keeps time. */
+    void (*ecg_gap)(size_t n);
 } acq_sink_t;
 
 /* sink may be NULL or have NULL members. */

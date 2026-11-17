@@ -74,15 +74,18 @@ TEST(full_session)
     scen_run_ms(30000);
     CHECK_NEAR(scen_m()->live.hr_bpm, tc.hr_bpm, 2);
     CHECK(scen_m()->live.elapsed_s >= 40);
-    /* thumbs off: "hold still" while railed, the summary
-     * ACQ_ECG_LOST_END_MS after the signal stopped being stable (was: 2 s
-     * after a 100 ms lead-off) */
+    /* thumbs off: a blip first (still running, the trace shows a gap),
+     * "hold still" after ACQ_ECG_BLIP_MS, the summary ACQ_ECG_LOST_END_MS
+     * after the signal stopped being stable */
     sim_set_thumbs(false);
     uint64_t t_off = sim_now_ms();
-    scen_run_ms(1500);
+    scen_run_ms(1000);
     CHECK_EQ(scen_screen(), UI_SCREEN_ECG);
+    CHECK_EQ(scen_live_state(), UI_MEAS_RUNNING);
+    CHECK(acq_status()->blip);
+    scen_run_ms(2000);
     CHECK_EQ(scen_live_state(), UI_MEAS_SETTLING);
-    CHECK(scen_run_cond(is_summary, 2000));
+    CHECK(scen_run_cond(is_summary, 1500));
     uint64_t dt = sim_now_ms() - t_off;
     printf("  thumbs off -> summary %llu ms\n", (unsigned long long)dt);
     CHECK(dt >= ACQ_ECG_LOST_END_MS && dt < ACQ_ECG_LOST_END_MS + 300);
@@ -128,13 +131,14 @@ TEST(brief_loss_and_too_short)
     to_ecg_card();
     arm_and_run();
     scen_run_ms(4000);
-    /* lift for 1 s: stays in the session, settles again */
+    /* lift for 1 s: stays in the session (a blip, then "hold still" while
+     * the re-touch transient decays) and runs again */
     sim_set_thumbs(false);
     scen_run_ms(1000);
     CHECK_EQ(scen_screen(), UI_SCREEN_ECG);
     sim_set_thumbs(true);
-    CHECK(scen_run_cond(is_settling, 1500));
-    CHECK(scen_run_cond(is_running, 5000));
+    CHECK(scen_run_cond(is_running, 6000));
+    CHECK_EQ(scen_screen(), UI_SCREEN_ECG);
     scen_run_ms(1000);
     /* end now with BUTTON1: RUNNING happened but too short */
     scen_tap(1);
@@ -167,7 +171,7 @@ TEST(no_contact_timeout_and_abort)
     sim_set_thumbs(false);
     scen_run_ms(2500);
     CHECK(is_settling()); /* a rail is "recovering" first */
-    scen_run_ms(1000);    /* ACQ_ECG_LOST_WAIT_MS (was: 100 ms lead-off) */
+    scen_run_ms(1600);    /* ACQ_ECG_LOST_WAIT_MS (was: 100 ms lead-off) */
     CHECK(is_waiting());
     CHECK_EQ(scen_screen(), UI_SCREEN_ECG);
     /* BUTTON1 before RUNNING: back to the card, no summary */
@@ -182,6 +186,8 @@ TEST(no_contact_timeout_and_abort)
     CHECK_EQ(scen.body_en_outside_session, 0);
 }
 
+static bool is_gain_hi(void) { return sim_pin(PIN_GAIN_HI); }
+
 TEST(auto_gain_and_notch)
 {
     scen_boot(false);
@@ -192,24 +198,45 @@ TEST(auto_gain_and_notch)
     to_ecg_card();
     arm_and_run();
     CHECK_EQ(acq_status()->notch_hz, 50); /* decided while settling */
-    CHECK(!sim_pin(PIN_GAIN_HI));
-    scen_run_ms(15000);
+    CHECK(!sim_pin(PIN_GAIN_HI)); /* auto starts low */
+    /* a small QRS with headroom: up within the session, after one clean
+     * ACQ_GAIN_WIN_MS window of RUN, and the session keeps running */
+    uint64_t t_run = sim_now_ms();
+    CHECK(scen_run_cond(is_gain_hi, ACQ_GAIN_WIN_MS + 1500));
+    printf("  running -> auto-gain up %llu ms\n", (unsigned long long)(sim_now_ms() - t_run));
+    CHECK(scen_m()->live.state == UI_MEAS_RUNNING);
+    CHECK(strstr(sim_log_text(), "ecg: auto-gain -> " ECG_GAIN_STR(ECG_GAIN_HI)) != NULL);
+    scen_run_ms(12000);
+    CHECK(scen_m()->live.gain_hi);
+    CHECK_EQ(acq_status()->gain_switches, 1); /* no hunting */
     CHECK_NEAR(scen_m()->live.hr_bpm, tc.hr_bpm, 2);
+    CHECK_NEAR(acq_status()->qrs_uv, 500, 120); /* the display scale is in uV */
+    scen_shot("ecg_running_1098");
     sim_set_thumbs(false);
-    CHECK(scen_run_cond(is_summary, 4000));
+    CHECK(scen_run_cond(is_summary, 5000));
     CHECK(scen_m()->summary.valid);
-    CHECK_EQ(acq_summary()->gain_advice, 1);
     scen_tap(1);
-    /* next record starts at 1098x (between records only) */
+    /* the next record starts low again */
     scen_tap(1);
     scen_run_ms(600);
-    CHECK(sim_pin(PIN_GAIN_HI));
-    sim_set_thumbs(true);
-    CHECK(scen_run_cond(is_running, 6000));
-    CHECK(scen_m()->live.gain_hi);
-    scen_run_ms(12000);
+    CHECK(!sim_pin(PIN_GAIN_HI));
+    scen_tap(1);
+    CHECK(scen_analog_all_off());
+}
+
+/* A large QRS (2 mV, beyond the 1098x window) never goes up. */
+TEST(auto_gain_stays_low_for_large_qrs)
+{
+    scen_boot(false);
+    testsrc_cfg_t tc = testsrc_defaults();
+    tc.amp_mv = 2.0;
+    testsrc_install(&tc);
+    to_ecg_card();
+    arm_and_run();
+    scen_run_ms(15000);
+    CHECK(!sim_pin(PIN_GAIN_HI));
+    CHECK_EQ(acq_status()->gain_switches, 0);
     CHECK_NEAR(scen_m()->live.hr_bpm, tc.hr_bpm, 2);
-    scen_shot("ecg_running_1098");
     scen_tap(1);
     CHECK(scen_analog_all_off());
     sim_set_thumbs(false);
@@ -221,6 +248,7 @@ int main(void)
     RUN(brief_loss_and_too_short);
     RUN(no_contact_timeout_and_abort);
     RUN(auto_gain_and_notch);
+    RUN(auto_gain_stays_low_for_large_qrs);
     printf("watchdog resets %u, violations %zu\n", (unsigned)sim_facts()->wdt_resets,
            sim_violation_count());
     return TEST_RESULT();

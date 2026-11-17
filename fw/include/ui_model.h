@@ -160,5 +160,12 @@ void ui_render(const ui_model_t *m, uint8_t fb[OLED_FB_BYTES]);
 typedef enum { UI_TRACE_ECG, UI_TRACE_PPG, UI_TRACE_COUNT } ui_trace_t;
 void ui_trace_reset(uint16_t sweep_time_ms);
 void ui_trace_push(ui_trace_t trace, const int16_t *samples, uint16_t n);
+/* n samples with no display value (the ECG front end briefly on a rail):
+ * the pen advances over empty columns, so the sweep keeps time. */
+void ui_trace_gap(ui_trace_t trace, uint16_t n);
+/* ECG scale reference: median QRS peak-to-peak in uV (0 = not known yet) and
+ * whether the R waves point down. Applied from the next sweep; kept by
+ * ui_trace_reset() (set 0 at the start of a measurement). */
+void ui_trace_ecg_ref(uint16_t qrs_uv, bool r_down);
 
 #endif

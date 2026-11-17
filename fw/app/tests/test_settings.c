@@ -85,7 +85,7 @@ TEST(v2_migration)
 }
 
 /* A blob written by the previous build (v3, no restore item) keeps its
- * values; restore comes up Fast (the behaviour of that build). */
+ * values; restore comes up with its default (Off). */
 TEST(v3_migration)
 {
     uint8_t b[SETTINGS_BLOB_LEN];
@@ -107,7 +107,7 @@ TEST(v3_migration)
     CHECK_EQ(o.led_limit, LED_LIMIT_5MA);
     CHECK_EQ(o.sweep, SWEEP_1S5);
     CHECK_EQ(o.ble, BLE_OFF);
-    CHECK_EQ(o.restore, RESTORE_FAST);
+    CHECK_EQ(o.restore, RESTORE_OFF);
     b[6] = RLD_LEFT; /* v3 with a bad CRC */
     CHECK(settings_decode(b, &o) == SETTINGS_CORRUPT);
 }

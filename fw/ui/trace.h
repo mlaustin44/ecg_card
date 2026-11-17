@@ -9,7 +9,12 @@
  *
  * Vertical scale is applied when a sample is stored, and only changes when
  * the pen wraps, so the old trace to the right of the pen stays as drawn.
- *   ECG: 1-2-5 steps of microvolts per trace height, with hysteresis.
+ *   ECG: steps of microvolts per trace height, with hysteresis. Once the
+ *        median QRS height is known (ui_trace_ecg_ref()) the step follows it:
+ *        QRS at 70-75 % of the height, up at once, down after two sweeps.
+ *        The baseline sits at 30 % from the side the R waves leave from;
+ *        wander and artifacts clip at the edges instead of zooming out.
+ *        Before that: the sweep's range.
  *   PPG: free range from the last sweep's peak-to-peak, with hysteresis. */
 #ifndef UI_TRACE_H
 #define UI_TRACE_H
@@ -29,6 +34,8 @@ typedef struct {
     int32_t range;                    /* raw units per full trace height */
     int32_t k;                        /* (256 << 16) / range */
     int16_t smin, smax;               /* raw extremes of the current sweep */
+    int32_t sum;                      /* sum and count of the current sweep */
+    uint16_t cnt;
     uint16_t pen;                     /* column being written */
     uint16_t wraps;                   /* sweeps completed since reset */
     uint8_t step;                     /* ECG: index into the 1-2-5 table */
@@ -41,9 +48,9 @@ typedef struct {
 const trace_state_t *trace_state(ui_trace_t t);
 
 /* ECG scale table, microvolts per full trace height. */
-#define ECG_STEPS 5
+#define ECG_STEPS 8
 extern const uint16_t trace_ecg_steps_uv[ECG_STEPS];
-#define ECG_STEP_DEFAULT 2 /* 2 mV per trace height */
+#define ECG_STEP_DEFAULT 3 /* 2 mV per trace height */
 
 /* Scale bar for the ECG trace: value (uV) of the largest 1-2-5 value not
  * above half the current range, and its length in px at trace height h. */
