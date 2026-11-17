@@ -34,7 +34,7 @@
  *   EV_PULSE     (2): u32 foot time in ECG sample units (500 Hz), u16 pulse_bpm,
  *                     u16 pat_ms (0 = n/a), u16 pi_permille
  *   EV_LEAD      (3): u8 contact (0 off, 1 on)
- *   EV_STATE     (4): u8 mode (0 idle, 1 ECG, 2 PPG, 3 both), u8 notch_hz,
+ *   EV_STATE     (4): u8 mode (0 idle, 1 ECG, 2 PPG, 3 both, 4 HR monitor), u8 notch_hz,
  *                     u16 mid_code, u8 batt_pct, u8 flags (bit0 usb, bit1 charging),
  *                     u16 gain_lo, u16 gain_hi (ECG front-end gains, board.h).
  *                     Older firmware sends the first 7 bytes only: then the

@@ -12,8 +12,8 @@
 /* Radio firmware version, reported in LINK_HELLO and Device Information. */
 #define APP_FW_MAJOR 0u
 #define APP_FW_MINOR 1u
-#define APP_FW_PATCH 0u
-#define APP_FW_STRING "0.1.0"
+#define APP_FW_PATCH 1u
+#define APP_FW_STRING "0.1.1"
 
 /* Device Information strings. */
 #define APP_DIS_MANUFACTURER "ECG Card"

@@ -182,8 +182,8 @@ application. Stages 5 to 16 use `ecg_fw.elf`. The first lines of the log use `[<
 
 ### Hidden diagnostics pages (application)
 
-Home, BUTTON2 (next) to the About page (HOME, ECG, Pulse, ECG+Pulse cards, Settings with its
-6 items, About), then **hold both buttons 2 s on About** (`BTN_LONG_MS`). Footer shows
+Home, BUTTON2 (next) to the About page (HOME, ECG, Pulse, ECG+Pulse, HR Monitor cards,
+Settings with its 6 items, About: BUTTON2 x6), then **hold both buttons 2 s on About** (`BTN_LONG_MS`). Footer shows
 `Diagnostics n/6`. Refresh 250 ms.
 
 | In diagnostics | Action |
@@ -206,7 +206,7 @@ Home, BUTTON2 (next) to the About page (HOME, ECG, Pulse, ECG+Pulse cards, Setti
 `boot: ECG Card 0.1.0 reset=<0 power-on, 1 pin, 2 watchdog, 3 software, 4 brown-out, 5 other>
 mcp=ok|mcp=FAIL` plus ` (eeprom programmed)` on the boot that wrote the MCP4728 EEPROM;
 `settings: blank: defaults | corrupt: defaults | saved | save FAILED`;
-`batt: CW2015 not answering: battery unknown`; `session: start mode=<0 ECG, 1 Pulse, 2 both>
+`batt: CW2015 not answering: battery unknown`; `session: start mode=<1 ECG, 2 Pulse, 3 both, 4 HR monitor: the LINK_MODE_* numbers of LINK_STATUS>
 gain=<ECG_GAIN_LO>|gain=<ECG_GAIN_HI>` (` auto` when Gain is Auto: the session starts low) plus, in ECG modes, ` rld=both|left|right|off restore=fast|slow|off`; `session: vmid=<mV> mV mid=<code> tol=+-30` (ECG start, once); `session: blocked: USB power`; `session: refused: battery low`;
 `session: refused: MCP4728 absent`; `session: start failed err=<1 VMID, 2 LED DAC, 3 USB,
 4 start> vmid=<mV>`;
@@ -214,12 +214,15 @@ gain=<ECG_GAIN_LO>|gain=<ECG_GAIN_HI>` (` auto` when Gain is Auto: the session s
 `ecg: <from> -> <to> (<why>)` on every ECG session state change (states `wait`, `settle`, `run`,
 `hold` = settling again after running, `end`; why `stable`, `settled, beat`, `rail`,
 `no stable signal`, `no beat`), `ppg: <from> -> <to>` in Pulse mode (`wait`, `settle`, `run`);
-`session: end <user|abort|lead-off|usb|battery|timeout> run_ms= beats= hr= pulses= pat= lost=`;
+`session: end <user|abort|lead-off|usb|battery|timeout|idle|no-contact> run_ms= beats= hr= pulses= pat= lost=`
+(`idle`, `no-contact`: HR monitor, after `session: HR monitor: no contact and no app for 5 min` or
+`session: HR monitor: no contact for 30 min`);
 in ECG modes followed by `session: front-end rail=<n>/1000 of <s> s, inr_max=<ms> ms, fr=<n> blips=<n>`
 (the whole session: share of 4 kHz codes on a rail and the longest in-range run, both ignoring
 the samples FAST_RESTORE forces to mid, and the number of pulses; the A/B number for the
 Settings `Restore` policies);
-`usb: plugged|removed`; `power: off requested | power-down screen | display off | standby | wake`;
+`usb: plugged|removed`; `power: off requested | power-down screen | display off | standby | wake`,
+and in HR monitor mode `power: display dimmed | display dark (HR monitor runs on)`;
 `batt: critical mv= pct=`, `batt: low: measurement stopped`;
 `fault: Button 1|2 stuck down: it is ignored`.
 Radio: `ble: radio power on`; `ble: HELLO fw <x.y.z> proto <n> addr <AA:..:FF> reset <n> name "ECG Card XXXX"`;
@@ -309,7 +312,7 @@ application tests the display itself in stage 5.
 - Action: `scripts/flash.sh build/target/fw/bsp/ecg_fw.elf`; `scripts/rtt.sh -e build/target/fw/bsp/ecg_fw.elf log`. Scope `OLED_EN` (R6 pad) and `OLED_VCC` at power-up; room dark, window visible.
 - Look at the display: first the boot screen for about 2 s (`ECG Card`, a heartbeat trace that draws itself across in the first second, `Designed & built by`, the designer's name, `v0.1.0`; `build/app_shots/boot_splash.png`); the card boots underneath it (I2C, gauge, radio) and any button skips it to Home without acting. Then the Home screen: `ECG Card`, battery icon with `NN%`, `On battery`, bottom `hold: off` with a page dot row (`build/app_shots/boot_home.png`). Log first line: `[ms] boot: ECG Card 0.1.0 reset=0 mcp=ok` (+ ` (eeprom programmed)` on the very first boot) then `settings: blank: defaults` on a never-written board.
 - Pass: image stable and upright; `OLED_EN` rises after `OLED_RESET` low, `OLED_VCC` about 3.3 V; reset held low >= 6 ms, then released; record the `OLED_VCC` current (datasheet `IBAT` typ 25 mA at full-on); no flicker for 60 s.
-- Buttons: BUTTON2 steps HOME, ECG, Pulse, ECG+Pulse, Settings, About, HOME. Settings is shown closed (values listed, `Open` hint): BUTTON2 goes on to About, BUTTON1 opens it; open, BUTTON1 changes the highlighted item, BUTTON2 goes round the items and `Exit settings` (BUTTON1 there closes it and saves), BUTTON2 long goes Home. Open diagnostics page 1 (see above): `BTN1`/`BTN2` toggle `up`/`down` while held (hold under 2 s: 2 s on BUTTON1 powers off). Pass: both buttons toggle; no `!`; log has no `fault: Button`. A button held at boot is ignored until released; 5 s continuous gives the log line `fault: Button 1 stuck down: it is ignored` and a Fault overlay. A button held more than `BTN_HELD_MAX_MS` (10 s) after boot is treated as stuck in the same way (overlay once, then ignored), so a long deliberate hold is not a hardware fault: release and press again.
+- Buttons: BUTTON2 steps HOME, ECG, Pulse, ECG+Pulse, HR Monitor, Settings, About, HOME. Settings is shown closed (values listed, `Open` hint): BUTTON2 goes on to About, BUTTON1 opens it; open, BUTTON1 changes the highlighted item, BUTTON2 goes round the items and `Exit settings` (BUTTON1 there closes it and saves), BUTTON2 long goes Home. Open diagnostics page 1 (see above): `BTN1`/`BTN2` toggle `up`/`down` while held (hold under 2 s: 2 s on BUTTON1 powers off). Pass: both buttons toggle; no `!`; log has no `fault: Button`. A button held at boot is ignored until released; 5 s continuous gives the log line `fault: Button 1 stuck down: it is ignored` and a Fault overlay. A button held more than `BTN_HELD_MAX_MS` (10 s) after boot is treated as stuck in the same way (overlay once, then ignored), so a long deliberate hold is not a hardware fault: release and press again.
 - Settings persistence: change one setting, wait 3 s or leave the screen: log `settings: saved`; page 5 `NV ok writes 1` after a reset.
 - Fail hardware: blank display: `OLED_VCC` up? strap R3/R4/R8 (module 4-wire SPI); `OLED_RESET` stuck low (R53 pull-up); upside down: `SSD1306_FLIP_180` (section 1.3). Buttons permanently `down`/stuck fault: TS-1075S pads 3 and 4 not joined internally (open question 1), check the C75/C76 10 nF, 20 ms software debounce is in `board.h` (`BTN_DEBOUNCE_MS`).
 - Fail firmware assumption: garbage or partial image: init timing (`ssd1306_power_on()` waits 6 ms, then 3 ms after releasing reset, the datasheet sample waits 200 ms; try a longer delay), SPI mode 0 at 8 MHz, DMA flush (BSP item 13). Hang with no boot line: erased-flash read (item 11) or MCP4728 init loop. `NV corrupt/blank` after save: flash program (item 11), `hal_nv.c`.
@@ -337,7 +340,7 @@ application tests the display itself in stage 5.
 
 - Action: Home, ECG card, BUTTON1 (Start). No thumbs needed: sampling runs in "Place both thumbs" state. Start the capture first: `scripts/rtt.sh -e build/target/fw/bsp/ecg_fw.elf both build/rtt.bin` (terminal 1), `python3 tools/stream_capture.py --follow build/rtt.bin --npz build/rec.npz` (terminal 2). Let it run 10 min, then Ctrl-C both. Scope `ANA_EN`/`MEASURE_REQ` at start.
 - Start sequence you will see (from `fw/acq/src/acq.c`, `board.h`): t=0 `ANA_EN` and `BUCK_PS_SYNC` high; at 400 ms (`ACQ_VMID_WAIT_MS`) VMID checked; then `GAIN_HI`/`RLD_L_EN`/`RLD_R_EN` set per Settings and, in the same pass, `MEASURE_REQ` high (TP15 high if on battery) with ECG timers starting, so about 400 ms after the press. `FAST_RESTORE` stays low until `MEASURE_REQ` is high; then it gets a 30 ms pulse (`ECG_FAST_RESTORE_MS`) whenever the output has been on a rail for 50 ms (`ACQ_FR_RAIL_MS`), at most every 250 ms (`ACQ_FR_REPEAT_MS`), so with no thumbs (floating inputs on a rail) expect about 4 pulses per second (`fr=4` in the `ecg:` line). In range it gets one more pulse only 500 ms after the signal became stable (`ACQ_FR_RECHECK_MS`) if the baseline is still over 25 % of full scale from mid. That is Settings `Restore` = `Fast` (default). `Slow` pulses only after 2 s continuously on a rail, at most every 2 s, with no in-range recheck; `Off` never pulses.
-- Look: log `session: start mode=0 gain=558`; stream rate on `stream_capture.py` line: about 50 ECG blocks/s, about 2.8 kB/s (33 B per ECG block, 23 B per PPG block, plus events); `seq_lost=0`. After stopping (BUTTON1 on the live screen) the log has `session: end user ... lost=0`; diagnostics page 4 `lost ECG 0 PPG 0`, `drop 0/N`, `loop <ms>`.
+- Look: log `session: start mode=1 gain=558`; stream rate on `stream_capture.py` line: about 50 ECG blocks/s, about 2.8 kB/s (33 B per ECG block, 23 B per PPG block, plus events); `seq_lost=0`. After stopping (BUTTON1 on the live screen) the log has `session: end user ... lost=0`; diagnostics page 4 `lost ECG 0 PPG 0`, `drop 0/N`, `loop <ms>`.
 - Pass (exactly 500 samples/s):
   1. `python3 tools/check_capture.py build/rtt.bin` exits 0: no CRC errors and every ECG block start steps by 10.
   2. Log `lost=0`. The app re-inserts lost samples to keep indices continuous, so check_capture alone cannot see overruns; `lost=` and page 4 can.
@@ -349,7 +352,7 @@ application tests the display itself in stage 5.
 ### Stage 9: ECG with a signal generator (brief step 7)
 
 - Setup (brief): generator through a resistive divider into the two rings, right-leg drive to the divider midpoint. Amplitude 1 mV peak (2 mVpp) at 10 Hz is inside both input ranges (+-2.96 mV at 558x, +-1.50 mV at 1098x). Battery power, USB unplugged.
-- Force gain: Home, BUTTON2 x4 to Settings, BUTTON1 to open it (first item `Gain`), BUTTON1 cycles `Auto`, `558x`, `1098x`; BUTTON2 steps to the next item (`Mains notch`, `RLD`, `LED limit`, `Sweep`, `Bluetooth`, `Restore`, `Live view`, `Exit settings`); `Exit settings` or leaving the screen saves (log `settings: saved`). Set notch to `50Hz` or `60Hz` and RLD `Both`. Start an ECG session; the log line `session: start mode=0 gain=558` or `gain=1098` is the firmware's selection; also check `GAIN_HI` (R51 pad) low/high. `Auto` uses 558x unless the last session advised the other.
+- Force gain: Home, BUTTON2 x5 to Settings, BUTTON1 to open it (first item `Gain`), BUTTON1 cycles `Auto`, `558x`, `1098x`; BUTTON2 steps to the next item (`Mains notch`, `RLD`, `LED limit`, `Sweep`, `Bluetooth`, `Restore`, `Live view`, `Exit settings`); `Exit settings` or leaving the screen saves (log `settings: saved`). Set notch to `50Hz` or `60Hz` and RLD `Both`. Start an ECG session; the log line `session: start mode=1 gain=558` or `gain=1098` is the firmware's selection; also check `GAIN_HI` (R51 pad) low/high. `Auto` uses 558x unless the last session advised the other.
 - Capture 30 s per condition (`rtt.sh both`, `stream_capture.py --npz`). Gain from the capture:
 
       python3 - <<'EOF'
@@ -420,6 +423,43 @@ them. Check without instruments: the same thumbs give the same QRS in uV (about 
 first board) at Gain = low and high, while the raw `min`/`max` span of the `ecg:` line is about
 2.2x smaller at low gain.
 
+### HR monitor mode (Bluetooth heart-rate sensor for other apps)
+
+The card acts like a chest strap for third-party apps (Elite HRV, Kubios HRV, Zwift, nRF
+Toolbox, ...): it advertises the standard Heart Rate service (0x180D, next to the ECG Card
+service), and the radio sends Heart Rate Measurement (0x2A37) notifications once a second while
+an app is subscribed: bpm, the sensor-contact bit, and the RR intervals from the ECG R-peaks
+(1/1024 s; what the HRV apps use). Needs radio firmware with this support (`CH585F/`, see
+`fw/include/link_fmt.h`, Heart Rate).
+
+- Use: laptop and USB unplugged (ECG runs on battery only), Settings `Bluetooth On`. Home,
+  BUTTON2 x4 to the `HR Monitor` card, BUTTON1 starts. In the app, scan for a heart-rate
+  sensor and pick `ECG Card XXXX` (pair or not, as the app wants). Both thumbs on the pads and
+  hold still: after the usual settling the screen shows the heart and the rate, the bottom row
+  `Sending to app` (an app subscribed to the rate), `App connected` (connected, not
+  subscribed, or no contact), `Waiting for app` (advertising), or `Bluetooth off: turn on`
+  (Settings `Bluetooth Off`: no app can see the card; end the session, turn it on, start
+  again). The card also starts it from the ECG Card client: `LINK_CMD_START` mode 4.
+- Lifting the thumbs does not end the session: like a strap taken off it goes back to
+  `Place both thumbs on the pads` (contact bit cleared, no RR intervals; log
+  `ecg: hold -> wait (no stable signal)`), and the next contact settles and runs again with the
+  QRS detector re-learned. `LINK_STATUS` mode is 4 throughout and meas follows wait / settling
+  / running (sent on each change).
+- Display: dimmed 20 s after the last button press, dark after 60 s (log `power: display dimmed`,
+  `power: display dark (HR monitor runs on)`; the panel sleeps, its 100 ms power-down is not
+  used while measuring); the session and the radio run on and the card never goes to standby.
+  Any press while dimmed or dark only wakes the display; the next press acts. BUTTON1 ends the
+  session (back to the card, no summary: the app keeps the record), BUTTON2 long goes Home.
+- It ends by itself after 5 min with no contact and no app connected
+  (`session: end idle`), or 30 min with no contact even with an app connected
+  (`session: end no-contact`); the times count from the end of the last contact that had a
+  beat. While it runs the 2 min advertising timeout is suspended (an app may connect late, or
+  reconnect); it counts afresh after the end.
+- Check: the app's rate matches the card's within 1 to 2 bpm; RR intervals in an HRV app look
+  plausible (no 2x / 0.5x outliers while holding still); the contact indicator in the app
+  drops about 2 s after the thumbs lift (the card then shows `Hold still`) and comes back
+  once the next contact has settled.
+
 ### Stage 10: ECG with thumbs, RLD, restore, interlock (brief steps 8 and Safety)
 
 - **First, USB-plug test with the generator setup, no thumbs** (laptop J-Link may stay; USB from an adapter): start ECG (TP15 high), plug USB. Pass: TP15 goes low at once (hardware AND with `CHG_PG`), log `usb: plugged` then `session: end usb ...` (summary only if the session had reached RUNNING), screen `Stopped / USB connected. ECG runs on battery only.`, `MEASURE_REQ` low. Then, with USB still in, press Start: log `session: blocked: USB power`, screen `Unplug USB to measure ECG`, TP15 and `MEASURE_REQ` stay low. Unplugging USB on that screen re-arms the session by itself.
@@ -459,7 +499,7 @@ first board) at Gain = low and high, while the raw `min`/`max` span of the `ecg:
 ### Stage 13: ECG + Pulse, PAT plausibility
 
 - Action: ECG+Pulse card, Start; both thumbs on the pads, right thumb also on the PPG window. Capture 2 min.
-- Look: log `session: start mode=2`; screen `PAT <ms>` and `Pulse`; `session: end ... pat=<ms>`; capture events `pulse` (field `pat_ms`).
+- Look: log `session: start mode=3`; screen `PAT <ms>` and `Pulse`; `session: end ... pat=<ms>`; capture events `pulse` (field `pat_ms`).
 - Pass: PAT values only appear when 100 <= PAT <= 500 ms (`dsp_pat.h` accepts only that range); beat-to-beat scatter small and PAT stable across the record; `n_ecg / n_ppg` = 5.000. A PAT outside the window is silently discarded: absent `PAT` means no pairing, not a zero.
 - Fail: no PAT while both HR and pulse are good: timeline offset between ECG and PPG start (BSP item 1, cross-trigger start); `hal_acq.c` residual offsets are documented as under 1 tick (250 ns).
 

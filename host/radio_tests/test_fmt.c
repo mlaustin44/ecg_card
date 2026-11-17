@@ -56,14 +56,19 @@ TEST(adv_data)
     uint8_t a[RL_ADV_MAX];
     size_t n = rl_ble_adv_data(a);
     CHECK(memcmp(uuid, expect_uuid, 16) == 0);
-    CHECK_EQ(n, 21);
+    CHECK_EQ(n, 25);
     CHECK(n <= RL_ADV_MAX);
     CHECK_EQ(a[0], 2);
     CHECK_EQ(a[1], 0x01);
     CHECK_EQ(a[2], 0x06);
-    CHECK_EQ(a[3], 17);
-    CHECK_EQ(a[4], 0x07);
-    CHECK(memcmp(&a[5], expect_uuid, 16) == 0);
+    /* 16-bit service UUIDs, complete: Heart Rate 0x180D, LSB first */
+    CHECK_EQ(a[3], 3);
+    CHECK_EQ(a[4], 0x03);
+    CHECK_EQ(a[5], 0x0D);
+    CHECK_EQ(a[6], 0x18);
+    CHECK_EQ(a[7], 17);
+    CHECK_EQ(a[8], 0x07);
+    CHECK(memcmp(&a[9], expect_uuid, 16) == 0);
 }
 
 TEST(scan_response)

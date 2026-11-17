@@ -564,7 +564,7 @@ const Codec = (() => {
   const RES_NAME = { 0: "OK", 1: "UNKNOWN", 2: "BAD_ARG", 3: "REFUSED_USB", 4: "REFUSED_BATT", 5: "BUSY", 6: "FAULT" };
   const RES_TEXT = { 0: "OK", 1: "unknown command", 2: "bad argument", 3: "refused: USB power present",
     4: "refused: battery low", 5: "busy (stop the measurement first)", 6: "fault" };
-  const MODE_NAME = { 0: "idle", 1: "ECG", 2: "PPG", 3: "ECG + PPG" };
+  const MODE_NAME = { 0: "idle", 1: "ECG", 2: "PPG", 3: "ECG + PPG", 4: "HR monitor" };
   const MEAS_NAME = { 0: "wait contact", 1: "settling", 2: "running", 3: "USB blocked", 4: "fault", 255: "n/a" }; // ui_meas_state_t
 
   // settings.h: settings_item_t order and enum values. lockedInSession: the MCU answers

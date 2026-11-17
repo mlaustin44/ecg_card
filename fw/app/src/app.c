@@ -50,7 +50,18 @@
  * for the display timeout): a connected client that polls GET_STATUS keeps
  * the card awake with the display off; a silent one lets it sleep after
  * UI_STANDBY_TIMEOUT_S (the shutdown handshake drops the connection). No
- * timeout fires during a session or in radio program mode. */
+ * timeout fires during a session or in radio program mode.
+ *
+ * HR monitor (UI_MODE_HRM, LINK_MODE_HRM): an ECG session that serves a
+ * standard heart-rate client (the radio builds 0x2A37 from the R_PEAK events
+ * and LINK_STATUS mode / meas). Lifting the thumbs does not end it (acq
+ * cfg.rearm: back to waiting, like a strap taken off); the advertising
+ * window does not expire (radio_adv_hold). The display dims HRM_DIM_MS after
+ * the last button press and goes dark HRM_DARK_MS after it while the session
+ * runs on (no STANDBY); a press then only wakes it. It ends with BUTTON1
+ * (back to its card, no summary), BUTTON2 long (Home), a phone STOP, or by
+ * itself: no contact and no connection for HRM_IDLE_END_MS, or no contact
+ * for HRM_NOCONTACT_END_MS even with a client connected. */
 #include "app.h"
 
 #include <string.h>
@@ -99,10 +110,25 @@
 #define SETTINGS_SAVE_IDLE_MS 3000u
 #define DIAG_REFRESH_MS       250u
 #define PPG_TIA_BIAS_CODE     304u   /* 0.245 V photodiode bias: PPG_HI near mid when dark */
+/* HR monitor: end with nobody using it (no contact, no client) or a card
+ * forgotten with the app still connected; the times count from the end of
+ * the last contact with a beat (k_contact) and the last connected pass. */
+#define HRM_IDLE_END_MS       (5u * 60u * 1000u)
+#define HRM_NOCONTACT_END_MS  (30u * 60u * 1000u)
+/* HR monitor display, from the last button press: dimmed, then dark. */
+#define HRM_DIM_MS            20000u
+#define HRM_DARK_MS           60000u
+#define HRM_CONTRAST_DIM      0x10u  /* of 0xFF; SSD1306_CONTRAST_INIT when lit */
 
 typedef enum { SES_NONE, SES_USB_BLOCKED, SES_FAULT, SES_ACTIVE } ses_t;
 typedef enum { THEN_NONE, THEN_SUMMARY_OR_CARD, THEN_LIVE, THEN_STANDBY } then_t;
-typedef enum { END_USER, END_ABORT, END_LEAD, END_USB, END_BATT, END_TIMEOUT } end_t;
+typedef enum {
+    END_USER, END_ABORT, END_LEAD, END_USB, END_BATT, END_TIMEOUT,
+    END_IDLE,      /* HR monitor: no contact, no client */
+    END_NO_CONTACT /* HR monitor: no contact (a client connected) */
+} end_t;
+/* HR monitor panel (panel_poll): lit, dimmed, asleep (AEh) */
+typedef enum { PANEL_FULL, PANEL_DIM, PANEL_DARK } panel_t;
 
 static struct {
     app_debug_t dbg;
@@ -141,6 +167,7 @@ static struct {
     uint8_t log_gain_sw;    /* acq gain_switches already logged */
     uint32_t hrg_ms;        /* last HR graph point */
     bool log_hum;           /* acq hum already logged */
+    uint32_t conn_ms;       /* HR monitor: last pass with a Bluetooth client connected */
 
     /* battery */
     bool gauge_ok;
@@ -164,6 +191,7 @@ static struct {
     uint32_t frame_ms;
     bool force_draw;
     bool blanked;
+    uint8_t panel, panel_want; /* panel_t: as applied, as wanted */
     uint32_t state_ev_ms;
 
     /* phone / radio */
@@ -194,7 +222,19 @@ static uint8_t start_session(ui_mode_t mode);
 static bool usb_now(void) { return !hal_pin_read(PIN_CHG_PG); }
 static bool usb_present(void) { return usb_now() || charger_usb_present(); }
 static bool mode_has_ecg(ui_mode_t m) { return m != UI_MODE_PPG; }
-static bool mode_has_ppg(ui_mode_t m) { return m != UI_MODE_ECG; }
+static bool mode_has_ppg(ui_mode_t m) { return m == UI_MODE_PPG || m == UI_MODE_BOTH; }
+static bool hrm_active(void) { return S.ses == SES_ACTIVE && S.mode == UI_MODE_HRM; }
+
+/* LINK_MODE_* (LINK_STATUS, EV_STATE, LINK_CMD_START, the session log) */
+static uint8_t link_mode(ui_mode_t m)
+{
+    switch (m) {
+    case UI_MODE_PPG: return LINK_MODE_PPG;
+    case UI_MODE_BOTH: return LINK_MODE_BOTH;
+    case UI_MODE_HRM: return LINK_MODE_HRM;
+    default: return LINK_MODE_ECG;
+    }
+}
 
 static void redraw(void) { S.force_draw = true; }
 
@@ -218,10 +258,16 @@ static void show_overlay(ui_overlay_t ov, uint32_t ms, then_t then, const char *
 static void display_wake(void)
 {
     if (S.dbg.pwr == APP_PWR_DISPLAY_OFF) {
-        ssd1306_power_on();
+        /* HR monitor dark: the panel only sleeps; panel_poll() lights it
+         * once the next frame is in its RAM */
+        if (S.panel != PANEL_DARK || !ssd1306_is_powered()) {
+            ssd1306_power_on();
+            S.panel = PANEL_FULL;
+        }
         S.dbg.pwr = APP_PWR_AWAKE;
         S.blanked = false;
     }
+    S.panel_want = PANEL_FULL;
     S.last_input_ms = S.now;
     redraw();
 }
@@ -257,8 +303,8 @@ static void show_splash(ui_screen_t s)
 static uint8_t stream_mode(void)
 {
     if (S.ses != SES_ACTIVE || acq_status()->phase != ACQ_ON)
-        return 0;
-    return S.mode == UI_MODE_ECG ? 1u : S.mode == UI_MODE_PPG ? 2u : 3u;
+        return LINK_MODE_IDLE;
+    return link_mode(S.mode);
 }
 
 static void send_state(void)
@@ -276,7 +322,12 @@ static void send_state(void)
 /* acquisition sink                                                          */
 /* ======================================================================== */
 
-static void k_ecg_trace(const int16_t *uv, size_t n) { ui_trace_push(UI_TRACE_ECG, uv, (uint16_t)n); }
+/* (the HR monitor screen has no trace: not drawn, not fed) */
+static void k_ecg_trace(const int16_t *uv, size_t n)
+{
+    if (S.mode != UI_MODE_HRM)
+        ui_trace_push(UI_TRACE_ECG, uv, (uint16_t)n);
+}
 static void k_ppg_trace(const int16_t *v, size_t n) { ui_trace_push(UI_TRACE_PPG, v, (uint16_t)n); }
 static void k_ecg_gap(size_t n) { ui_trace_gap(UI_TRACE_ECG, (uint16_t)n); }
 
@@ -419,7 +470,8 @@ static void make_summary(end_t why)
 
 static void log_session_end(end_t why)
 {
-    static const char *const names[] = {"user", "abort", "lead-off", "usb", "battery", "timeout"};
+    static const char *const names[] = {"user", "abort", "lead-off", "usb", "battery", "timeout",
+                                        "idle", "no-contact"};
     const acq_summary_t *a = acq_summary();
     log_begin("session");
     log_s(" end ");
@@ -475,6 +527,14 @@ static bool end_session(end_t why)
     S.end_n = acq_status()->ecg_samples;
     S.end_ms = S.start_logged ? hal_millis() - S.acq_on_ms : 0u;
     acq_stop(); /* stop sequence; also a no-op safety net when idle */
+    if (S.panel == PANEL_DARK && S.dbg.pwr == APP_PWR_DISPLAY_OFF) {
+        /* the HR monitor ended with the panel asleep: off for real (100 ms,
+         * acquisition stopped), as the display timeout would leave it */
+        ssd1306_power_off();
+        S.panel = PANEL_FULL;
+        log_line("power", "display off");
+    }
+    S.panel_want = PANEL_FULL;
     if (!was_active) {
         S.ses = SES_NONE;
         return false;
@@ -489,9 +549,10 @@ static bool end_session(end_t why)
     return S.ever_running;
 }
 
+/* (the HR monitor has no summary: the client app keeps the record) */
 static void to_summary_or_card(bool summary)
 {
-    go_screen(summary ? UI_SCREEN_SUMMARY : nav_card_of(S.mode));
+    go_screen(summary && S.mode != UI_MODE_HRM ? UI_SCREEN_SUMMARY : nav_card_of(S.mode));
 }
 
 /* ---- evidence log (RTT channel 0, text) ----------------------------------
@@ -642,6 +703,7 @@ static uint8_t start_session(ui_mode_t mode)
     S.log_ms = S.now;
     S.fault_text = NULL;
     S.nocontact_ms = S.now;
+    S.conn_ms = S.now;
     if (mode_has_ecg(mode) && usb_now()) {
         /* ECG only runs on battery: report, never raise MEASURE_REQ */
         S.ses = SES_USB_BLOCKED;
@@ -675,6 +737,7 @@ static uint8_t start_session(ui_mode_t mode)
     c.notch = S.settings.notch;
     c.led_limit_ma = led_limit_ma(S.settings.led_limit);
     c.restore = S.settings.restore;
+    c.rearm = mode == UI_MODE_HRM; /* thumbs lifted: wait for them again */
     if (!acq_start(&c)) {
         S.ses = SES_FAULT;
         S.fault_text = "Could not start acquisition";
@@ -686,7 +749,7 @@ static uint8_t start_session(ui_mode_t mode)
     go_screen(nav_live_of(mode));
     log_begin("session");
     log_s(" start mode=");
-    log_u((uint32_t)mode);
+    log_u(link_mode(mode));
     log_s(" gain=");
     log_u(c.gain_hi ? (uint32_t)ECG_GAIN_HI : (uint32_t)ECG_GAIN_LO);
     if (c.gain_auto)
@@ -724,6 +787,28 @@ static const char *fault_text_of(const acq_status_t *st)
     case ACQ_ERR_LED_DAC: return "LED driver MCP4728 did not accept the current";
     default: return "Analog start-up failed";
     }
+}
+
+/* HR monitor: the session's own end rules (the others never apply: contact
+ * loss re-arms in acq, and nobody is expected at the buttons). */
+static void hrm_update(const acq_status_t *st)
+{
+    if (radio_connected())
+        S.conn_ms = S.now;
+    if (st->contact)
+        return;
+    uint32_t off = S.now - S.nocontact_ms, alone = S.now - S.conn_ms;
+    end_t why;
+    if (off >= HRM_NOCONTACT_END_MS)
+        why = END_NO_CONTACT;
+    else if (off >= HRM_IDLE_END_MS && alone >= HRM_IDLE_END_MS)
+        why = END_IDLE;
+    else
+        return;
+    log_line("session", why == END_IDLE ? "HR monitor: no contact and no app for 5 min"
+                                        : "HR monitor: no contact for 30 min");
+    end_session(why);
+    go_screen(nav_card_of(S.mode));
 }
 
 static void session_update(void)
@@ -773,6 +858,10 @@ static void session_update(void)
         return;
     }
     log_evidence(st);
+    if (S.mode == UI_MODE_HRM) {
+        hrm_update(st);
+        return;
+    }
     if (st->contact)
         return;
     uint32_t off = S.now - S.nocontact_ms;
@@ -1081,6 +1170,13 @@ static void power_policy(void)
         }
         return;
     }
+    if (hrm_active() && S.overlay == UI_OVERLAY_NONE) {
+        /* HR monitor: hands off the card for minutes; the display dims, then
+         * sleeps (panel_poll), the session and the radio run on; no STANDBY */
+        uint32_t idle = S.now - S.last_input_ms;
+        S.panel_want = idle >= HRM_DARK_MS ? PANEL_DARK : idle >= HRM_DIM_MS ? PANEL_DIM : PANEL_FULL;
+        return;
+    }
     if (acq_active() || S.overlay != UI_OVERLAY_NONE || radio_program_mode()) {
         /* armed with contact (or about to be), or the radio held for
          * programming: no timeouts */
@@ -1096,6 +1192,33 @@ static void power_policy(void)
         display_off();
     else if (S.dbg.pwr == APP_PWR_DISPLAY_OFF && idle_sb >= UI_STANDBY_TIMEOUT_S * 1000u)
         enter_standby();
+}
+
+/* HR monitor panel: dimmed by contrast, dark by AEh (the panel sleeps,
+ * keeping its RAM and charge pump; ssd1306_power_off() would block 100 ms,
+ * which the acquisition cannot afford). Applied between flushes; from dark
+ * it lights only once a fresh frame is in its RAM (no stale image). */
+static void panel_poll(void)
+{
+    if (S.panel == S.panel_want || !ssd1306_is_powered() || ssd1306_busy())
+        return;
+    if (S.panel_want == PANEL_DARK) {
+        if (ssd1306_display_on(false)) {
+            S.panel = PANEL_DARK;
+            S.dbg.pwr = APP_PWR_DISPLAY_OFF; /* display_update() draws nothing */
+            log_line("power", "display dark (HR monitor runs on)");
+        }
+        return;
+    }
+    if (S.panel == PANEL_DARK) {
+        if (S.dbg.pwr != APP_PWR_AWAKE || S.force_draw || !ssd1306_display_on(true))
+            return;
+    }
+    if (ssd1306_set_contrast(S.panel_want == PANEL_DIM ? HRM_CONTRAST_DIM : SSD1306_CONTRAST_INIT)) {
+        if (S.panel_want == PANEL_DIM)
+            log_line("power", "display dimmed");
+        S.panel = S.panel_want;
+    }
 }
 
 static void save_settings_if_needed(bool force)
@@ -1133,6 +1256,7 @@ static void enter_standby(void)
     S.power_off_pending = false;
     S.overlay = UI_OVERLAY_NONE;
     S.then = THEN_NONE;
+    S.panel = S.panel_want = PANEL_FULL; /* power_on() sets the contrast again */
     S.dbg.pwr = APP_PWR_STANDBY;
     S.dbg.standby_entries++;
     S.standby_rtc_due = hal_rtc_seconds() + STANDBY_BATT_WAKE_S;
@@ -1152,6 +1276,7 @@ static void wake_up(uint32_t cause)
     radio_rearm(); /* a fresh advertising window (and a retry after a fault) */
     ssd1306_power_on();
     S.blanked = false;
+    S.panel = S.panel_want = PANEL_FULL;
     /* a button wake is the user's "power on": the boot screen; USB goes
      * straight to Home (on_usb()) */
     bool usb = (cause & (HAL_EV_USB_PLUGGED | HAL_EV_USB_REMOVED)) != 0;
@@ -1295,8 +1420,12 @@ static uint8_t app_command(const link_cmd_t *c)
     S.last_phone_ms = S.now;
     S.dbg.phone_cmds++;
     switch (c->cmd) {
-    case LINK_CMD_START:
-        return phone_start(c->mode == 1u ? UI_MODE_ECG : c->mode == 2u ? UI_MODE_PPG : UI_MODE_BOTH);
+    case LINK_CMD_START: {
+        static const ui_mode_t modes[] = {UI_MODE_ECG, UI_MODE_PPG, UI_MODE_BOTH, UI_MODE_HRM};
+        if (c->mode < LINK_MODE_ECG || c->mode > LINK_MODE_HRM) /* (link_cmd_parse checked) */
+            return LINK_RES_BAD_ARG;
+        return phone_start(modes[c->mode - LINK_MODE_ECG]);
+    }
     case LINK_CMD_STOP: return phone_stop();
     case LINK_CMD_SET: return phone_set(c->item, c->value);
     case LINK_CMD_SET_TIME: phone_set_time(c->unix_s, c->utc_offset_min); return LINK_RES_OK;
@@ -1312,7 +1441,7 @@ static void app_status(uint8_t o[LINK_STATUS_LEN])
     bool on = act && st->phase == ACQ_ON;
     memset(o, 0, LINK_STATUS_LEN);
     o[0] = LINK_PROTO_VERSION;
-    o[1] = ses ? (uint8_t)(S.mode == UI_MODE_ECG ? 1u : S.mode == UI_MODE_PPG ? 2u : 3u) : 0u;
+    o[1] = ses ? link_mode(S.mode) : LINK_MODE_IDLE;
     o[2] = ses ? (uint8_t)live_state(st) : 0xFFu;
     o[3] = S.dbg.batt_valid ? S.dbg.batt_pct : 255u;
     uint8_t f = 0;
@@ -1353,6 +1482,7 @@ static void radio_step(void)
     bool want = S.settings.ble == BLE_ON && S.dbg.pwr != APP_PWR_STANDBY && !batt_low() &&
                 !batt_critical() && S.overlay != UI_OVERLAY_BATT_CRITICAL;
     radio_want(want);
+    radio_adv_hold(hrm_active()); /* a sports app may connect at any time */
     radio_poll(S.now);
 }
 
@@ -1406,6 +1536,7 @@ static void build_model(void)
     M.fw_version = APP_FW_VERSION;
     M.fault_text = S.fault_text;
     M.ble_state = ble_ui_state();
+    M.ble_hr = radio_connected() && (radio_info()->subs & LINK_SUB_HR) != 0;
     const radio_info_t *ri = radio_info();
     if (ri->hello) {
         memcpy(s_radio_fw, ri->fw_str, sizeof s_radio_fw);
@@ -1550,8 +1681,10 @@ static void display_update(void)
     if (S.blanked)
         return;
 #endif
-    bool fast = nav_is_live(S.screen) || S.overlay != UI_OVERLAY_NONE || S.power_off_pending ||
-                splash_on() || buttons_hold_ms(BTN_1) != 0;
+    /* (the HR monitor screen has no trace: the slow rate shows the beat blink) */
+    bool trace = nav_is_live(S.screen) && S.screen != UI_SCREEN_HRM;
+    bool fast = trace || S.overlay != UI_OVERLAY_NONE || S.power_off_pending || splash_on() ||
+                buttons_hold_ms(BTN_1) != 0;
     uint32_t period = fast ? FRAME_FAST_MS : FRAME_SLOW_MS;
     if (!S.force_draw && S.now - S.frame_ms < period)
         return;
@@ -1646,8 +1779,9 @@ void app_step(void)
     uint32_t ev = hal_events_take();
     if (ev & (HAL_EV_USB_PLUGGED | HAL_EV_USB_REMOVED))
         on_usb(ev); /* first: an ECG record ends before anything else */
-    if ((ev & HAL_EV_BUTTON) && S.dbg.pwr == APP_PWR_DISPLAY_OFF) {
-        /* any button wakes the display without acting */
+    if ((ev & HAL_EV_BUTTON) &&
+        (S.dbg.pwr == APP_PWR_DISPLAY_OFF || S.panel != PANEL_FULL || S.panel_want != PANEL_FULL)) {
+        /* any button wakes the display (also a dimmed one) without acting */
         buttons_ignore_until_release();
         display_wake();
         radio_user(); /* a user wake: the radio comes back after an advertising timeout */
@@ -1677,6 +1811,7 @@ void app_step(void)
         return;
     save_settings_if_needed(false);
     diag_update();
+    panel_poll();
     display_update();
     if (S.now - S.state_ev_ms >= STATE_EVENT_MS)
         send_state();

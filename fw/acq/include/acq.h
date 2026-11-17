@@ -43,7 +43,10 @@
  *           excursions, so this is not a rail-run length), or no accepted beat
  *           in ACQ_ECG_NO_BEAT_MS of in-range signal (RUN) /
  *           ACQ_ECG_HOLD_END_MS of wall time (HOLD). The app
- *           shows the summary.
+ *           shows the summary. With acq_cfg_t.rearm (HR monitor) the same
+ *           conditions lead to WAIT instead: the session goes on, waiting
+ *           for the next contact (the QRS detector re-learns from scratch,
+ *           the session statistics keep accumulating); END never occurs.
  * A button press suspends the contact-loss rules for ACQ_ECG_GRACE_MS.
  * Brief excursions while waiting, or floating inputs, therefore never reach
  * SETTLE, and a thumb movement while RUNNING costs a gap in the trace, or
@@ -170,6 +173,7 @@ typedef struct {
     uint8_t notch;        /* notch_mode_t (AUTO: 60 Hz until the detector decides) */
     uint8_t led_limit_ma; /* per-LED limit for the AGC */
     uint8_t restore;      /* restore_mode_t (ECG FAST_RESTORE policy) */
+    bool rearm;           /* ECG: contact over after RUNNING -> WAIT, not END (see above) */
 } acq_cfg_t;
 
 typedef enum {

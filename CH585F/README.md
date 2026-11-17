@@ -9,7 +9,7 @@ byte-identical copies live in `APP/include/` and a host test checks them.
 | Folder | What | Origin |
 | --- | --- | --- |
 | `APP/` | application: `main.c`, `ble_app.c` (GAP/GATT, notification queue), `link_mgr.c` (link protocol), `uart_link.c` (UART1 driver), `radio_board.c` (pins, watchdog) | ours |
-| `APP/rl_*.c`, `APP/include/rl_*.h` | portable logic with no WCH headers: COBS/CRC framing, frame parser, message builders/parsers, notification queue, device-log gate (`rl_log.c`), log formatter, advertising data. Tested on the host by `host/radio_tests/` | ours |
+| `APP/rl_*.c`, `APP/include/rl_*.h` | portable logic with no WCH headers: COBS/CRC framing, frame parser, message builders/parsers, notification queue, device-log gate (`rl_log.c`), Heart Rate Measurement state (`rl_hrs.c`), log formatter, advertising data. Tested on the host by `host/radio_tests/` | ours |
 | `Profile/` | GATT services: ECG Card (custom), Device Information, Battery, Heart Rate | ours, in the style of WCH's profiles |
 | `HAL/` | `MCU.c`, `RTC.c`, `SLEEP.c` (+ `KEY.c`, `LED.c`, excluded from the build) | WCH EVT `BLE/HAL`, unmodified |
 | `LIB/` | `libCH58xBLE.a`, `CH58xBLE_LIB.h`, `ble_task_scheduler.S` | WCH EVT `BLE/LIB`, unmodified |
@@ -65,11 +65,40 @@ reset pin; PB23 is not connected).
 5. BLE stack, HAL, GAP peripheral role, link manager, BLE task. Watchdog on
    (538 ms, fed every 100 ms; `APP_WATCHDOG 0` in `app_config.h` turns it
    off for single-stepping).
-6. Sends `LINK_HELLO` (protocol 1, firmware 0.1.0, BLE address LSB first,
+6. Sends `LINK_HELLO` (protocol 1, firmware 0.1.1, BLE address LSB first,
    reset reason = `R8_RESET_STATUS & RB_RESET_FLAG`: 0 software, 1 power-on,
    2 watchdog, 3 manual, 5 power-on reset during sleep) and a STREAM_LOG boot line. It does
    **not** advertise until the MCU sends `LINK_RC_ADV_START` (100 ms for
-   30 s, then 1 s). Name "ECG Card XXXX" (last two address bytes).
+   30 s, then 1 s). Name "ECG Card XXXX" (last two address bytes). The
+   advertising data lists the Heart Rate service (16-bit UUID 0x180D) and
+   the ECG Card service (128-bit), 25 of 31 bytes.
+
+## Heart Rate service (0x180D)
+
+The card looks like a chest strap to sports / HRV apps (link_fmt.h,
+"Standard services"). Heart Rate Measurement (0x2A37, notify) is built by
+`rl_hrs.c` from LINK_STATUS and the R_PEAK / PULSE events the MCU forwards
+while Events or Heart Rate is subscribed:
+
+- flags: u8 bpm, contact supported, contact detected = LINK_STATUS meas is
+  running (2), RR present; then u8 bpm and 0..9 RR intervals (u16, 1/1024 s,
+  oldest first), so 2..20 bytes (fits the default 23-byte MTU).
+- Sent once a second while a mode is active (LINK_STATUS mode != 0) and
+  0x2A37 is subscribed (`BA_EVT_HR`, timed from the TMOS clock), and at once
+  on a beat when none went out for a second (the first beat after
+  subscribing or after a mode starts).
+- bpm: latest R_PEAK hr_bpm; PULSE only after 5 s without an R_PEAK; 0
+  until the first beat of a mode, and 0 once no beat (R_PEAK or the PULSE
+  fallback) has arrived for 5 s (`RL_HRS_BPM_STALE_MS`), whatever the
+  contact state.
+- RR: from consecutive R_PEAK sample indices (500 Hz, rounded to 1/1024 s)
+  while in contact; none for the first beat after contact is (re)gained or
+  for intervals outside 250..2500 ms; each sent once, at most the newest 9.
+  Pending intervals are discarded when contact is lost or on (re)subscribing.
+
+The measurement goes through the same notification queue as the ECG Card
+characteristics, in arrival order. Every 10 s while subscribed:
+`ble: hr bpm <n> contact <0|1> rr ovf <dropped, more than 9> rej <out of range>`.
 
 ## Seeing its log
 

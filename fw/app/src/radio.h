@@ -22,6 +22,10 @@
  *   radio_user()       a button press: re-arms after an advertising timeout.
  *   radio_rearm()      wake from STANDBY / BLE turned On / program mode left:
  *                      clears the advertising timeout and FAULT.
+ *   radio_adv_hold(on) HR monitor session: the advertising window does not
+ *                      expire (a sports app may connect at any time, and
+ *                      again after a disconnect); on also clears an
+ *                      expired window. Released, the window counts afresh.
  * Advertising window: LINK_ADV_TOTAL_SECONDS from each ADV_START (power-up,
  * and again after a phone disconnects); if nobody connects in that time the
  * radio is shut down and stays off until radio_user() / radio_rearm().
@@ -107,6 +111,7 @@ void radio_poll(uint32_t now_ms);
 void radio_want(bool on);
 void radio_user(void);
 void radio_rearm(void);
+void radio_adv_hold(bool on);
 void radio_program(bool on);
 bool radio_program_mode(void);
 /* STANDBY entry: shutdown handshake now, waiting (hal_idle) for the ACK or

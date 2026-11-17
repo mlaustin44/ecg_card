@@ -59,6 +59,9 @@ int gfx_char_width(char c, uint8_t flags);
 #define BIG_ADV (FONTBIG_W + 2)
 int gfx_big(int x, int y, const char *s, uint8_t flags);
 int gfx_big_width(const char *s);
+/* The same digits at twice the size (2 x FONTBIG_H rows; HR monitor rate). */
+int gfx_big2(int x, int y, const char *s, uint8_t flags);
+int gfx_big2_width(const char *s);
 
 /* Medium font (FONTMED_H rows, 2-px stems): only the glyphs listed in
  * FONTMED_CHARS (ui_assets.h); others draw nothing and count in

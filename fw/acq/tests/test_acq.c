@@ -201,6 +201,49 @@ TEST(ecg_session)
     CHECK(!sim_pin(PIN_ANA_EN) && !sim_rail(SIM_RAIL_BODY_EN));
 }
 
+/* cfg.rearm (HR monitor): the end of contact after RUNNING goes back to WAIT,
+ * the session goes on; the next contact settles and runs again with beats
+ * (the detector re-learned), and the statistics span both contacts. */
+TEST(ecg_rearm)
+{
+    boot();
+    testsrc_cfg_t tc = testsrc_defaults();
+    testsrc_install(&tc);
+    acq_cfg_t c = cfg(true, false);
+    c.rearm = true;
+    CHECK(acq_start(&c));
+    run_until(2000);
+    sim_set_thumbs(true);
+    run_until(15000);
+    CHECK_EQ(acq_status()->ecg_state, ACQ_ECG_RUN);
+    uint32_t settles = C.settles, beats1 = acq_summary()->hrv.beats;
+    sim_set_thumbs(false);
+    bool ended = false;
+    while (sim_now_ms() < 25000) {
+        run_until(sim_now_ms() + 10);
+        ended |= acq_status()->ecg_state == ACQ_ECG_END;
+    }
+    CHECK(!ended);
+    CHECK_EQ(acq_status()->ecg_state, ACQ_ECG_WAIT);
+    CHECK_EQ(acq_status()->ecg_why, ACQ_WHY_NO_STABLE);
+    CHECK(!acq_status()->contact && !acq_status()->settled);
+    CHECK_EQ(acq_status()->hr_bpm, 0);
+    CHECK(acq_active() && acq_status()->phase == ACQ_ON);
+    uint32_t beats_off = C.beats;
+    run_until(30000);
+    CHECK_EQ(C.beats, beats_off); /* nothing reported while waiting */
+    sim_set_thumbs(true);
+    run_until(42000);
+    CHECK_EQ(acq_status()->ecg_state, ACQ_ECG_RUN);
+    CHECK_EQ(C.settles, settles + 1);
+    CHECK(C.beats > beats_off + 5);
+    CHECK_NEAR(acq_status()->hr_bpm, tc.hr_bpm, 2);
+    acq_stop();
+    CHECK(acq_summary()->hrv.beats > beats1 + 5);
+    CHECK_NEAR(acq_summary()->hrv.hr_avg, tc.hr_bpm, 3);
+    sim_set_thumbs(false);
+}
+
 /* FAST_RESTORE policy on floating inputs that sit on the rail: a pulse once
  * the output has been railed for ACQ_FR_RAIL_MS, then every ACQ_FR_REPEAT_MS;
  * the mid-scale samples the pulse forces (and DSP_LEAD_BLANK_MS after it)
@@ -549,6 +592,7 @@ int main(void)
 {
     RUN(vmid_fault);
     RUN(ecg_session);
+    RUN(ecg_rearm);
     RUN(fast_restore_policy);
     RUN(restore_slow_off);
     RUN(mains_hum_warning);

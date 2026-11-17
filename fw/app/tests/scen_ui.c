@@ -131,8 +131,8 @@ TEST(carousel)
     scen_boot(false);
     scen_run_ms(300);
     const ui_screen_t order[] = {UI_SCREEN_ECG_CARD, UI_SCREEN_PPG_CARD, UI_SCREEN_BOTH_CARD,
-                                 UI_SCREEN_SETTINGS};
-    for (int i = 0; i < 4; i++) {
+                                 UI_SCREEN_HRM_CARD, UI_SCREEN_SETTINGS};
+    for (int i = 0; i < 5; i++) {
         scen_tap(2);
         scen_run_ms(100);
         CHECK_EQ(scen_screen(), order[i]);
@@ -179,7 +179,7 @@ TEST(carousel)
 
 static void goto_settings(void)
 {
-    for (int i = 0; i < 4; i++)
+    for (int i = 0; i < 5; i++)
         scen_tap(2);
     CHECK_EQ(scen_screen(), UI_SCREEN_SETTINGS);
     scen_tap(1); /* open */
@@ -244,7 +244,7 @@ TEST(diagnostics)
 {
     scen_boot(false);
     scen_run_ms(300);
-    for (int i = 0; i < 5; i++) /* past Settings (closed) */
+    for (int i = 0; i < 6; i++) /* past Settings (closed) */
         scen_tap(2);
     CHECK_EQ(scen_screen(), UI_SCREEN_ABOUT);
     scen_press_both(2300);

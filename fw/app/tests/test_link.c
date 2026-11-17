@@ -162,10 +162,13 @@ TEST(command_validation)
     CHECK_EQ(c.cmd, LINK_CMD_START);
     CHECK_EQ(c.mode, 1);
     CHECK_EQ(parse(start_both, 2, &c), LINK_RES_OK);
-    const uint8_t start0[] = {LINK_CMD_START, 0}, start4[] = {LINK_CMD_START, 4},
+    const uint8_t start_hrm[] = {LINK_CMD_START, LINK_MODE_HRM};
+    CHECK_EQ(parse(start_hrm, 2, &c), LINK_RES_OK);
+    CHECK_EQ(c.mode, LINK_MODE_HRM);
+    const uint8_t start0[] = {LINK_CMD_START, 0}, start5[] = {LINK_CMD_START, 5},
                   start_long[] = {LINK_CMD_START, 1, 0};
     CHECK_EQ(parse(start0, 2, &c), LINK_RES_BAD_ARG);
-    CHECK_EQ(parse(start4, 2, &c), LINK_RES_BAD_ARG);
+    CHECK_EQ(parse(start5, 2, &c), LINK_RES_BAD_ARG);
     CHECK_EQ(parse(start_ecg, 1, &c), LINK_RES_BAD_ARG);
     CHECK_EQ(parse(start_long, 3, &c), LINK_RES_BAD_ARG);
     const uint8_t stop[] = {LINK_CMD_STOP, 0}, status[] = {LINK_CMD_GET_STATUS};

@@ -25,7 +25,7 @@
  * LINK_STATUS (0x02) MCU -> radio, on change, every 5 s, and on
  *   LINK_CMD_GET_STATUS; also the value of the Status characteristic,
  *   20 bytes:
- *   u8 proto, u8 mode (0 idle, 1 ECG, 2 PPG, 3 both),
+ *   u8 proto, u8 mode (LINK_MODE_*: 0 idle, 1 ECG, 2 PPG, 3 both, 4 HR monitor),
  *   u8 meas (ui_meas_state_t while a mode is active, else 0xFF),
  *   u8 batt_pct (0..100, 255 = unknown),
  *   u8 flags (LINK_ST_*),
@@ -44,7 +44,7 @@
  *
  * LINK_CMD (0x20) radio -> MCU: a phone write to the Control characteristic,
  *   forwarded unchanged. Payload: u8 cmd, then arguments:
- *   LINK_CMD_START (1): u8 mode (1 ECG, 2 PPG, 3 both)
+ *   LINK_CMD_START (1): u8 mode (1 ECG, 2 PPG, 3 both, 4 HR monitor)
  *   LINK_CMD_STOP (2): no arguments
  *   LINK_CMD_SET (3): u8 item (settings_item_t), u8 value
  *   LINK_CMD_SET_TIME (4): u32 unix_seconds (UTC), i16 utc_offset_minutes
@@ -101,15 +101,28 @@
  *
  * ---- BLE ------------------------------------------------------------------
  * Device name "ECG Card XXXX" (last two bytes of the BLE address, hex).
- * Advertising data carries the 128-bit ECG Card service UUID so a client can
- * filter on it. Connection: request 20 ms interval, latency 0, 4 s
+ * Advertising data carries the 16-bit Heart Rate service UUID 0x180D (so
+ * sports / HRV apps that scan for heart-rate sensors list the card) and the
+ * 128-bit ECG Card service UUID so a client can filter on it. Connection: request 20 ms interval, latency 0, 4 s
  * supervision timeout, data length 251, ATT MTU 247. Just Works bonding.
  *
  * Standard services: Device Information 0x180A (manufacturer, model,
  * firmware revision = radio version, software revision = MCU version from
  * LINK_RC_SET_INFO, serial = BLE address), Battery 0x180F (0x2A19 read +
  * notify, from LINK_STATUS; 255/unknown reported as 0), Heart Rate 0x180D
- * (0x2A37 notify: flags 0x00, u8 bpm).
+ * (0x2A37 notify, like a chest strap):
+ *   flags u8: bit0 0 (u8 bpm), bit1 contact detected, bit2 1 (contact
+ *   supported), bit4 RR intervals present; u8 bpm; then 0..9 u16 RR
+ *   intervals in 1/1024 s, oldest first.
+ *   Sent once a second while 0x2A37 is subscribed and a mode is active
+ *   (LINK_STATUS mode != 0), and at once on a beat if none was sent for
+ *   1 s. bpm = the hr_bpm of the latest R_PEAK (PULSE when there has been
+ *   no R_PEAK for RL_HR_ECG_HOLD_MS), 0 when none in the last 5 s. Contact detected =
+ *   LINK_STATUS meas == UI_MEAS_RUNNING (2). RR intervals come only from
+ *   consecutive R_PEAK sample indices (500 Hz: 2 ms steps), only while in
+ *   contact; the first beat after contact is (re)gained, and intervals
+ *   outside 250..2500 ms, give no RR. Each interval is sent once; more than
+ *   9 pending keeps the newest 9.
  *
  * ECG Card service, base d578xxxx-8a28-493a-ad8d-6b741ba09ea7:
  *   service        d5780001-8a28-493a-ad8d-6b741ba09ea7
@@ -227,6 +240,15 @@
 #define LINK_SUB_STATUS 0x08u
 #define LINK_SUB_HR     0x10u
 #define LINK_SUB_LOG    0x20u
+
+/* LINK_STATUS mode, LINK_CMD_START argument, STREAM_EV_STATE mode. HR monitor
+ * = ECG acquisition for a standard heart-rate sensor session (0x2A37 with RR
+ * intervals); the session waits for contact again instead of ending. */
+#define LINK_MODE_IDLE 0u
+#define LINK_MODE_ECG  1u
+#define LINK_MODE_PPG  2u
+#define LINK_MODE_BOTH 3u
+#define LINK_MODE_HRM  4u
 
 /* STREAM_LOG frames on the link carry at most this many payload bytes when
  * they are meant for the Log characteristic (the MCU's tee, the radio's own

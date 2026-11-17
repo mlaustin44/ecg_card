@@ -30,6 +30,7 @@
 #include "board.h"
 
 #define SSD1306_SETTLE_MS 100u /* power_on() to a reliable image */
+#define SSD1306_CONTRAST_INIT 0xCFu /* contrast set by power_on() (vendor sequence) */
 
 /* Rail-up and init sequence; leaves the display ON (showing black). */
 void ssd1306_power_on(void);

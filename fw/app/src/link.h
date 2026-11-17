@@ -66,7 +66,7 @@ void link_rx_feed(link_rx_t *r, const uint8_t *b, size_t n, link_frame_fn fn, vo
 /* ---- commands ---- */
 typedef struct {
     uint8_t cmd;
-    uint8_t mode;           /* START: 1 ECG, 2 PPG, 3 both */
+    uint8_t mode;           /* START: LINK_MODE_ECG .. LINK_MODE_HRM */
     uint8_t item, value;    /* SET */
     uint32_t unix_s;        /* SET_TIME */
     int16_t utc_offset_min; /* SET_TIME */

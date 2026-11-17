@@ -211,6 +211,44 @@ SC(card_ppg_ble_fault_usb)
     m->usb_present = m->charging = true;
 }
 
+SC(card_hrm) { scen_defaults(m); m->screen = UI_SCREEN_HRM_CARD; m->ble_state = UI_BLE_ADVERTISING; }
+SC(card_hrm_ble_off) { scen_defaults(m); m->screen = UI_SCREEN_HRM_CARD; m->settings.ble = BLE_OFF; }
+SC(card_hrm_usb) { scen_defaults(m); m->screen = UI_SCREEN_HRM_CARD; m->usb_present = m->charging = true; }
+
+/* HR monitor live states */
+static void hrm(ui_model_t *m, ui_meas_state_t st, ui_ble_t ble, bool hr_sub)
+{
+    scen_defaults(m);
+    live(m, UI_SCREEN_HRM, st);
+    m->ble_state = ble;
+    m->ble_hr = hr_sub;
+}
+SC(hrm_wait) { hrm(m, UI_MEAS_WAIT_CONTACT, UI_BLE_CONNECTED, true); m->live.quality = 0; m->now_ms = 101000u; }
+SC(hrm_wait_adv) { hrm(m, UI_MEAS_WAIT_CONTACT, UI_BLE_ADVERTISING, false); m->live.quality = 0; m->now_ms = 100300u; }
+SC(hrm_wait_off) { hrm(m, UI_MEAS_WAIT_CONTACT, UI_BLE_OFF, false); m->settings.ble = BLE_OFF; m->live.quality = 0; m->now_ms = 101000u; }
+SC(hrm_wait_hum) { hrm(m, UI_MEAS_WAIT_CONTACT, UI_BLE_CONNECTED, false); m->live.hum = true; m->now_ms = 101000u; }
+SC(hrm_settling) { hrm(m, UI_MEAS_SETTLING, UI_BLE_CONNECTED, true); m->live.settle_pct = 60; m->live.quality = 2; }
+SC(hrm_run)
+{
+    hrm(m, UI_MEAS_RUNNING, UI_BLE_CONNECTED, true);
+    m->live.hr_bpm = 64;
+    m->live.elapsed_s = 754;
+}
+/* the heart lit: a frame before the beat, then one 20 ms after it */
+SC(hrm_run_beat)
+{
+    static uint8_t fb[OLED_FB_BYTES];
+    sc_hrm_run(m);
+    ui_render(m, fb);
+    m->live.beat_seq++;
+    m->now_ms += 20u;
+}
+SC(hrm_run_conn) { hrm(m, UI_MEAS_RUNNING, UI_BLE_CONNECTED, false); m->live.hr_bpm = 72; m->live.elapsed_s = 31; }
+SC(hrm_run_adv) { hrm(m, UI_MEAS_RUNNING, UI_BLE_ADVERTISING, false); m->live.hr_bpm = 205; m->live.elapsed_s = 3725; m->live.quality = 3; }
+SC(hrm_run_off) { hrm(m, UI_MEAS_RUNNING, UI_BLE_OFF, false); m->settings.ble = BLE_OFF; m->live.hr_bpm = 0; m->live.elapsed_s = 9; m->batt_pct = 6; }
+SC(hrm_run_fault) { hrm(m, UI_MEAS_RUNNING, UI_BLE_FAULT, false); m->live.hr_bpm = 999; m->live.elapsed_s = 65535; m->usb_present = false; }
+SC(hrm_usb) { hrm(m, UI_MEAS_USB_BLOCKED, UI_BLE_CONNECTED, true); m->usb_present = m->charging = true; }
+
 static void settings_at(ui_model_t *m, uint8_t cur)
 {
     scen_defaults(m);
@@ -427,7 +465,9 @@ const scenario_t scenarios[] = {
     E(home_unknown), E(home_time), E(home_ble_adv), E(home_ble_adv_dark), E(home_ble_conn),
     E(home_ble_fault),
     E(card_ecg), E(card_ecg_usb), E(card_ecg_low), E(card_ppg), E(card_ppg_usb), E(card_both),
-    E(card_ecg_ble_conn), E(card_ppg_ble_fault_usb),
+    E(card_ecg_ble_conn), E(card_ppg_ble_fault_usb), E(card_hrm), E(card_hrm_ble_off), E(card_hrm_usb),
+    E(hrm_wait), E(hrm_wait_adv), E(hrm_wait_off), E(hrm_wait_hum), E(hrm_settling), E(hrm_run),
+    E(hrm_run_beat), E(hrm_run_conn), E(hrm_run_adv), E(hrm_run_off), E(hrm_run_fault), E(hrm_usb),
     E(settings_0), E(settings_1), E(settings_2), E(settings_3), E(settings_4), E(settings_5),
     E(settings_5_off), E(settings_6), E(settings_7), E(settings_exit), E(settings_closed), E(settings_alt),
     E(about), E(about_radio), E(diag), E(diag_full),

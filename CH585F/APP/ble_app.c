@@ -9,7 +9,14 @@
  * buffer the pump backs off for APP_NOTIFY_BACKOFF instead of retrying;
  * when the queue is full the oldest entry is dropped and counted. Device
  * log text (Log characteristic) shares the queue at the lowest priority,
- * with its own rules for what goes in and out (rl_log.c). */
+ * with its own rules for what goes in and out (rl_log.c).
+ *
+ * Heart Rate Measurement (0x2A37) is built by rl_hrs.c from LINK_STATUS and
+ * the R_PEAK / PULSE events, and queued from BA_EVT_HR (armed for when the
+ * next 1 s measurement is due, while a mode is active and 0x2A37 is
+ * subscribed) or at once on a beat after a quiet second. It takes its place
+ * in the queue like every other entry (arrival order), so ECG / PPG blocks
+ * neither hold it back nor are held back by it. */
 #include <stdbool.h>
 
 #include "CONFIG.h"
@@ -19,6 +26,7 @@
 #include "ecg_service.h"
 #include "link_mgr.h"
 #include "rl_ble_fmt.h"
+#include "rl_hrs.h"
 #include "rl_log.h"
 #include "rl_queue.h"
 #include "std_services.h"
@@ -27,6 +35,7 @@
 #define BA_EVT_START_DEVICE 0x0001
 #define BA_EVT_PARAM_UPDATE 0x0002
 #define BA_EVT_NOTIFY       0x0004
+#define BA_EVT_HR           0x0008
 
 /* Queue entry kinds: ECS_CHAR_* (0..4), then these. Log entries carry
  * their chunk index in the upper bits (rl_log.h). */
@@ -55,7 +64,9 @@ static bool s_backoff;    /* waiting for stack buffers */
 
 static rl_queue_t s_q;
 static rl_log_t s_log;
-static rl_hr_sel_t s_hr;
+static rl_hrs_t s_hrs;
+static uint32_t s_clk_last, s_clk_ms; /* ba_now_ms() */
+static uint8_t s_clk_frac;
 static uint32_t s_unsub;    /* frames/entries for an unsubscribed characteristic */
 static uint32_t s_busy;     /* back-offs: no stack buffer */
 static uint32_t s_batched;  /* blocks that rode in another block's notification */
@@ -76,6 +87,8 @@ static void ba_state_cb(gapRole_States_t newState, gapRoleEvent_t *pEvent);
 static void ba_param_update_cb(uint16_t connHandle, uint16_t connInterval,
                                uint16_t connSlaveLatency, uint16_t connTimeout);
 static void ba_cccd_changed(void);
+static void ba_hr_sub(void);
+static void ba_hr_schedule(void);
 static void ba_control_write(uint16_t connHandle, const uint8_t *pValue, uint16_t len);
 
 /* GAP Role Callbacks */
@@ -103,6 +116,20 @@ static bool connected(void)
     return s_conn != GAP_CONNHANDLE_INIT;
 }
 
+/* Milliseconds from the TMOS clock (0.625 ms units; link_now_ms() only
+ * steps every 100 ms). Wraps like any u32 ms counter; called at least on
+ * every link tick, so the 0.625 ms count never jumps far enough to
+ * overflow the product. */
+static uint32_t ba_now_ms(void)
+{
+    uint32_t c = TMOS_GetSystemClock();
+    uint32_t t = (c - s_clk_last) * 5u + s_clk_frac;
+    s_clk_last = c;
+    s_clk_ms += t / 8u;
+    s_clk_frac = (uint8_t)(t % 8u);
+    return s_clk_ms;
+}
+
 void ble_app_init(const uint8_t addr[6])
 {
     char name[RL_NAME_LEN + 1u];
@@ -112,6 +139,8 @@ void ble_app_init(const uint8_t addr[6])
     s_task = TMOS_ProcessEventRegister(ba_process_event);
     rl_queue_init(&s_q);
     rl_log_init(&s_log, ECS_CHAR_LOG);
+    rl_hrs_init(&s_hrs);
+    s_clk_last = TMOS_GetSystemClock();
     tmos_memcpy(s_boot_addr, addr, B_ADDR_LEN);
 
     rl_ble_name(addr, name);
@@ -266,6 +295,7 @@ void ble_app_shutdown(void)
         GAPRole_TerminateLink(s_conn);
     rl_queue_flush(&s_q);
     rl_log_tx_reset(&s_log);
+    ba_hr_sub(); /* s_shutdown: never enabled again */
 }
 
 void ble_app_set_sw_rev(const uint8_t *text, size_t len)
@@ -295,11 +325,19 @@ static uint8_t ba_subscriptions(void)
     return m;
 }
 
+/* 0x2A37 subscription into rl_hrs, then (re)arm BA_EVT_HR. */
+static void ba_hr_sub(void)
+{
+    rl_hrs_subscribed(&s_hrs, !s_shutdown && (s_subscribed & LINK_SUB_HR) != 0u, ba_now_ms());
+    ba_hr_schedule();
+}
+
 static void ba_cccd_changed(void)
 {
     uint8_t m = ba_subscriptions();
     if (m != s_subscribed) {
         s_subscribed = m;
+        ba_hr_sub();
         link_conn_state_changed();
     }
 }
@@ -468,22 +506,54 @@ static void ba_pump(void)
         tmos_set_event(s_task, BA_EVT_NOTIFY);
 }
 
-/* ---- data from the MCU -------------------------------------------------- */
+/* ---- Heart Rate Measurement (rl_hrs.c) ------------------------------------ */
+
+/* Queue one 0x2A37 value now and restart the 1 s period. */
+static void ba_hr_send(uint32_t now_ms)
+{
+    uint8_t v[RL_HRS_MAX_LEN];
+    size_t n = rl_hrs_take(&s_hrs, now_ms, v);
+    if (!s_shutdown && connected() && (Hrs_GetCccd(s_conn) & GATT_CLIENT_CFG_NOTIFY))
+        ba_enqueue(Q_HR, v, n);
+}
+
+/* Arm BA_EVT_HR for when the next periodic measurement is due; stop it
+ * while the measurement is not enabled. */
+static void ba_hr_schedule(void)
+{
+    uint32_t wait = rl_hrs_wait_ms(&s_hrs, ba_now_ms());
+
+    if (wait == RL_HRS_NEVER) {
+        tmos_stop_task(s_task, BA_EVT_HR);
+        tmos_clear_event(s_task, BA_EVT_HR);
+    } else if (wait == 0u) {
+        tmos_set_event(s_task, BA_EVT_HR);
+    } else {
+        /* ms -> 0.625 ms units, rounded up so it never fires early; an
+         * early or stale expiry only re-arms (ba_hr_due) */
+        tmos_stop_task(s_task, BA_EVT_HR);
+        tmos_start_task(s_task, BA_EVT_HR, (tmosTimer)((wait * 8u + 4u) / 5u));
+    }
+}
+
+static void ba_hr_due(void)
+{
+    uint32_t now = ba_now_ms();
+    if (rl_hrs_wait_ms(&s_hrs, now) == 0u)
+        ba_hr_send(now);
+    ba_hr_schedule();
+}
 
 static void ba_hr_from_event(const uint8_t *p, size_t n)
 {
-    uint8_t kind, v[2];
-    uint16_t bpm;
-
-    if (!rl_msg_event_bpm(p, n, &kind, &bpm))
-        return;
-    if (!rl_hr_select(&s_hr, kind, link_now_ms()) || bpm == 0u)
-        return;
-    if (!connected() || !(Hrs_GetCccd(s_conn) & GATT_CLIENT_CFG_NOTIFY))
-        return;
-    rl_msg_hr_measurement(bpm, v);
-    ba_enqueue(Q_HR, v, sizeof v);
+    uint32_t now = ba_now_ms();
+    if (rl_hrs_event(&s_hrs, p, n, now)) {
+        ba_hr_send(now); /* a beat after a quiet second: at once */
+        ba_hr_schedule();
+    }
 }
+
+/* ---- data from the MCU -------------------------------------------------- */
 
 void ble_app_stream(uint8_t type, const uint8_t *p, size_t n)
 {
@@ -506,6 +576,8 @@ void ble_app_status(const rl_status_t *st)
     uint8_t level = rl_msg_battery_level(st->batt_pct);
 
     Ecs_SetStatus(st->raw);
+    rl_hrs_status(&s_hrs, st->mode, st->meas, ba_now_ms());
+    ba_hr_schedule();
     if (!s_shutdown && connected() &&
         (Ecs_GetCccd(s_conn, ECS_CHAR_STATUS) & GATT_CLIENT_CFG_NOTIFY))
         ba_enqueue(ECS_CHAR_STATUS, st->raw, LINK_STATUS_LEN);
@@ -545,6 +617,7 @@ static void ba_control_write(uint16_t connHandle, const uint8_t *pValue, uint16_
 
 void ble_app_tick(uint32_t now_ms)
 {
+    (void)ba_now_ms(); /* keep the 0.625 ms delta small */
     ba_cccd_changed();
     rl_log_poll(&s_log, &s_q, ba_log_on(), now_ms);
     ba_kick();
@@ -559,6 +632,10 @@ void ble_app_tick(uint32_t now_ms)
                      (unsigned)s_log.in_chunks, (unsigned)s_log.in_drops,
                      (unsigned)s_log.own_lines, (unsigned)s_log.own_drops,
                      (unsigned)s_log.tx_chunks, (unsigned)s_log.tx_skips);
+        if (s_subscribed & LINK_SUB_HR)
+            link_log("ble: hr bpm %u contact %u rr ovf %u rej %u", (unsigned)s_hrs.bpm,
+                     (unsigned)s_hrs.contact, (unsigned)s_hrs.rr_overflow,
+                     (unsigned)s_hrs.rr_rejected);
     }
 }
 
@@ -607,6 +684,7 @@ static void ba_link_established(gapRoleEvent_t *pEvent)
              event->devAddr[1], event->devAddr[0], s_interval, s_latency, s_timeout);
     s_last_stats_ms = link_now_ms();
     s_subscribed = ba_subscriptions();
+    ba_hr_sub();
     link_conn_state_changed();
 }
 
@@ -624,6 +702,7 @@ static void ba_link_terminated(gapRoleEvent_t *pEvent)
     s_mtu = ATT_MTU_SIZE;
     s_phy = 0;
     s_subscribed = 0;
+    ba_hr_sub();
     tmos_stop_task(s_task, BA_EVT_PARAM_UPDATE);
     lost = rl_queue_flush(&s_q);
     rl_log_tx_reset(&s_log);
@@ -775,6 +854,11 @@ static tmosEvents ba_process_event(tmosTaskID task_id, tmosEvents events)
     if (events & BA_EVT_NOTIFY) {
         ba_pump();
         return (events ^ BA_EVT_NOTIFY);
+    }
+
+    if (events & BA_EVT_HR) {
+        ba_hr_due();
+        return (events ^ BA_EVT_HR);
     }
 
     /* Discard unknown events */

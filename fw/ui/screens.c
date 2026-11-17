@@ -133,12 +133,12 @@ static void title_row(const char *title, const ui_model_t *m, bool batt)
  * left edge (xr when nothing is drawn). */
 #define BLE_BLINK_MS 1000u
 #define BLE_LIT_MS   600u
-static int ble_icon(int xr, int y, const ui_model_t *m)
+static int ble_icon_of(int xr, int y, ui_ble_t st, uint32_t now_ms)
 {
     const ui_icon_t *ic = NULL;
-    switch (m->ble_state) {
+    switch (st) {
     case UI_BLE_ADVERTISING:
-        if (m->now_ms % BLE_BLINK_MS < BLE_LIT_MS)
+        if (now_ms % BLE_BLINK_MS < BLE_LIT_MS)
             ic = &icon_ble;
         else
             return xr - icon_ble.w; /* keep the space while dark */
@@ -149,6 +149,11 @@ static int ble_icon(int xr, int y, const ui_model_t *m)
     }
     gfx_icon(xr - ic->w, y, ic, GFX_SET);
     return xr - ic->w;
+}
+
+static int ble_icon(int xr, int y, const ui_model_t *m)
+{
+    return ble_icon_of(xr, y, m->ble_state, m->now_ms);
 }
 
 /* Carousel pages: title, Bluetooth, power icons. */
@@ -257,6 +262,44 @@ static void pict_contact(int x, int y, bool left, bool right, uint32_t now)
     }
 }
 
+/* Heart 4r + 1 wide, about 3.5r tall, top at y: two discs of radius r and a
+ * point below them; filled, or its outline. */
+static bool in_heart(int dx, int dy, int r)
+{
+    int ax = dx < 0 ? -dx : dx, h = 2 * r + r / 2; /* h: point below the disc centres */
+    if (dy < 0 || dy > r + h)
+        return false;
+    if (dy <= r && (ax - r) * (ax - r) + (dy - r) * (dy - r) <= r * r)
+        return true;
+    return dy >= r && ax * h <= 2 * r * (r + h - dy);
+}
+
+static void heart_big(int cx, int y, int r, bool fill)
+{
+    for (int dy = 0; dy <= 3 * r + r / 2; dy++)
+        for (int dx = -2 * r; dx <= 2 * r; dx++) {
+            if (!in_heart(dx, dy, r))
+                continue;
+            if (fill || !in_heart(dx - 1, dy, r) || !in_heart(dx + 1, dy, r) ||
+                !in_heart(dx, dy - 1, r) || !in_heart(dx, dy + 1, r))
+                gfx_pixel(cx + dx, y + dy, GFX_SET);
+        }
+}
+
+/* Radio waves: arcs of radius r0, r0 + 4, ... to the right of (cx, cy). */
+static void waves(int cx, int cy, int r0, int n)
+{
+    for (int k = 0; k < n; k++) {
+        int r = r0 + 4 * k, h = r * 7 / 10;
+        for (int dy = -h; dy <= h; dy++) {
+            int x = 0;
+            while ((x + 1) * (x + 1) + dy * dy <= r * r)
+                x++;
+            gfx_pixel(cx + x, cy + dy, GFX_SET);
+        }
+    }
+}
+
 /* ---- carousel pages ------------------------------------------------------ */
 
 static void screen_home(const ui_model_t *m)
@@ -312,10 +355,40 @@ static void screen_home(const ui_model_t *m)
     hint_row("hold: off", NULL, UI_SCREEN_HOME);
 }
 
+/* HR monitor card: the heart rate goes to a phone (sports / HRV apps). */
+static void card_hrm(const ui_model_t *m)
+{
+    title_row_status("HR Monitor", m);
+    heart_big(44, 13, 4, true);
+    waves(54, 20, 5, 3);
+    gfx_rrect(80, 12, 12, 18, GFX_SET); /* the phone */
+    gfx_hline(84, 87, 27, GFX_SET);
+    heart_big(86, 16, 1, true);
+    gfx_text(OLED_W / 2, 31, "Heart rate for apps", TXT_CENTER);
+    const char *bar = NULL;
+    if (m->usb_present)
+        bar = "Unplug USB first";
+    else if (m->batt_valid && m->batt_pct < BATT_WARN_PCT)
+        bar = "Battery low";
+    else if (m->settings.ble == BLE_OFF)
+        bar = "Bluetooth is off";
+    if (bar) {
+        gfx_fill(0, 40, OLED_W, 11, GFX_SET);
+        gfx_text(OLED_W / 2, 42, bar, TXT_CENTER | TXT_CLR);
+    } else {
+        gfx_text(OLED_W / 2, 42, "Both thumbs on the pads", TXT_CENTER);
+    }
+    hint_row("Start", NULL, (int)m->screen);
+}
+
 static void screen_card(const ui_model_t *m)
 {
     const char *title, *use;
     bool ecg = m->screen != UI_SCREEN_PPG_CARD;
+    if (m->screen == UI_SCREEN_HRM_CARD) {
+        card_hrm(m);
+        return;
+    }
     if (m->screen == UI_SCREEN_ECG_CARD) {
         title = "ECG";
         use = "Both thumbs on the pads";
@@ -485,7 +558,12 @@ static void screen_diag(const ui_model_t *m)
 
 static const char *mode_title(ui_screen_t s)
 {
-    return s == UI_SCREEN_ECG ? "ECG" : s == UI_SCREEN_PPG ? "Pulse" : "ECG + Pulse";
+    switch (s) {
+    case UI_SCREEN_ECG: return "ECG";
+    case UI_SCREEN_PPG: return "Pulse";
+    case UI_SCREEN_HRM: return "HR Monitor";
+    default: return "ECG + Pulse";
+    }
 }
 
 /* ECG / Pulse before RUNNING: BUTTON2 picks the Live view now, so the thumb
@@ -681,6 +759,104 @@ static void live_running(const ui_model_t *m)
         scale_bar(TRACE_Y, h1);
         gfx_dotted_hline(0, OLED_W - 1, TRACE_Y + h1, 4);
         trace_draw(UI_TRACE_PPG, TRACE_Y + h1 + 1, OLED_H - TRACE_Y - h1 - 1);
+    }
+}
+
+/* ---- HR monitor: calm, no trace; the phone app shows the details ---------- */
+
+/* Bottom row: what the Bluetooth side does; with Bluetooth Off, how to fix
+ * it (the client cannot see the card). Returns the right edge of the text. */
+static int hrm_ble_row(const ui_model_t *m)
+{
+    if (m->settings.ble == BLE_OFF) {
+        gfx_rrect_fill(0, ROW_HINT - 1, OLED_W, 9, GFX_SET);
+        gfx_text(OLED_W / 2, ROW_HINT, "Bluetooth off: turn on", TXT_CENTER | TXT_CLR);
+        return OLED_W;
+    }
+    const char *t;
+    switch (m->ble_state) {
+    case UI_BLE_CONNECTED: /* the rate goes out while running (0x2A37 contact bit) */
+        t = m->ble_hr && m->live.state == UI_MEAS_RUNNING ? "Sending to app" : "App connected";
+        break;
+    case UI_BLE_FAULT: t = "Bluetooth fault"; break;
+    default: t = "Waiting for app"; break;
+    }
+    /* (radio off with Bluetooth On: about to advertise) */
+    ble_icon_of(5, ROW_HINT, m->ble_state == UI_BLE_OFF ? UI_BLE_ADVERTISING : m->ble_state,
+                m->now_ms);
+    return 8 + gfx_text(8, ROW_HINT, t, TXT_LEFT);
+}
+
+/* "1:05", "59:59", "1:00:00" */
+static void hms(char *b, unsigned s)
+{
+    if (s >= 3600u) {
+        b = str_u(b, s / 3600u);
+        *b++ = ':';
+        s %= 3600u;
+        *b++ = (char)('0' + s / 600u);
+        s %= 600u; /* "m:ss" below completes "h:mm:ss" */
+    }
+    str_mmss(b, s);
+}
+
+static void hrm_running(const ui_model_t *m)
+{
+    title_row(mode_title(m->screen), m, false);
+    live_icons(m, false);
+    heart_big(24, 17, 5, beat_lit(m));
+    char b[12];
+    bpm_str(b, m->live.hr_bpm);
+    int w = gfx_big2_width(b), x = 76 - w / 2;
+    gfx_big2(x, 13, b, TXT_LEFT);
+    gfx_text(x + w + 3, 34, "bpm", TXT_LEFT);
+    int xr = hrm_ble_row(m);
+    if (m->settings.ble != BLE_OFF && m->live.elapsed_s) {
+        hms(b, m->live.elapsed_s);
+        if (xr + 4 + gfx_text_width(b, 0) <= OLED_W)
+            gfx_text(OLED_W, ROW_HINT, b, TXT_RIGHT);
+    }
+}
+
+static void hrm_wait(const ui_model_t *m)
+{
+    title_row(mode_title(m->screen), m, true);
+    pict_contact(2, 12, true, true, m->now_ms);
+    const int cx = 96;
+    if (m->live.hum) {
+        gfx_text(cx, 14, "Mains hum:", TXT_CENTER);
+        gfx_text(cx, 23, "unplug", TXT_CENTER);
+        gfx_text(cx, 32, "all cables", TXT_CENTER);
+    } else {
+        gfx_text(cx, 14, "Place both", TXT_CENTER);
+        gfx_text(cx, 23, "thumbs on", TXT_CENTER);
+        gfx_text(cx, 32, "the pads", TXT_CENTER);
+    }
+    /* the thumbs go down past the floor: the status row below it */
+    gfx_fill(0, ROW_HINT - 3, OLED_W, OLED_H - ROW_HINT + 3, GFX_CLR);
+    gfx_hline(0, OLED_W - 1, ROW_HINT - 3, GFX_SET);
+    hrm_ble_row(m);
+}
+
+static void hrm_settling(const ui_model_t *m)
+{
+    title_row(mode_title(m->screen), m, true);
+    quality_bars(power_icons(OLED_W, 0, m) - 15, 0, m->live.quality);
+    gfx_text(OLED_W / 2, 14, "Hold still", TXT_CENTER | TXT_BOLD);
+    gfx_progress(14, 25, 100, 9, clamp_u(m->live.settle_pct, 100));
+    gfx_text(OLED_W / 2, 39, m->live.hum ? "Hum: unplug cables" : "Keep thumbs relaxed",
+             TXT_CENTER);
+    hrm_ble_row(m);
+}
+
+static void screen_hrm(const ui_model_t *m)
+{
+    switch (m->live.state) {
+    case UI_MEAS_SETTLING: hrm_settling(m); break;
+    case UI_MEAS_RUNNING: hrm_running(m); break;
+    case UI_MEAS_USB_BLOCKED: live_usb(m); break;
+    case UI_MEAS_FAULT: live_fault(m); break;
+    default: hrm_wait(m); break;
     }
 }
 
@@ -908,12 +1084,14 @@ void ui_render(const ui_model_t *m, uint8_t fb[OLED_FB_BYTES])
     case UI_SCREEN_HOME: screen_home(m); break;
     case UI_SCREEN_ECG_CARD:
     case UI_SCREEN_PPG_CARD:
-    case UI_SCREEN_BOTH_CARD: screen_card(m); break;
+    case UI_SCREEN_BOTH_CARD:
+    case UI_SCREEN_HRM_CARD: screen_card(m); break;
     case UI_SCREEN_SETTINGS: screen_settings(m); break;
     case UI_SCREEN_ABOUT: screen_about(m); break;
     case UI_SCREEN_ECG:
     case UI_SCREEN_PPG:
     case UI_SCREEN_BOTH: screen_live(m); break;
+    case UI_SCREEN_HRM: screen_hrm(m); break;
     case UI_SCREEN_SUMMARY: screen_summary(m); break;
     case UI_SCREEN_DIAG: screen_diag(m); break;
     case UI_SCREEN_BOOT: screen_boot(m); break;

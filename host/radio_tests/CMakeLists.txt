@@ -11,11 +11,12 @@ add_library(ecg_radio_portable STATIC
   ${RADIO_APP}/rl_queue.c
   ${RADIO_APP}/rl_log.c
   ${RADIO_APP}/rl_fmt.c
-  ${RADIO_APP}/rl_ble_fmt.c)
+  ${RADIO_APP}/rl_ble_fmt.c
+  ${RADIO_APP}/rl_hrs.c)
 # The radio's own copies of link_fmt.h / stream_fmt.h, ahead of fw/include.
 target_include_directories(ecg_radio_portable BEFORE PUBLIC ${RADIO_APP}/include)
 
-foreach(t codec parser msg queue log fmt)
+foreach(t codec parser msg queue log fmt hrs)
   ecg_add_test(radio_${t} SOURCES test_${t}.c LIBS ecg_radio_portable)
 endforeach()
 

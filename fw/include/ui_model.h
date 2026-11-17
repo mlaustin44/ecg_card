@@ -7,6 +7,8 @@
  *                  during a measurement: end it and show the summary
  *   BUTTON2 short  next page; in Settings: next item; on the ECG and Pulse
  *                  live screens: Live view trace <-> trace + HR graph
+ *   HR monitor     BUTTON1 short ends it (back to its card, no summary); while
+ *                  the display is dimmed or dark any press only wakes it
  *   BUTTON2 long   back to Home
  *   BUTTON1 long   power off (2 s)
  *   both, on About: Diagnostics
@@ -14,7 +16,9 @@
  *   Boot screen: any press skips it to Home (and does nothing else);
  *   power-down screen: buttons ignored
  * The thumbs cannot reach the buttons during a measurement, so measurement
- * screens are hands-free: they start on contact and end when thumbs lift. */
+ * screens are hands-free: they start on contact and end when thumbs lift.
+ * The HR monitor is the exception: like a chest strap taken off, lifting the
+ * thumbs only pauses it until the next contact. */
 #ifndef UI_MODEL_H
 #define UI_MODEL_H
 
@@ -30,12 +34,14 @@ typedef enum {
     UI_SCREEN_ECG_CARD,     /* launcher card: "ECG - press to start" */
     UI_SCREEN_PPG_CARD,
     UI_SCREEN_BOTH_CARD,
+    UI_SCREEN_HRM_CARD,     /* HR monitor: a Bluetooth heart-rate sensor for other apps */
     UI_SCREEN_SETTINGS,
     UI_SCREEN_ABOUT,
     /* entered from a launcher card */
     UI_SCREEN_ECG,          /* live ECG */
     UI_SCREEN_PPG,          /* live PPG */
     UI_SCREEN_BOTH,         /* live ECG + PPG */
+    UI_SCREEN_HRM,          /* HR monitor: rate, contact, Bluetooth state (no trace) */
     UI_SCREEN_SUMMARY,      /* after a measurement */
     UI_SCREEN_DIAG,         /* hidden bring-up page */
     /* shown by the app for a fixed time, no buttons (screen_ms animates) */
@@ -44,7 +50,7 @@ typedef enum {
     UI_SCREEN_COUNT
 } ui_screen_t;
 
-#define UI_CAROUSEL_PAGES 6 /* HOME .. ABOUT */
+#define UI_CAROUSEL_PAGES 7 /* HOME .. ABOUT */
 
 /* Settings page cursor: UI_SET_CLOSED as the carousel shows the page (values
  * listed, BUTTON1 opens it); open, an item 0 .. SET_ITEM_COUNT - 1 or the
@@ -69,7 +75,9 @@ typedef enum {
     UI_OVERLAY_FAULT          /* fault_text */
 } ui_overlay_t;
 
-typedef enum { UI_MODE_ECG, UI_MODE_PPG, UI_MODE_BOTH } ui_mode_t;
+/* UI_MODE_HRM: ECG acquisition for a standard Heart Rate (0x180D) session;
+ * loss of contact waits for the next one instead of ending it. */
+typedef enum { UI_MODE_ECG, UI_MODE_PPG, UI_MODE_BOTH, UI_MODE_HRM } ui_mode_t;
 
 /* Bluetooth status icon (Home and the carousel title rows). */
 typedef enum {
@@ -129,8 +137,9 @@ typedef struct {
     bool time_valid;         /* wall clock set (by the phone, LINK_CMD_SET_TIME) */
     uint8_t hour, minute;
     ui_ble_t ble_state;
+    bool ble_hr;             /* the connected client is subscribed to Heart Rate (0x2A37) */
 
-    /* UI_SCREEN_ECG / PPG / BOTH */
+    /* UI_SCREEN_ECG / PPG / BOTH / HRM */
     ui_live_t live;
 
     /* UI_SCREEN_SUMMARY */

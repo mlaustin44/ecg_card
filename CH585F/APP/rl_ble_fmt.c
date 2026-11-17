@@ -40,6 +40,10 @@ size_t rl_ble_adv_data(uint8_t out[RL_ADV_MAX])
     out[n++] = 2u;
     out[n++] = RL_AD_FLAGS;
     out[n++] = RL_AD_FLAGS_LE_GENERAL_NO_BREDR;
+    out[n++] = 3u;
+    out[n++] = RL_AD_UUID16_ALL;
+    out[n++] = (uint8_t)RL_UUID16_HEART_RATE;
+    out[n++] = (uint8_t)(RL_UUID16_HEART_RATE >> 8);
     out[n++] = 17u;
     out[n++] = RL_AD_UUID128_ALL;
     memcpy(&out[n], uuid, sizeof uuid);

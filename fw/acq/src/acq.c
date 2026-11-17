@@ -400,9 +400,17 @@ static void ecg_on_contact(uint32_t now)
     set_contact(true, now);
 }
 
-/* -> WAIT (never ran) or END (ran): contact is over. */
+/* -> WAIT (never ran) or END (ran): contact is over. With cfg.rearm END
+ * becomes WAIT: the next contact starts afresh, so the detector forgets
+ * this one now (also when the signal stays in range: no rail edge would
+ * reset it). */
 static void ecg_on_lead_off(acq_ecg_state_t s, acq_why_t why, uint32_t now)
 {
+    if (s == ACQ_ECG_END && A.cfg.rearm) {
+        s = ACQ_ECG_WAIT;
+        dsp_qrs_reset(&A.qrs);
+        A.have_beat = false;
+    }
     ecg_state_to(s, why);
     set_settled(false);
     A.st.hr_bpm = 0;

@@ -19,6 +19,7 @@ static struct {
     radio_info_t info;
     link_rx_t rx;
     bool want, program;
+    bool adv_hold;          /* radio_adv_hold(): no advertising timeout */
     uint32_t now;
     uint32_t t_state;       /* entry into the current state */
     uint32_t t_adv;         /* last ADV_START */
@@ -406,6 +407,17 @@ void radio_rearm(void)
         set_state(RADIO_OFF);
 }
 
+void radio_adv_hold(bool on)
+{
+    if (on == R.adv_hold)
+        return;
+    R.adv_hold = on;
+    if (on)
+        R.info.adv_expired = false;
+    else
+        R.t_adv = R.now; /* a full window from the release, not an instant timeout */
+}
+
 void radio_program(bool on)
 {
     if (on == R.program)
@@ -471,7 +483,7 @@ void radio_poll(uint32_t now)
     case RADIO_CONNECTED:
         if (!R.want) {
             begin_shutdown("not wanted");
-        } else if (R.info.state == RADIO_ADVERTISING &&
+        } else if (R.info.state == RADIO_ADVERTISING && !R.adv_hold &&
                    now - R.t_adv >= LINK_ADV_TOTAL_SECONDS * 1000u) {
             R.info.adv_expired = true;
             begin_shutdown("advertising timeout: off until a button or BLE On");

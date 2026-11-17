@@ -126,7 +126,7 @@ TEST(power_up_hello_advertise)
     CHECK_EQ(scen_m()->ble_state, UI_BLE_ADVERTISING);
     scen_shot("radio_home_adv");
     /* About: radio firmware and the device name */
-    for (int i = 0; i < 5; i++) /* past Settings (closed) */
+    for (int i = 0; i < 6; i++) /* past Settings (closed) */
         scen_tap(2);
     CHECK_EQ(scen_screen(), UI_SCREEN_ABOUT);
     CHECK(scen_m()->radio_fw && strcmp(scen_m()->radio_fw, "1.2.3") == 0);
@@ -397,6 +397,45 @@ TEST(phone_commands)
     end_checks();
 }
 
+/* LINK_CMD_START 4: the HR monitor from the phone (display woken on its
+ * screen), LINK_STATUS mode 4, R-peaks to a Heart-Rate-only client; the
+ * thumbs lifted keep it armed; STOP: its card, no summary. */
+TEST(phone_start_hrm)
+{
+    boot_connected(LINK_SUB_HR);
+    testsrc_cfg_t tc = testsrc_defaults();
+    testsrc_install(&tc);
+    CHECK(scen_run_cond(display_off, UI_DISPLAY_TIMEOUT_S * 1000 + 2000));
+    CHECK_EQ(cmd2(LINK_CMD_START, LINK_MODE_HRM), LINK_RES_OK);
+    scen_run_ms(300);
+    CHECK_EQ(app_debug()->pwr, APP_PWR_AWAKE);
+    CHECK_EQ(scen_screen(), UI_SCREEN_HRM);
+    CHECK(log_has("session: start mode=4"));
+    CHECK_EQ(sim_radio_info()->last_status[1], LINK_MODE_HRM);
+    CHECK_EQ(sim_radio_info()->last_status[2], UI_MEAS_WAIT_CONTACT);
+    CHECK_EQ(cmd2(LINK_CMD_START, LINK_MODE_ECG), LINK_RES_BUSY);
+    sim_set_thumbs(true);
+    CHECK(scen_run_cond(is_running, 8000));
+    scen_run_ms(400);
+    CHECK_EQ(sim_radio_info()->last_status[2], UI_MEAS_RUNNING);
+    uint32_t rp = sim_radio_info()->events_by_kind[STREAM_EV_R_PEAK];
+    scen_run_ms(5000);
+    CHECK(sim_radio_info()->events_by_kind[STREAM_EV_R_PEAK] >= rp + 4);
+    CHECK(sim_radio_info()->last_status[11] > 50); /* hr */
+    sim_set_thumbs(false);
+    scen_run_ms(10000);
+    CHECK(acq_active());
+    CHECK_EQ(sim_radio_info()->last_status[1], LINK_MODE_HRM);
+    CHECK_EQ(sim_radio_info()->last_status[2], UI_MEAS_WAIT_CONTACT);
+    CHECK_EQ(cmd1(LINK_CMD_STOP), LINK_RES_OK);
+    scen_run_ms(400);
+    CHECK(!acq_active());
+    CHECK_EQ(scen_screen(), UI_SCREEN_HRM_CARD);
+    CHECK_EQ(sim_radio_info()->last_status[1], 0);
+    CHECK_EQ(cmd2(LINK_CMD_START, 5), LINK_RES_BAD_ARG);
+    end_checks();
+}
+
 static int g_cmd_seq;
 static void start_ecg_cb(void *ctx)
 {
@@ -472,7 +511,7 @@ TEST(refusals)
     CHECK_EQ(scen_screen(), UI_SCREEN_PPG_CARD);
     /* Diagnostics shown: BUSY */
     scen_press(2, 2100);
-    for (int i = 0; i < 5; i++) /* past Settings (closed) */
+    for (int i = 0; i < 6; i++) /* past Settings (closed) */
         scen_tap(2);
     scen_press_both(2300);
     scen_run_ms(300);
@@ -556,7 +595,7 @@ TEST(ble_off_setting)
 {
     scen_boot(false);
     CHECK(scen_run_cond(advertising, 1000));
-    for (int i = 0; i < 4; i++)
+    for (int i = 0; i < 5; i++)
         scen_tap(2);
     CHECK_EQ(scen_screen(), UI_SCREEN_SETTINGS);
     scen_tap(1); /* open */
@@ -581,8 +620,9 @@ TEST(ble_off_setting)
     CHECK_EQ(sim_radio_info()->power_ups, 1);
     CHECK_EQ(scen_m()->ble_state, UI_BLE_OFF);
     /* the phone can turn it off as well (and the ACK goes out first) */
-    for (int i = 0; i < 4; i++)
+    for (int i = 0; i < 5; i++)
         scen_tap(2);
+    CHECK_EQ(scen_screen(), UI_SCREEN_SETTINGS);
     scen_tap(1); /* open */
     for (int i = 0; i < SET_ITEM_BLE; i++)
         scen_tap(2);
@@ -744,7 +784,7 @@ static bool on_radio_page(void)
 
 static void to_radio_page(void)
 {
-    for (int i = 0; i < 5; i++) /* past Settings (closed) */
+    for (int i = 0; i < 6; i++) /* past Settings (closed) */
         scen_tap(2);
     CHECK_EQ(scen_screen(), UI_SCREEN_ABOUT);
     scen_press_both(2300);
@@ -1136,6 +1176,7 @@ int main(void)
     RUN(hello_missing_retry_fault);
     RUN(streaming_both);
     RUN(phone_commands);
+    RUN(phone_start_hrm);
     RUN(refusals);
     RUN(usb_during_phone_session);
     RUN(advertising_timeout_and_button);

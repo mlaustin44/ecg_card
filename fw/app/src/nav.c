@@ -9,18 +9,27 @@ ui_screen_t nav_next_page(ui_screen_t s)
 
 ui_screen_t nav_card_of(ui_mode_t m)
 {
-    return m == UI_MODE_PPG ? UI_SCREEN_PPG_CARD : m == UI_MODE_BOTH ? UI_SCREEN_BOTH_CARD
-                                                                     : UI_SCREEN_ECG_CARD;
+    switch (m) {
+    case UI_MODE_PPG: return UI_SCREEN_PPG_CARD;
+    case UI_MODE_BOTH: return UI_SCREEN_BOTH_CARD;
+    case UI_MODE_HRM: return UI_SCREEN_HRM_CARD;
+    default: return UI_SCREEN_ECG_CARD;
+    }
 }
 
 ui_screen_t nav_live_of(ui_mode_t m)
 {
-    return m == UI_MODE_PPG ? UI_SCREEN_PPG : m == UI_MODE_BOTH ? UI_SCREEN_BOTH : UI_SCREEN_ECG;
+    switch (m) {
+    case UI_MODE_PPG: return UI_SCREEN_PPG;
+    case UI_MODE_BOTH: return UI_SCREEN_BOTH;
+    case UI_MODE_HRM: return UI_SCREEN_HRM;
+    default: return UI_SCREEN_ECG;
+    }
 }
 
 bool nav_is_live(ui_screen_t s)
 {
-    return s == UI_SCREEN_ECG || s == UI_SCREEN_PPG || s == UI_SCREEN_BOTH;
+    return s == UI_SCREEN_ECG || s == UI_SCREEN_PPG || s == UI_SCREEN_BOTH || s == UI_SCREEN_HRM;
 }
 
 static nav_result_t r_act(nav_act_t a)
@@ -64,6 +73,8 @@ nav_result_t nav_on_button(ui_screen_t screen, uint8_t cursor, ui_mode_t live_mo
         return b1 ? r_start(UI_MODE_PPG) : r_goto(nav_next_page(screen));
     case UI_SCREEN_BOTH_CARD:
         return b1 ? r_start(UI_MODE_BOTH) : r_goto(nav_next_page(screen));
+    case UI_SCREEN_HRM_CARD:
+        return b1 ? r_start(UI_MODE_HRM) : r_goto(nav_next_page(screen));
     case UI_SCREEN_SETTINGS:
         if (cursor > UI_SET_EXIT) /* closed */
             return b1 ? r_act(NAV_SET_OPEN) : r_goto(nav_next_page(screen));
@@ -74,6 +85,7 @@ nav_result_t nav_on_button(ui_screen_t screen, uint8_t cursor, ui_mode_t live_mo
     case UI_SCREEN_PPG:
         return b1 ? r_act(NAV_MEAS_END) : r_act(NAV_VIEW_TOGGLE);
     case UI_SCREEN_BOTH:
+    case UI_SCREEN_HRM: /* no trace: no Live view */
         return b1 ? r_act(NAV_MEAS_END) : r_act(NAV_NONE);
     case UI_SCREEN_SUMMARY:
         return r_goto(nav_card_of(live_mode));

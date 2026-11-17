@@ -78,7 +78,7 @@ TEST(usb_dim_finger_limit)
     sim_set_usb(true);
     scen_run_ms(300);
     /* Settings: LED limit 15 -> 5 -> 10 mA */
-    for (int i = 0; i < 4; i++)
+    for (int i = 0; i < 5; i++)
         scen_tap(2);
     scen_tap(1); /* open */
     for (int i = 0; i < SET_ITEM_LED_LIMIT; i++)

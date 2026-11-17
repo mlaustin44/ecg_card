@@ -115,7 +115,7 @@ uint8_t link_cmd_parse(const uint8_t *p, size_t n, link_cmd_t *out)
     out->cmd = p[0];
     switch (p[0]) {
     case LINK_CMD_START:
-        if (n != 2u || p[1] < 1u || p[1] > 3u)
+        if (n != 2u || p[1] < LINK_MODE_ECG || p[1] > LINK_MODE_HRM)
             return LINK_RES_BAD_ARG;
         out->mode = p[1];
         return LINK_RES_OK;

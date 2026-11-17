@@ -1,15 +1,18 @@
 /* Navigation table: (screen, button event) -> action. Pure; the app
  * executes the action (it owns sessions, settings and power).
  *
- *   carousel  HOME -> ECG_CARD -> PPG_CARD -> BOTH_CARD -> SETTINGS -> ABOUT -> HOME
+ *   carousel  HOME -> ECG_CARD -> PPG_CARD -> BOTH_CARD -> HRM_CARD -> SETTINGS -> ABOUT
+ *             -> HOME
  *   BUTTON1 short  card: start that mode; Settings: open it, then change the
  *                  selected value, on "Exit" close it again;
- *                  live screen: end the measurement; Summary: back to the card;
+ *                  live screen: end the measurement (HR monitor: back to its
+ *                  card, no summary); Summary: back to the card;
  *                  Diagnostics: leave (About); on the RADIO page the app turns
  *                  NAV_DIAG_LEAVE into "toggle program mode" (app.c)
  *   BUTTON2 short  next page; Settings (open): next item, round through
  *                  "Exit"; ECG / Pulse live screen (also while waiting and
- *                  settling): Live view toggle; Summary: back to the card;
+ *                  settling): Live view toggle; HR monitor: nothing;
+ *                  Summary: back to the card;
  *                  Diagnostics: next page
  *   BUTTON2 long   Home from anywhere (a measurement ends without summary)
  *   BUTTON1 long   power off (standby) from anywhere
@@ -50,7 +53,8 @@ nav_result_t nav_on_button(ui_screen_t screen, uint8_t settings_cursor, ui_mode_
 
 /* Carousel successor (HOME .. ABOUT); other screens -> HOME. */
 ui_screen_t nav_next_page(ui_screen_t s);
-/* Launcher card of a mode, and live screen of a mode. */
+/* Launcher card of a mode, and live screen of a mode. Live screens are the
+ * measurement screens: ECG, PPG, BOTH and HRM. */
 ui_screen_t nav_card_of(ui_mode_t m);
 ui_screen_t nav_live_of(ui_mode_t m);
 bool nav_is_live(ui_screen_t s);

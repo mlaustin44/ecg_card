@@ -307,6 +307,28 @@ int gfx_big(int x, int y, const char *s, uint8_t flags)
     return w;
 }
 
+int gfx_big2_width(const char *s) { return 2 * gfx_big_width(s); }
+
+int gfx_big2(int x, int y, const char *s, uint8_t flags)
+{
+    int w = gfx_big2_width(s);
+    if ((flags & TXT_ALIGN) == TXT_CENTER)
+        x -= w / 2;
+    else if ((flags & TXT_ALIGN) == TXT_RIGHT)
+        x -= w;
+    uint8_t mode = (flags & TXT_CLR) ? GFX_CLR : GFX_SET;
+    if (x < 0 || x + w > OLED_W || y < 0 || y + 2 * FONTBIG_H > OLED_H)
+        gfx_text_clipped++;
+    for (; *s; s++, x += 2 * BIG_ADV) {
+        const uint8_t *g = fontbig_bits[big_index(*s)];
+        for (int c = 0; c < FONTBIG_W; c++)
+            for (int r = 0; r < FONTBIG_H; r++)
+                if ((g[(r >> 3) * FONTBIG_W + c] >> (r & 7)) & 1u)
+                    gfx_fill(x + 2 * c, y + 2 * r, 2, 2, mode);
+    }
+    return w;
+}
+
 /* ---- medium font -------------------------------------------------------- */
 
 /* Glyph of c: index into FONTMED_CHARS and its first byte, or -1. */

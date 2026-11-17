@@ -98,9 +98,7 @@ typedef struct {
  * Heart Rate Measurement. */
 bool rl_hr_select(rl_hr_sel_t *s, uint8_t kind, uint32_t now_ms);
 
-/* 0x2A37 value: flags 0x00 (u8 format, no contact/energy/RR), u8 bpm
- * (saturates at 255). Returns 2. */
-size_t rl_msg_hr_measurement(uint16_t bpm, uint8_t out[2]);
+/* The 0x2A37 value itself is built by rl_hrs.c. */
 
 /* ---- LINK_CMD acknowledgement tracking ------------------------------ */
 

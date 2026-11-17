@@ -157,13 +157,6 @@ bool rl_hr_select(rl_hr_sel_t *s, uint8_t kind, uint32_t now_ms)
     return false;
 }
 
-size_t rl_msg_hr_measurement(uint16_t bpm, uint8_t out[2])
-{
-    out[0] = 0x00u;
-    out[1] = bpm > 255u ? 255u : (uint8_t)bpm;
-    return 2;
-}
-
 void rl_ack_init(rl_acktrack_t *a)
 {
     memset(a, 0, sizeof *a);

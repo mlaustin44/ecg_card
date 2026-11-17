@@ -171,10 +171,9 @@ TEST(event_bpm)
     CHECK(!rl_msg_event_bpm(lead, 0, &kind, &bpm));
 }
 
-TEST(hr_select_and_value)
+TEST(hr_select)
 {
     rl_hr_sel_t s = {0};
-    uint8_t v[2];
     CHECK(rl_hr_select(&s, STREAM_EV_PULSE, 1000)); /* no ECG yet: PPG used */
     CHECK(rl_hr_select(&s, STREAM_EV_R_PEAK, 2000));
     CHECK(!rl_hr_select(&s, STREAM_EV_PULSE, 2500)); /* ECG wins */
@@ -185,12 +184,6 @@ TEST(hr_select_and_value)
     rl_hr_sel_t w = {0};
     CHECK(rl_hr_select(&w, STREAM_EV_R_PEAK, 0xFFFFFF00u));
     CHECK(!rl_hr_select(&w, STREAM_EV_PULSE, 0x00000100u));
-
-    CHECK_EQ(rl_msg_hr_measurement(72, v), 2);
-    CHECK_EQ(v[0], 0x00);
-    CHECK_EQ(v[1], 72);
-    rl_msg_hr_measurement(300, v);
-    CHECK_EQ(v[1], 255);
 }
 
 TEST(ack_tracking)
@@ -229,7 +222,7 @@ int main(void)
     RUN(status_default_and_battery);
     RUN(radio_ctrl);
     RUN(event_bpm);
-    RUN(hr_select_and_value);
+    RUN(hr_select);
     RUN(ack_tracking);
     return TEST_RESULT();
 }
