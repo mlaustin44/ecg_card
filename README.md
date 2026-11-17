@@ -9,6 +9,7 @@ CH585F BLE radio.
 |---|---|
 | `fw/` | MSPM0 firmware: `include/` contracts, `bsp/` (only code using TI headers), `drivers/`, `dsp/`, `acq/`, `ui/`, `app/` |
 | `CH585F/` | Radio firmware (MounRiver project); see its README |
+| `app/` | Flutter app for card owners (iOS, Android, web); see its README |
 | `host/` | Host simulator, test harness, UI renderer, radio logic tests |
 | `tools/` | Python stream decoder/plotter/filter design, `ble_client.html` (browser BLE client); see its README |
 | `scripts/` | Toolchain setup, flash, RTT log, GDB, radio build |
@@ -30,3 +31,5 @@ Reworked front-end gains: add `-DECG_GAIN_LO=<n> -DECG_GAIN_HI=<n>` to the targe
 Radio: `scripts/build_ch585.sh` (output in `build/ch585/`).
 
 Python tools: `pip install -r tools/requirements.txt`, then `python -m pytest tools/tests -q`.
+
+App: `cd app && flutter test`, `flutter run` (see `app/README.md`).

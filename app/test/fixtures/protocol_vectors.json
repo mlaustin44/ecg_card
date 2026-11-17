@@ -1,0 +1,857 @@
+{
+ "source": "app/tool/make_vectors.py (tools/ecgcard/codec.py encoders)",
+ "ecg": [
+  {
+   "hex": "00000000070080ff7ff2f793e715eed72ffa19d8ee7c30196e",
+   "blocks": [
+    {
+     "start": 0,
+     "flags": 7,
+     "samples": [
+      -32768,
+      32767,
+      -2062,
+      -6253,
+      -4587,
+      12247,
+      6650,
+      -4392,
+      12412,
+      28185
+     ],
+     "gain_hi": true,
+     "settling": true,
+     "lead_off": true
+    }
+   ]
+  },
+  {
+   "hex": "00000000000080ff7f2c16a511937699bc4d4c21714cd8d2c10a0000000209c56ef8aed453e3a2b185c008a48da7cbaca4bc",
+   "blocks": [
+    {
+     "start": 0,
+     "flags": 0,
+     "samples": [
+      -32768,
+      32767,
+      5676,
+      4517,
+      30355,
+      -17255,
+      19533,
+      28961,
+      -10164,
+      -15918
+     ],
+     "gain_hi": false,
+     "settling": false,
+     "lead_off": false
+    },
+    {
+     "start": 10,
+     "flags": 2,
+     "samples": [
+      -15095,
+      -1938,
+      -11090,
+      -7341,
+      -20062,
+      -16251,
+      -23544,
+      -22643,
+      -21301,
+      -17244
+     ],
+     "gain_hi": false,
+     "settling": true,
+     "lead_off": false
+    }
+   ]
+  },
+  {
+   "hex": "00000000010080ff7f601788d4f81a0f288aa64ca511d538330a000000053d3191c83b012c7900442fba68d58649df1cd9793ae2010001402f70879844793d41e0195fc035ee5829668781",
+   "blocks": [
+    {
+     "start": 0,
+     "flags": 1,
+     "samples": [
+      -32768,
+      32767,
+      5984,
+      -11128,
+      6904,
+      10255,
+      -22902,
+      -23220,
+      -10991,
+      13112
+     ],
+     "gain_hi": true,
+     "settling": false,
+     "lead_off": false
+    },
+    {
+     "start": 10,
+     "flags": 5,
+     "samples": [
+      12605,
+      -14191,
+      315,
+      31020,
+      17408,
+      -17873,
+      -10904,
+      18822,
+      7391,
+      31193
+     ],
+     "gain_hi": true,
+     "settling": false,
+     "lead_off": true
+    },
+    {
+     "start": 123450,
+     "flags": 1,
+     "samples": [
+      12096,
+      -30864,
+      17560,
+      15737,
+      -8127,
+      24345,
+      13760,
+      22766,
+      26153,
+      -32377
+     ],
+     "gain_hi": true,
+     "settling": false,
+     "lead_off": false
+    }
+   ]
+  },
+  {
+   "hex": "88130000010080ff7fa7db00d812be1e04d9db8d142bafc9299213000007c19ae8e05722557adb35a111cf98e856c73fbdd29c130000057aee727dcc7b67acab7028e194c925f7b0a6d672a613000002db607d63d165900e1f90c3f8f824a94889e54fb9b0130000016485978cd7c9281f346d372afd8a7257dd41befdba13000005ba52e340d667624388786b59629a89e50eae7eb9c41300000001225fdd460135d7a207b7ecab2da48f6d8b7a03ce130000049d4e1955abb23a7cdfa8f3d57d7aba1b08d084e6",
+   "blocks": [
+    {
+     "start": 5000,
+     "flags": 1,
+     "samples": [
+      -32768,
+      32767,
+      -9305,
+      -10240,
+      -16878,
+      1054,
+      -9255,
+      5261,
+      -20693,
+      10697
+     ],
+     "gain_hi": true,
+     "settling": false,
+     "lead_off": false
+    },
+    {
+     "start": 5010,
+     "flags": 7,
+     "samples": [
+      -25919,
+      -7960,
+      8791,
+      31317,
+      13787,
+      4513,
+      -26417,
+      22248,
+      16327,
+      -11587
+     ],
+     "gain_hi": true,
+     "settling": true,
+     "lead_off": true
+    },
+    {
+     "start": 5020,
+     "flags": 5,
+     "samples": [
+      -4486,
+      32114,
+      31692,
+      -21401,
+      28843,
+      -7896,
+      -13932,
+      -2267,
+      -22864,
+      29398
+     ],
+     "gain_hi": true,
+     "settling": false,
+     "lead_off": true
+    },
+    {
+     "start": 5030,
+     "flags": 2,
+     "samples": [
+      24795,
+      25469,
+      26065,
+      3728,
+      -28641,
+      -1853,
+      9464,
+      18601,
+      -6775,
+      -18097
+     ],
+     "gain_hi": false,
+     "settling": true,
+     "lead_off": false
+    },
+    {
+     "start": 5040,
+     "flags": 1,
+     "samples": [
+      -31388,
+      -29545,
+      -13865,
+      7976,
+      27956,
+      10807,
+      -29955,
+      22386,
+      16861,
+      -578
+     ],
+     "gain_hi": true,
+     "settling": false,
+     "lead_off": false
+    },
+    {
+     "start": 5050,
+     "flags": 5,
+     "samples": [
+      21178,
+      16611,
+      26582,
+      17250,
+      30856,
+      22891,
+      -26014,
+      -6775,
+      -20978,
+      -18050
+     ],
+     "gain_hi": true,
+     "settling": false,
+     "lead_off": true
+    },
+    {
+     "start": 5060,
+     "flags": 0,
+     "samples": [
+      8705,
+      -8865,
+      326,
+      -10443,
+      1954,
+      -4937,
+      11691,
+      -28764,
+      -29843,
+      890
+     ],
+     "gain_hi": false,
+     "settling": false,
+     "lead_off": false
+    },
+    {
+     "start": 5070,
+     "flags": 4,
+     "samples": [
+      20125,
+      21785,
+      -19797,
+      31802,
+      -22305,
+      -10765,
+      31357,
+      7098,
+      -12280,
+      -6524
+     ],
+     "gain_hi": false,
+     "settling": false,
+     "lead_off": true
+    }
+   ]
+  },
+  {
+   "hex": "00000000000080ff7f2c16a511937699bc4d4c21714cd8d2c10a0000000209c56ef8aed453e3a2b185c008a48da7cbaca4bc00000000000080",
+   "blocks": [
+    {
+     "start": 0,
+     "flags": 0,
+     "samples": [
+      -32768,
+      32767,
+      5676,
+      4517,
+      30355,
+      -17255,
+      19533,
+      28961,
+      -10164,
+      -15918
+     ],
+     "gain_hi": false,
+     "settling": false,
+     "lead_off": false
+    },
+    {
+     "start": 10,
+     "flags": 2,
+     "samples": [
+      -15095,
+      -1938,
+      -11090,
+      -7341,
+      -20062,
+      -16251,
+      -23544,
+      -22643,
+      -21301,
+      -17244
+     ],
+     "gain_hi": false,
+     "settling": true,
+     "lead_off": false
+    }
+   ],
+   "note": "trailing partial ignored"
+  }
+ ],
+ "ppg": [
+  {
+   "hex": "cde33d53b20104553a97dad0bc4d04",
+   "blocks": [
+    {
+     "start": 1396564941,
+     "led_code": 434,
+     "flags": 4,
+     "coarse": [
+      14933,
+      -17200
+     ],
+     "fine": [
+      -9577,
+      1101
+     ],
+     "no_finger": true
+    }
+   ]
+  },
+  {
+   "hex": "fa4d0f48630a0115ef31bc9aac5c4bfc4d0f48d7010072c6775a64b5aef0",
+   "blocks": [
+    {
+     "start": 1208962554,
+     "led_code": 2659,
+     "flags": 1,
+     "coarse": [
+      -4331,
+      -21350
+     ],
+     "fine": [
+      -17359,
+      19292
+     ],
+     "no_finger": false
+    },
+    {
+     "start": 1208962556,
+     "led_code": 471,
+     "flags": 0,
+     "coarse": [
+      -14734,
+      -19100
+     ],
+     "fine": [
+      23159,
+      -3922
+     ],
+     "no_finger": false
+    }
+   ]
+  },
+  {
+   "hex": "1b94e669390603da08760622197b2d1d94e669a6090260043b2a3b0223691f94e669260a07be7997f8841e6e222194e669560f028715772b1466cc972394e6690c0c034721e6bbde8c32dc",
+   "blocks": [
+    {
+     "start": 1776718875,
+     "led_code": 1593,
+     "flags": 3,
+     "coarse": [
+      2266,
+      6434
+     ],
+     "fine": [
+      1654,
+      11643
+     ],
+     "no_finger": false
+    },
+    {
+     "start": 1776718877,
+     "led_code": 2470,
+     "flags": 2,
+     "coarse": [
+      1120,
+      571
+     ],
+     "fine": [
+      10811,
+      26915
+     ],
+     "no_finger": false
+    },
+    {
+     "start": 1776718879,
+     "led_code": 2598,
+     "flags": 7,
+     "coarse": [
+      31166,
+      7812
+     ],
+     "fine": [
+      -1897,
+      8814
+     ],
+     "no_finger": true
+    },
+    {
+     "start": 1776718881,
+     "led_code": 3926,
+     "flags": 2,
+     "coarse": [
+      5511,
+      26132
+     ],
+     "fine": [
+      11127,
+      -26676
+     ],
+     "no_finger": false
+    },
+    {
+     "start": 1776718883,
+     "led_code": 3084,
+     "flags": 3,
+     "coarse": [
+      8519,
+      -29474
+     ],
+     "fine": [
+      -17434,
+      -9166
+     ],
+     "no_finger": false
+    }
+   ]
+  }
+ ],
+ "events": [
+  {
+   "hex": "01000000000000",
+   "type": "r_peak",
+   "sample_index": 0,
+   "hr_bpm": 0
+  },
+  {
+   "hex": "011a1800004000",
+   "type": "r_peak",
+   "sample_index": 6170,
+   "hr_bpm": 64
+  },
+  {
+   "hex": "01ffffffffffff",
+   "type": "r_peak",
+   "sample_index": 4294967295,
+   "hr_bpm": 65535
+  },
+  {
+   "hex": "0140e20100b600",
+   "type": "r_peak",
+   "sample_index": 123456,
+   "hr_bpm": 182
+  },
+  {
+   "hex": "02921800004000d7000b00",
+   "type": "pulse",
+   "foot_index": 6290,
+   "pulse_bpm": 64,
+   "pat_ms": 215,
+   "pi_permille": 11
+  },
+  {
+   "hex": "02010000002c0100000000",
+   "type": "pulse",
+   "foot_index": 1,
+   "pulse_bpm": 300,
+   "pat_ms": 0,
+   "pi_permille": 0
+  },
+  {
+   "hex": "02ffffffffffffffffffff",
+   "type": "pulse",
+   "foot_index": 4294967295,
+   "pulse_bpm": 65535,
+   "pat_ms": 65535,
+   "pi_permille": 65535
+  },
+  {
+   "hex": "0300",
+   "type": "lead",
+   "contact": false
+  },
+  {
+   "hex": "0301",
+   "type": "lead",
+   "contact": true
+  },
+  {
+   "hex": "040132000852002e024a04",
+   "type": "state",
+   "mode": 1,
+   "notch_hz": 50,
+   "mid_code": 2048,
+   "batt_pct": 82,
+   "flags": 0,
+   "gain_lo": 558,
+   "gain_hi": 1098
+  },
+  {
+   "hex": "04033cdb07ff032c01b004",
+   "type": "state",
+   "mode": 3,
+   "notch_hz": 60,
+   "mid_code": 2011,
+   "batt_pct": 255,
+   "flags": 3,
+   "gain_lo": 300,
+   "gain_hi": 1200
+  },
+  {
+   "hex": "040432ffff00010100ffff",
+   "type": "state",
+   "mode": 4,
+   "notch_hz": 50,
+   "mid_code": 65535,
+   "batt_pct": 0,
+   "flags": 1,
+   "gain_lo": 1,
+   "gain_hi": 65535
+  },
+  {
+   "hex": "040032000864022e024a04",
+   "type": "state",
+   "mode": 0,
+   "notch_hz": 50,
+   "mid_code": 2048,
+   "batt_pct": 100,
+   "flags": 2,
+   "gain_lo": 558,
+   "gain_hi": 1098
+  },
+  {
+   "hex": "04023c02082f01",
+   "type": "state",
+   "mode": 2,
+   "notch_hz": 60,
+   "mid_code": 2050,
+   "batt_pct": 47,
+   "flags": 1,
+   "gain_lo": 558,
+   "gain_hi": 1098,
+   "note": "short form"
+  },
+  {
+   "hex": "050100",
+   "type": "button",
+   "button": 1,
+   "long": false
+  },
+  {
+   "hex": "050201",
+   "type": "button",
+   "button": 2,
+   "long": true
+  },
+  {
+   "hex": "050200",
+   "type": "button",
+   "button": 2,
+   "long": false
+  },
+  {
+   "hex": "060100",
+   "type": "cmd_result",
+   "cmd": 1,
+   "result": 0
+  },
+  {
+   "hex": "060103",
+   "type": "cmd_result",
+   "cmd": 1,
+   "result": 3
+  },
+  {
+   "hex": "060200",
+   "type": "cmd_result",
+   "cmd": 2,
+   "result": 0
+  },
+  {
+   "hex": "060305",
+   "type": "cmd_result",
+   "cmd": 3,
+   "result": 5
+  },
+  {
+   "hex": "060402",
+   "type": "cmd_result",
+   "cmd": 4,
+   "result": 2
+  },
+  {
+   "hex": "060500",
+   "type": "cmd_result",
+   "cmd": 5,
+   "result": 0
+  },
+  {
+   "hex": "060901",
+   "type": "cmd_result",
+   "cmd": 9,
+   "result": 1
+  },
+  {
+   "hex": "7e010203",
+   "type": "unknown",
+   "kind": 126
+  },
+  {
+   "hex": "010000",
+   "type": "unknown",
+   "kind": 1,
+   "note": "R_PEAK too short"
+  },
+  {
+   "hex": "040132",
+   "type": "unknown",
+   "kind": 4,
+   "note": "STATE too short"
+  }
+ ],
+ "status": [
+  {
+   "hex": "0100ff5240000000020132005a0f000301001100",
+   "proto": 1,
+   "mode": 0,
+   "meas": 255,
+   "batt_pct": 82,
+   "flags": 64,
+   "gain": 0,
+   "notch": 0,
+   "rld": 0,
+   "led_limit": 2,
+   "sweep": 1,
+   "notch_hz": 50,
+   "hr_bpm": 0,
+   "batt_mv": 3930,
+   "fw_major": 0,
+   "fw_minor": 3,
+   "fw_patch": 1,
+   "uptime_min": 17
+  },
+  {
+   "hex": "010102372002010300023240d80e01020300ffff",
+   "proto": 1,
+   "mode": 1,
+   "meas": 2,
+   "batt_pct": 55,
+   "flags": 32,
+   "gain": 2,
+   "notch": 1,
+   "rld": 3,
+   "led_limit": 0,
+   "sweep": 2,
+   "notch_hz": 50,
+   "hr_bpm": 64,
+   "batt_mv": 3800,
+   "fw_major": 1,
+   "fw_minor": 2,
+   "fw_patch": 3,
+   "uptime_min": 65535
+  },
+  {
+   "hex": "010301ff7f01020101003cff0000ff0009000000",
+   "proto": 1,
+   "mode": 3,
+   "meas": 1,
+   "batt_pct": 255,
+   "flags": 127,
+   "gain": 1,
+   "notch": 2,
+   "rld": 1,
+   "led_limit": 1,
+   "sweep": 0,
+   "notch_hz": 60,
+   "hr_bpm": 255,
+   "batt_mv": 0,
+   "fw_major": 255,
+   "fw_minor": 0,
+   "fw_patch": 9,
+   "uptime_min": 0
+  },
+  {
+   "hex": "010400000900000202013200e40c000400000300",
+   "proto": 1,
+   "mode": 4,
+   "meas": 0,
+   "batt_pct": 0,
+   "flags": 9,
+   "gain": 0,
+   "notch": 0,
+   "rld": 2,
+   "led_limit": 2,
+   "sweep": 1,
+   "notch_hz": 50,
+   "hr_bpm": 0,
+   "batt_mv": 3300,
+   "fw_major": 0,
+   "fw_minor": 4,
+   "fw_patch": 0,
+   "uptime_min": 3
+  },
+  {
+   "hex": "0101036303000000020132003610000400000300",
+   "proto": 1,
+   "mode": 1,
+   "meas": 3,
+   "batt_pct": 99,
+   "flags": 3,
+   "gain": 0,
+   "notch": 0,
+   "rld": 0,
+   "led_limit": 2,
+   "sweep": 1,
+   "notch_hz": 50,
+   "hr_bpm": 0,
+   "batt_mv": 4150,
+   "fw_major": 0,
+   "fw_minor": 4,
+   "fw_patch": 0,
+   "uptime_min": 3
+  },
+  {
+   "hex": "0102040a1400000002013200480d000400000300",
+   "proto": 1,
+   "mode": 2,
+   "meas": 4,
+   "batt_pct": 10,
+   "flags": 20,
+   "gain": 0,
+   "notch": 0,
+   "rld": 0,
+   "led_limit": 2,
+   "sweep": 1,
+   "notch_hz": 50,
+   "hr_bpm": 0,
+   "batt_mv": 3400,
+   "fw_major": 0,
+   "fw_minor": 4,
+   "fw_patch": 0,
+   "uptime_min": 3
+  }
+ ],
+ "commands": [
+  {
+   "cmd": "start",
+   "mode": 1,
+   "hex": "0101"
+  },
+  {
+   "cmd": "start",
+   "mode": 2,
+   "hex": "0102"
+  },
+  {
+   "cmd": "start",
+   "mode": 3,
+   "hex": "0103"
+  },
+  {
+   "cmd": "start",
+   "mode": 4,
+   "hex": "0104"
+  },
+  {
+   "cmd": "stop",
+   "hex": "02"
+  },
+  {
+   "cmd": "get_status",
+   "hex": "05"
+  },
+  {
+   "cmd": "set",
+   "item": 0,
+   "value": 2,
+   "hex": "030002"
+  },
+  {
+   "cmd": "set",
+   "item": 5,
+   "value": 0,
+   "hex": "030500"
+  },
+  {
+   "cmd": "set",
+   "item": 7,
+   "value": 1,
+   "hex": "030701"
+  },
+  {
+   "cmd": "set_time",
+   "unix_seconds": 1704067200,
+   "utc_offset_minutes": 0,
+   "hex": "04800092650000"
+  },
+  {
+   "cmd": "set_time",
+   "unix_seconds": 1795000000,
+   "utc_offset_minutes": 60,
+   "hex": "04c086fd6a3c00"
+  },
+  {
+   "cmd": "set_time",
+   "unix_seconds": 1795000000,
+   "utc_offset_minutes": -300,
+   "hex": "04c086fd6ad4fe"
+  },
+  {
+   "cmd": "set_time",
+   "unix_seconds": 4294967295,
+   "utc_offset_minutes": 840,
+   "hex": "04ffffffff4803"
+  },
+  {
+   "cmd": "set_time",
+   "unix_seconds": 1800000000,
+   "utc_offset_minutes": -720,
+   "hex": "0400d2496b30fd"
+  }
+ ]
+}
