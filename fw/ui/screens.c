@@ -482,6 +482,13 @@ static void live_wait(const ui_model_t *m)
         gfx_text(cx, 20, "Place right", TXT_CENTER);
         gfx_text(cx, 29, "thumb on", TXT_CENTER);
         gfx_text(cx, 38, "the sensor", TXT_CENTER);
+    } else if (m->live.hum) {
+        /* strong mains pickup: on the bench, a debugger or USB cable on the
+         * card (it ties the card to mains ground); the ECG drowns in it */
+        gfx_text(cx, 14, "Mains hum:", TXT_CENTER);
+        gfx_text(cx, 23, "unplug", TXT_CENTER);
+        gfx_text(cx, 32, "all cables", TXT_CENTER);
+        gfx_text(cx, 45, "Hold still", TXT_CENTER | TXT_BOLD);
     } else {
         /* the unit needs ~2 s after every touch or movement (U5's 0.5 s
          * coupling): ask for stillness up front */
@@ -498,7 +505,8 @@ static void live_settling(const ui_model_t *m)
     quality_bars(power_icons(OLED_W, 0, m) - 15, 0, m->live.quality);
     gfx_text(OLED_W / 2, 17, "Hold still", TXT_CENTER | TXT_BOLD);
     gfx_progress(14, 29, 100, 9, clamp_u(m->live.settle_pct, 100));
-    gfx_text(OLED_W / 2, 44, "Keep thumbs relaxed", TXT_CENTER);
+    gfx_text(OLED_W / 2, 44, m->live.hum ? "Hum: unplug cables" : "Keep thumbs relaxed",
+             TXT_CENTER);
 }
 
 static void live_usb(const ui_model_t *m)

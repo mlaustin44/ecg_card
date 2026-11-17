@@ -476,12 +476,43 @@ TEST(timeline_exact_after_stalls)
     sim_acq_set_missed(0, 0);
 }
 
+/* Strong mains pickup (a debugger tying the card to mains ground on the
+ * bench): the hum warning after ACQ_HUM_ON_MS, gone again ACQ_HUM_OFF_MS
+ * after it drops; ordinary hum never raises it. */
+TEST(mains_hum_warning)
+{
+    boot();
+    testsrc_cfg_t tc = testsrc_defaults();
+    testsrc_install(&tc);
+    sim_ecg_set_mains(50.0, 30.0);
+    acq_cfg_t c = cfg(true, false);
+    CHECK(acq_start(&c));
+    sim_set_thumbs(true);
+    run_until(15000);
+    CHECK(!acq_status()->hum);
+    CHECK(acq_status()->mains_uvpp < ACQ_HUM_OFF_UVPP);
+    sim_ecg_set_mains(50.0, 3000.0);
+    run_until(17000);
+    CHECK(!acq_status()->hum); /* not at once */
+    run_until(22000);
+    printf("  hum: mains %u uVpp\n", acq_status()->mains_uvpp);
+    CHECK(acq_status()->hum);
+    sim_ecg_set_mains(50.0, 30.0);
+    run_until(23000);
+    CHECK(acq_status()->hum);
+    run_until(28000);
+    CHECK(!acq_status()->hum);
+    acq_stop();
+    sim_set_thumbs(false);
+}
+
 int main(void)
 {
     RUN(vmid_fault);
     RUN(ecg_session);
     RUN(fast_restore_policy);
     RUN(restore_slow_off);
+    RUN(mains_hum_warning);
     RUN(ppg_session);
     RUN(ppg_pulse_timeout);
     RUN(both_pat);

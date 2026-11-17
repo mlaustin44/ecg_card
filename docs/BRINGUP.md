@@ -207,14 +207,15 @@ Home, BUTTON2 (next) to the About page (HOME, ECG, Pulse, ECG+Pulse cards, Setti
 mcp=ok|mcp=FAIL` plus ` (eeprom programmed)` on the boot that wrote the MCP4728 EEPROM;
 `settings: blank: defaults | corrupt: defaults | saved | save FAILED`;
 `batt: CW2015 not answering: battery unknown`; `session: start mode=<0 ECG, 1 Pulse, 2 both>
-gain=558|gain=1098` plus, in ECG modes, ` rld=both|left|right|off restore=fast|slow|off`; `session: vmid=<mV> mV mid=<code> tol=+-30` (ECG start, once); `session: blocked: USB power`; `session: refused: battery low`;
+gain=<ECG_GAIN_LO>|gain=<ECG_GAIN_HI>` (` auto` when Gain is Auto: the session starts low) plus, in ECG modes, ` rld=both|left|right|off restore=fast|slow|off`; `session: vmid=<mV> mV mid=<code> tol=+-30` (ECG start, once); `session: blocked: USB power`; `session: refused: battery low`;
 `session: refused: MCP4728 absent`; `session: start failed err=<1 VMID, 2 LED DAC, 3 USB,
 4 start> vmid=<mV>`;
+`ecg: auto-gain -> <gain>` (an in-session auto-gain switch); `ecg: mains hum <uVpp> uVpp: unplug cables (debugger, USB)` and `ecg: mains hum gone <uVpp> uVpp`;
 `ecg: <from> -> <to> (<why>)` on every ECG session state change (states `wait`, `settle`, `run`,
 `hold` = settling again after running, `end`; why `stable`, `settled, beat`, `rail`,
 `no stable signal`, `no beat`), `ppg: <from> -> <to>` in Pulse mode (`wait`, `settle`, `run`);
 `session: end <user|abort|lead-off|usb|battery|timeout> run_ms= beats= hr= pulses= pat= lost=`;
-in ECG modes followed by `session: front-end rail=<n>/1000 of <s> s, inr_max=<ms> ms, fr=<n>`
+in ECG modes followed by `session: front-end rail=<n>/1000 of <s> s, inr_max=<ms> ms, fr=<n> blips=<n>`
 (the whole session: share of 4 kHz codes on a rail and the longest in-range run, both ignoring
 the samples FAST_RESTORE forces to mid, and the number of pulses; the A/B number for the
 Settings `Restore` policies);
@@ -363,6 +364,44 @@ application tests the display itself in stage 5.
 - Pass: p-p equals the applied input p-p within 3 % at both 558x (expect 1385 raw codes p-p at 2 mVpp) and 1098x (2726 codes). The tools scale with the flagged gain, so a scale error is a real gain error: true gain = nominal x (shown / applied). Repeat at 0.5 Hz and 150 Hz: about 0.707 of the 10 Hz amplitude (brief: -3 dB near 0.5 Hz and 150 Hz); the stream is the 500 Hz decimated data and the notch only affects the display. Shorted-input noise: short both rings through the divider, record `rms uV` for the record sheet (no pass number in the brief).
 - Log: `acq: contact` about 20 ms after start (80 samples off the rail), `acq: running` 2.5 s later (`ECG_SETTLE_MS`).
 - Fail hardware: output railed (no contact): right-leg drive reference missing, input common-mode out of range; gain wrong: R-values of the gain stages (0.1 % U6A resistors, R68 switched by U18 `GAIN_HI`); `GAIN_HI` pin not toggling: U18 or `+3V3A`. Firmware: auto lead-off thresholds are 5 %/95 % of full scale (codes 205/3891) for more than 100 ms; the 25 % baseline recheck.
+
+### ECG bench rules (learned 2026-11-17)
+
+- **Unplug the J-Link (and any cable) from the card for ECG tests.** With the debugger
+  attached the card's ground is the laptop's, and the thumbs saw a rail-to-rail 50 Hz sine
+  (`mains=` 5000-6600 uVpp, `inr=` stuck at one mains period). Unplugged: 40-200 uVpp and a
+  clean ECG. Read the log over Bluetooth instead (ble_client.html log console, Save session).
+  The card shows "Mains hum: unplug all cables" when it sees this.
+- Settings `Restore` stays `Off` (default): with `Fast`, each FAST_RESTORE release left a
+  random-sign step at the high-pass node and the 250 ms repeats kept the output on a rail.
+- A saved session replays through the whole application on the host:
+  `ECG_REPLAY=<file> build/host/fw/app/app_scen_replay` (state changes, blips, auto-gain, the
+  OLED scale, screenshots in `build/app_shots/replay_*.png`). Keep recordings out of git.
+
+### ECG gain rework (R35 / R68)
+
+As built the second stage gives 558x / 1098x (input windows +-2.9 / +-1.5 mV): too narrow for
+dry thumbs, where pressure and breathing move the baseline by a few mV. Gain = 21 x (1 + 1 M / R)
+with R = R35 (low) or R35 || R68 (high); both are 0603 on the top side (R35 beside R33 / C33
+next to U7; R68 beside U18).
+
+| R35 | R68 | Gains | Windows |
+| --- | --- | --- | --- |
+| 39k (as built) | 39k | 558x / 1098x | +-2.9 / +-1.5 mV |
+| 91k | 68k | 252x / 561x | +-6.5 / +-2.9 mV |
+| 100k | 56k | 231x / 606x | +-7.1 / +-2.7 mV |
+| 82k | 82k | 277x / 533x | +-5.9 / +-3.1 mV |
+
+Battery disconnected while soldering. Then build with the matching gains (both, integers):
+
+    cmake --preset target -B build/target-rework -DECG_GAIN_LO=252 -DECG_GAIN_HI=561
+    cmake --build build/target-rework
+    scripts/flash.sh build/target-rework/fw/bsp/ecg_fw.elf
+
+The card reports its gains in EV_STATE; ble_client.html and the Python tools convert with
+them. Check without instruments: the same thumbs give the same QRS in uV (about 1.4 mV on the
+first board) at Gain = low and high, while the raw `min`/`max` span of the `ecg:` line is about
+2.2x smaller at low gain.
 
 ### Stage 10: ECG with thumbs, RLD, restore, interlock (brief steps 8 and Safety)
 

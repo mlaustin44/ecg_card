@@ -81,6 +81,9 @@ static struct {
     uint8_t gw_beats;
     bool gw_rail;            /* a rail sample in the window */
     bool gain_locked;        /* stepped down: stays low */
+    /* mains hum warning */
+    bool hum_hi, hum_lo;
+    uint32_t hum_hi_ms, hum_lo_ms;
     bool fr_on, fr_any, fr_recheck;
     uint32_t fr_off_ms, fr_last_ms;
     bool blank_hold;         /* FAST_RESTORE held: every sample is blanked */
@@ -835,6 +838,32 @@ static void ecg_auto_gain(uint32_t now, uint32_t dt)
         gain_window_reset();
 }
 
+/* Mains hum warning (acq.h ACQ_HUM_*), with hysteresis in level and time. */
+static void ecg_hum(uint32_t now)
+{
+    uint16_t m = A.st.mains_uvpp;
+    if (m >= ACQ_HUM_UVPP) {
+        if (!A.hum_hi) {
+            A.hum_hi = true;
+            A.hum_hi_ms = now;
+        }
+    } else {
+        A.hum_hi = false;
+    }
+    if (m < ACQ_HUM_OFF_UVPP) {
+        if (!A.hum_lo) {
+            A.hum_lo = true;
+            A.hum_lo_ms = now;
+        }
+    } else {
+        A.hum_lo = false;
+    }
+    if (!A.st.hum && A.hum_hi && now - A.hum_hi_ms >= ACQ_HUM_ON_MS)
+        A.st.hum = true;
+    else if (A.st.hum && A.hum_lo && now - A.hum_lo_ms >= ACQ_HUM_OFF_MS)
+        A.st.hum = false;
+}
+
 static void ecg_timers(uint32_t now)
 {
     if (A.fr_on && (int32_t)(now - A.fr_off_ms) >= 0) {
@@ -848,6 +877,7 @@ static void ecg_timers(uint32_t now)
     A.lead_ev = 0;
     ecg_contact_update(now, ev, now - A.last_ms);
     ecg_auto_gain(now, now - A.last_ms);
+    ecg_hum(now);
     ecg_fast_restore(now);
     if (now - A.gain_ms >= GAIN_TICK_MS) {
         uint32_t el = now - A.gain_ms;

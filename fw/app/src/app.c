@@ -139,6 +139,7 @@ static struct {
     bool have_session;
     acq_summary_t last;
     uint8_t log_gain_sw;    /* acq gain_switches already logged */
+    bool log_hum;           /* acq hum already logged */
 
     /* battery */
     bool gauge_ok;
@@ -458,6 +459,8 @@ static void log_session_end(end_t why)
         log_u(a->ecg_run_max_ms);
         log_s(" ms, fr=");
         log_u(a->fr_pulses);
+        log_s(" blips=");
+        log_u(acq_status()->blips);
         log_end();
     }
 }
@@ -515,6 +518,14 @@ static uint8_t log_token(const acq_status_t *st)
 
 static void log_transition(const acq_status_t *st)
 {
+    if (mode_has_ecg(S.mode) && st->hum != S.log_hum) {
+        S.log_hum = st->hum;
+        log_begin("ecg");
+        log_s(st->hum ? " mains hum " : " mains hum gone ");
+        log_u(st->mains_uvpp);
+        log_s(st->hum ? " uVpp: unplug cables (debugger, USB)" : " uVpp");
+        log_end();
+    }
     if (mode_has_ecg(S.mode) && st->gain_switches != S.log_gain_sw) {
         S.log_gain_sw = st->gain_switches;
         log_begin("ecg");
@@ -681,6 +692,7 @@ static uint8_t start_session(ui_mode_t mode)
     if (c.gain_auto)
         log_s(" auto");
     S.log_gain_sw = 0;
+    S.log_hum = false;
     if (c.ecg) {
         static const char *const rld_names[] = {"both", "left", "right", "off"};
         static const char *const restore_names[] = {"fast", "slow", "off"};
@@ -1395,6 +1407,7 @@ static void build_model(void)
         l->notch_hz = st->notch_hz;
         l->elapsed_s = secs_u16(st->running_ms);
         l->settle_pct = st->settle_pct;
+        l->hum = mode_has_ecg(S.mode) && st->hum;
         /* ECG trace scale: the median QRS (0 until the first beats) */
         ui_trace_ecg_ref(mode_has_ecg(S.mode) ? st->qrs_uv : 0u, st->qrs_neg);
     }

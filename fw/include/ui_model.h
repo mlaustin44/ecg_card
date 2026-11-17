@@ -85,6 +85,7 @@ typedef struct {
     uint8_t  notch_hz;       /* 50 or 60: notch actually in use */
     uint16_t elapsed_s;      /* time in UI_MEAS_RUNNING */
     uint8_t  settle_pct;     /* 0..100 during UI_MEAS_SETTLING */
+    bool     hum;            /* ECG: strong mains pickup, "unplug cables" */
 } ui_live_t;
 
 typedef struct {

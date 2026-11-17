@@ -108,6 +108,15 @@
  * "beats" in the quantisation steps of open inputs sitting at mid-scale. */
 #define ACQ_ECG_NO_BEAT_MS   5000u
 #define ACQ_ECG_MIN_QRS_UV   100u
+/* Mains hum warning (acq_status_t.hum): the 50/60 Hz residual at or above
+ * ACQ_HUM_UVPP for ACQ_HUM_ON_MS; cleared below ACQ_HUM_OFF_UVPP for
+ * ACQ_HUM_OFF_MS. On the bench a J-Link on the card read 5000-6600 uVpp
+ * with the thumbs on (the debugger ties the card to the laptop's ground);
+ * good contact on battery read 40-200. */
+#define ACQ_HUM_UVPP       2000u
+#define ACQ_HUM_ON_MS      5000u
+#define ACQ_HUM_OFF_UVPP   1000u
+#define ACQ_HUM_OFF_MS     2000u
 #define ACQ_VLED_WAIT_MS   10u    /* VLED_EN -> LED current (>= PPG_VLED_START_MS) */
 #define ACQ_AGC_FRAMES     25u    /* one AGC decision per 250 ms */
 #define ACQ_DCC_FRAMES     100u   /* one DC-cancel update per second */
@@ -197,6 +206,7 @@ typedef struct {
                               * 5 accepted beats, uV (0 = none) */
     bool qrs_neg;            /* R waves point down (detector polarity vote) */
     uint16_t mains_uvpp;     /* dsp_mains_residual_uvpp(), last 0.5 s window */
+    bool hum;                /* strong mains pickup: unplug cables (ACQ_HUM_*) */
     uint16_t ecg_beats;      /* beats reported this session */
     bool contact_beat;       /* an accepted beat (ACQ_ECG_MIN_QRS_UV) in the current / last contact */
     uint16_t ppg_pulses;     /* pulses detected this session */

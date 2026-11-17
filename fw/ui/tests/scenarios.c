@@ -271,6 +271,8 @@ SC(ecg_wait_c) { scen_defaults(m); live(m, UI_SCREEN_ECG, UI_MEAS_WAIT_CONTACT);
 SC(ppg_wait) { scen_defaults(m); live(m, UI_SCREEN_PPG, UI_MEAS_WAIT_CONTACT); m->live.quality = 0; m->now_ms = 101000u; }
 SC(both_wait) { scen_defaults(m); live(m, UI_SCREEN_BOTH, UI_MEAS_WAIT_CONTACT); m->live.quality = 0; m->now_ms = 100250u; }
 SC(ecg_settling) { scen_defaults(m); live(m, UI_SCREEN_ECG, UI_MEAS_SETTLING); m->live.settle_pct = 40; m->live.quality = 2; }
+SC(ecg_wait_hum) { scen_defaults(m); live(m, UI_SCREEN_ECG, UI_MEAS_WAIT_CONTACT); m->live.quality = 0; m->live.hum = true; m->now_ms = 101000u; }
+SC(ecg_settling_hum) { scen_defaults(m); live(m, UI_SCREEN_ECG, UI_MEAS_SETTLING); m->live.settle_pct = 40; m->live.quality = 1; m->live.hum = true; }
 SC(ecg_settling_0) { scen_defaults(m); live(m, UI_SCREEN_ECG, UI_MEAS_SETTLING); m->live.settle_pct = 0; m->live.quality = 0; }
 SC(ppg_settling) { scen_defaults(m); live(m, UI_SCREEN_PPG, UI_MEAS_SETTLING); m->live.settle_pct = 100; m->live.quality = 3; }
 SC(ecg_usb) { scen_defaults(m); live(m, UI_SCREEN_ECG, UI_MEAS_USB_BLOCKED); m->usb_present = m->charging = true; }
@@ -416,7 +418,7 @@ const scenario_t scenarios[] = {
     E(settings_5_off), E(settings_6), E(settings_alt),
     E(about), E(about_radio), E(diag), E(diag_full),
     E(ecg_wait_a), E(ecg_wait_b), E(ecg_wait_c), E(ppg_wait), E(both_wait),
-    E(ecg_settling), E(ecg_settling_0), E(ppg_settling),
+    E(ecg_settling), E(ecg_settling_0), E(ecg_wait_hum), E(ecg_settling_hum), E(ppg_settling),
     E(ecg_usb), E(both_usb), E(ecg_fault), E(ecg_fault_null),
     E(ecg_run), E(ecg_run_205), E(ecg_run_big), E(ecg_run_tiny), E(ecg_run_start),
     E(ecg_run_1s5), E(ecg_run_6s),
