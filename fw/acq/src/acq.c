@@ -72,8 +72,9 @@ static struct {
     uint32_t beat_ms;        /* ... the last one */
     uint32_t nobeat_ms;      /* in-range time since the last accepted beat (or since
                               * settling completed): rail time does not count */
-    uint16_t qrs_amp[5];     /* stream units, last accepted beats */
+    uint16_t qrs_amp[5];     /* uV on the display path, last accepted beats */
     uint8_t qrs_n, qrs_i;
+    int16_t duv[256];        /* display-path uV by stream index (QRS heights as drawn) */
     /* auto-gain window (RUN only) */
     uint32_t gw_ms;          /* RUN time in the window */
     uint16_t gw_min, gw_max; /* raw codes */
@@ -404,6 +405,25 @@ static uint32_t min_qrs_amp(void)
     return ACQ_ECG_MIN_QRS_UV * (uint32_t)A.gain * 8u * 10u / ADC_UV_PER_CODE_X10;
 }
 
+/* QRS peak-to-peak as drawn: the display-path samples within +-50 ms of the
+ * R-peak (shifted by the display filter delay). 0 if not available. */
+static uint16_t qrs_display_uv(uint32_t r_index)
+{
+    uint32_t c = r_index + (DSP_DISP_DELAY_Q8 + 128u) / 256u;
+    uint32_t have = A.st.ecg_samples; /* display samples stored up to here */
+    if (c + 25u >= have || have - (c - 25u) > 256u || c < 25u)
+        return 0;
+    int32_t lo = INT16_MAX, hi = INT16_MIN;
+    for (uint32_t k = c - 25u; k <= c + 25u; k++) {
+        int32_t v = A.duv[k & 255u];
+        if (v < lo)
+            lo = v;
+        if (v > hi)
+            hi = v;
+    }
+    return (uint16_t)(hi - lo > UINT16_MAX ? UINT16_MAX : hi - lo);
+}
+
 /* Median QRS of the last accepted beats, in uV (display scaling). */
 static void qrs_amp_add(uint16_t amp)
 {
@@ -422,8 +442,7 @@ static void qrs_amp_add(uint16_t amp)
         }
         v[j] = x;
     }
-    uint32_t med = v[n / 2u];
-    A.st.qrs_uv = (uint16_t)(med * (uint32_t)ADC_UV_PER_CODE_X10 / (80u * (uint32_t)A.gain));
+    A.st.qrs_uv = v[n / 2u];
     A.st.qrs_neg = A.qrs.pol < 0;
 }
 
@@ -434,7 +453,9 @@ static void ecg_beat(const dsp_qrs_beat_t *b, uint32_t now)
         A.have_beat = true;
         A.beat_ms = now;
         A.nobeat_ms = 0;
-        qrs_amp_add(b->amp);
+        uint16_t d = qrs_display_uv(b->index);
+        if (d)
+            qrs_amp_add(d);
         if (A.ecg_state == ACQ_ECG_RUN && A.gw_beats < 255u)
             A.gw_beats++;
     }
@@ -538,6 +559,9 @@ static void ecg_process(const uint16_t *raw, size_t n, uint32_t idx, uint32_t no
         for (size_t i = 0; i < nb2; i++)
             ecg_beat(&beats[i], now);
         dsp_disp_process(&A.disp, s_dec, s_uv, m);
+        uint32_t i0 = A.st.ecg_samples - (uint32_t)m;
+        for (size_t i = 0; i < m; i++)
+            A.duv[(i0 + i) & 255u] = s_uv[i];
         if (A.st.settled && A.sink && A.sink->ecg_trace)
             A.sink->ecg_trace(s_uv, m);
     } else {
@@ -743,7 +767,6 @@ static void gain_window_reset(void)
 /* Switch the front-end gain within the session (auto-gain). */
 static void ecg_set_gain(bool hi, uint32_t now)
 {
-    int old = A.gain;
     if (!rails_ecg_frontend(hi, A.cfg.rld))
         return;
     A.gain = hi ? ECG_GAIN_HI : ECG_GAIN_LO;
@@ -757,8 +780,7 @@ static void ecg_set_gain(bool hi, uint32_t now)
     dsp_wander_init(&A.wander, A.gain);
     dsp_qrs_reset(&A.qrs);
     dsp_gain_init(&A.gadv, hi);
-    for (uint8_t i = 0; i < A.qrs_n; i++)
-        A.qrs_amp[i] = (uint16_t)((uint32_t)A.qrs_amp[i] * (uint32_t)A.gain / (uint32_t)old);
+    /* the QRS heights (display scale) are in uV: unchanged by the switch */
     /* the switch may inject a little charge: no evidence for a moment */
     A.blank_until = raw_index_now(now) + (ACQ_GAIN_BLANK_MS + 2u) * (ECG_RAW_HZ / 1000u);
     gain_window_reset();

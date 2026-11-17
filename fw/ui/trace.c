@@ -4,9 +4,11 @@
 
 #include "gfx.h"
 
-const uint16_t trace_ecg_steps_uv[ECG_STEPS] = {500, 1000, 1500, 2000, 3000, 5000, 7500, 10000};
+const uint16_t trace_ecg_steps_uv[ECG_STEPS] = {500, 1000, 1500, 2000, 2500, 3000, 4000, 5000,
+                                                7500, 10000};
 /* the largest 1-2-5 value not above half of each step */
-static const uint16_t ecg_bar_uv[ECG_STEPS] = {200, 500, 500, 1000, 1000, 2000, 2000, 5000};
+static const uint16_t ecg_bar_uv[ECG_STEPS] = {200, 500, 500, 1000, 1000, 1000, 2000, 2000,
+                                               2000, 5000};
 
 static uint16_t ref_uv;  /* median QRS, uV (0: unknown) */
 static bool ref_down;    /* R waves point down */
@@ -80,14 +82,23 @@ static inline uint8_t norm(const trace_state_t *s, int32_t x, bool *clip)
 
 static void rescale_ecg(trace_state_t *s)
 {
+    int32_t p2p = (int32_t)s->smax - s->smin;
     int32_t need, comfy_need;
+    bool fits_all = true;
     if (ref_uv) {
-        /* QRS at most 75 % of the height; a smaller step only with the QRS
-         * at most 70 % of it (the median of 5 beats barely jitters) */
-        need = ((int32_t)ref_uv * 4 + 2) / 3;
-        comfy_need = ((int32_t)ref_uv * 10 + 6) / 7;
+        /* the whole sweep (QRS and wander) with 10 % headroom, but at least
+         * the QRS at 75 % of the height and at most 2 QRS heights: a bigger
+         * artifact clips at the edges instead of zooming out */
+        int32_t q = ref_uv;
+        need = p2p + p2p / 10 + 1;
+        if (need < (q * 4 + 2) / 3)
+            need = (q * 4 + 2) / 3;
+        if (need > 2 * q) {
+            need = 2 * q;
+            fits_all = false;
+        }
+        comfy_need = need + need / 8; /* a smaller step: 12.5 % to spare */
     } else {
-        int32_t p2p = (int32_t)s->smax - s->smin;
         need = p2p + p2p / 4 + 1; /* 25 % headroom */
         comfy_need = need + need / 4;
     }
@@ -113,14 +124,12 @@ static void rescale_ecg(trace_state_t *s)
         s->down = 0;
     }
     int32_t range = trace_ecg_steps_uv[s->step];
-    int32_t mid;
-    if (ref_uv && s->cnt) {
-        /* baseline (the sweep mean) at 30 % of the height from the side the
-         * R waves start from */
+    int32_t mid = ((int32_t)s->smax + s->smin) / 2; /* the sweep fits: centre it */
+    if (ref_uv && !fits_all && s->cnt) {
+        /* an artifact sweep: baseline (the mean) at 30 % of the height from
+         * the side the R waves leave from */
         int32_t mean = s->sum / (int32_t)s->cnt;
         mid = ref_down ? mean - range / 5 : mean + range / 5;
-    } else {
-        mid = ((int32_t)s->smax + s->smin) / 2;
     }
     int32_t dc = mid - s->center;
     int32_t tol = ref_uv ? range / 16 : range / 8;

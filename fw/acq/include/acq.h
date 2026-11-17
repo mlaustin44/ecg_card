@@ -193,7 +193,8 @@ typedef struct {
     bool railed;             /* dsp_lead_railed() now */
     bool blip;               /* RUN, output on a rail for less than ACQ_ECG_BLIP_MS so far */
     uint16_t blips;          /* blips this session */
-    uint16_t qrs_uv;         /* median QRS peak-to-peak of the last 5 accepted beats, uV (0 = none) */
+    uint16_t qrs_uv;         /* median QRS peak-to-peak as drawn (display path) of the last
+                              * 5 accepted beats, uV (0 = none) */
     bool qrs_neg;            /* R waves point down (detector polarity vote) */
     uint16_t mains_uvpp;     /* dsp_mains_residual_uvpp(), last 0.5 s window */
     uint16_t ecg_beats;      /* beats reported this session */

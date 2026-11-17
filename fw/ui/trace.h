@@ -9,12 +9,12 @@
  *
  * Vertical scale is applied when a sample is stored, and only changes when
  * the pen wraps, so the old trace to the right of the pen stays as drawn.
- *   ECG: steps of microvolts per trace height, with hysteresis. Once the
- *        median QRS height is known (ui_trace_ecg_ref()) the step follows it:
- *        QRS at 70-75 % of the height, up at once, down after two sweeps.
- *        The baseline sits at 30 % from the side the R waves leave from;
- *        wander and artifacts clip at the edges instead of zooming out.
- *        Before that: the sweep's range.
+ *   ECG: steps of microvolts per trace height, with hysteresis (up at
+ *        once, down after two sweeps with 12.5 % to spare). Once the median
+ *        QRS height is known (ui_trace_ecg_ref()): the sweep's range + 10 %,
+ *        at least the QRS at 75 % of the height and at most two QRS heights,
+ *        so ordinary wander stays on screen and an artifact clips at the
+ *        edges instead of zooming out. Before that: the sweep's range.
  *   PPG: free range from the last sweep's peak-to-peak, with hysteresis. */
 #ifndef UI_TRACE_H
 #define UI_TRACE_H
@@ -48,7 +48,7 @@ typedef struct {
 const trace_state_t *trace_state(ui_trace_t t);
 
 /* ECG scale table, microvolts per full trace height. */
-#define ECG_STEPS 8
+#define ECG_STEPS 10
 extern const uint16_t trace_ecg_steps_uv[ECG_STEPS];
 #define ECG_STEP_DEFAULT 3 /* 2 mV per trace height */
 

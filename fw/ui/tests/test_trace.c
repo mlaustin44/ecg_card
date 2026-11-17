@@ -165,37 +165,37 @@ TEST(ecg_autoscale_steps_and_hysteresis)
     CHECK_EQ(s->step, ECG_STEPS - 1);
 }
 
-/* With the median QRS known, the scale follows it (QRS at 70-75 % of the
- * height) and artifacts no longer zoom out; a gap leaves empty columns. */
+/* With the median QRS known: the sweep fits (+10 %), at least the QRS at 75 %
+ * of the height, at most two QRS heights (an artifact clips instead of
+ * zooming out); a gap leaves empty columns. */
 TEST(ecg_scale_follows_qrs)
 {
     ui_trace_reset(3000);
     const trace_state_t *s = trace_state(UI_TRACE_ECG);
     const uint32_t n = 1500;
     ui_trace_ecg_ref(1400, false);
-    push_alt(UI_TRACE_ECG, 3000, n); /* a 6 mV artifact sweep */
-    CHECK_EQ(trace_ecg_steps_uv[s->step], 2000); /* 1.4 mV QRS = 70 % */
+    push_alt(UI_TRACE_ECG, 3000, n); /* a 6 mV artifact sweep: capped at 2.8 mV */
+    CHECK_EQ(trace_ecg_steps_uv[s->step], 3000);
     push_alt(UI_TRACE_ECG, 3000, n);
-    CHECK_EQ(trace_ecg_steps_uv[s->step], 2000);
-    /* a smaller QRS: down after two sweeps, to the step it fills <= 70 % of */
+    CHECK_EQ(trace_ecg_steps_uv[s->step], 3000);
+    /* an artifact sweep: baseline (the mean, 0) at 30 % of the height */
+    CHECK_EQ(s->center, 3000 / 5);
+    /* a small QRS on a quiet baseline: down after two sweeps, QRS at 75 % or less */
     ui_trace_ecg_ref(500, false);
     push_alt(UI_TRACE_ECG, 250, n);
-    CHECK_EQ(trace_ecg_steps_uv[s->step], 2000);
+    CHECK_EQ(trace_ecg_steps_uv[s->step], 3000);
     push_alt(UI_TRACE_ECG, 250, n);
     CHECK_EQ(trace_ecg_steps_uv[s->step], 1000);
     /* a larger one: up at once */
     ui_trace_ecg_ref(2600, false);
     push_alt(UI_TRACE_ECG, 1300, n);
-    CHECK_EQ(trace_ecg_steps_uv[s->step], 5000);
-    /* baseline (the sweep mean) at 30 % of the height from the R side */
-    ui_trace_ecg_ref(1400, false);
-    push_const(UI_TRACE_ECG, 100, n);
-    push_const(UI_TRACE_ECG, 100, n);
-    CHECK_EQ(trace_ecg_steps_uv[s->step], 2000);
-    CHECK_EQ(s->center, 100 + 2000 / 5);
-    ui_trace_ecg_ref(1400, true);
-    push_const(UI_TRACE_ECG, 100, n);
-    CHECK_EQ(s->center, 100 - 2000 / 5);
+    CHECK_EQ(trace_ecg_steps_uv[s->step], 4000);
+    /* wander within two QRS heights stays on screen, centred */
+    ui_trace_ecg_ref(1000, false);
+    push_alt(UI_TRACE_ECG, 900, n); /* 1.8 mV sweep */
+    push_alt(UI_TRACE_ECG, 900, n);
+    CHECK_EQ(trace_ecg_steps_uv[s->step], 2500); /* 1.98 mV needed; from above, 12.5 % spare */
+    CHECK_EQ(s->center, 0);
     /* a gap: the pen advances over empty columns */
     ui_trace_ecg_ref(0, false);
     ui_trace_reset(3000);
