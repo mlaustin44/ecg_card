@@ -117,6 +117,21 @@
 #define ACQ_HUM_ON_MS      5000u
 #define ACQ_HUM_OFF_UVPP   1000u
 #define ACQ_HUM_OFF_MS     2000u
+/* Fast heart rate (acq_status_t.fast_bpm): 60000 / the mean of the last
+ * ACQ_FAST_N beat intervals (ECG R-R in the ECG modes, pulse foot-to-foot
+ * in Pulse mode). Short enough to follow respiratory sinus arrhythmia: with
+ * RSA +-8 % at 15 breaths/min and 70 bpm a 2-beat mean shows 9 of the 11 bpm
+ * swing, a 3-beat mean 6, the 5-beat median of hr_bpm 4 (test_acq). The
+ * detection jitter it averages is small against RSA (R-peak ~1-2 ms, pulse
+ * foot ~5-10 ms, RSA tens of ms). An
+ * interval more than ACQ_FAST_REJECT_PCT % off the mean is an artifact
+ * (missed or extra beat) and skipped; ACQ_FAST_REJECT_MAX in a row restart
+ * the mean (a real change). 0 until 2 intervals, and ACQ_FAST_TIMEOUT_MS
+ * after the last beat. */
+#define ACQ_FAST_N           2u
+#define ACQ_FAST_REJECT_PCT  30u
+#define ACQ_FAST_REJECT_MAX  3u
+#define ACQ_FAST_TIMEOUT_MS  3000u
 #define ACQ_VLED_WAIT_MS   10u    /* VLED_EN -> LED current (>= PPG_VLED_START_MS) */
 #define ACQ_AGC_FRAMES     25u    /* one AGC decision per 250 ms */
 #define ACQ_DCC_FRAMES     100u   /* one DC-cancel update per second */
@@ -186,6 +201,8 @@ typedef struct {
     uint32_t contact_ms;     /* hal_millis() of the last primary contact edge */
     bool finger;             /* PPG finger detected */
     uint16_t hr_bpm;         /* ECG median-of-5, or the pulse rate in PPG mode */
+    uint16_t fast_bpm;       /* 2-beat mean (ACQ_FAST_*), 0 = n/a */
+    uint8_t fast_seq;        /* +1 per interval accepted into fast_bpm */
     uint16_t pulse_bpm, pat_ms, pi_permille; /* 0 = n/a (also ACQ_PULSE_TIMEOUT_MS after the last pulse) */
     uint8_t quality;         /* 0..4 */
     uint8_t beat_seq;        /* +1 per ECG beat (ECG, BOTH) or pulse (PPG) */

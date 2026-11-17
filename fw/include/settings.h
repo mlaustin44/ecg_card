@@ -24,6 +24,10 @@ typedef enum { BLE_OFF, BLE_ON, BLE_MODE_COUNT } ble_mode_t;
  *         in-range recheck;
  *   OFF   never pulse: the high-pass recovers on its own. */
 typedef enum { RESTORE_FAST, RESTORE_SLOW, RESTORE_OFF, RESTORE_MODE_COUNT } restore_mode_t;
+/* ECG and Pulse live screens: the waveform alone, or the waveform over a
+ * scrolling heart-rate graph with the fast (2-beat) rate, to watch
+ * respiratory sinus arrhythmia. BUTTON2 short toggles it while measuring. */
+typedef enum { VIEW_TRACE, VIEW_HR_GRAPH, VIEW_MODE_COUNT } view_mode_t;
 
 /* Order of items on the Settings page. The index is also the item number of
  * LINK_CMD_SET (link_fmt.h): append only. */
@@ -35,6 +39,7 @@ typedef enum {
     SET_ITEM_SWEEP,
     SET_ITEM_BLE,
     SET_ITEM_RESTORE,
+    SET_ITEM_VIEW,
     SET_ITEM_COUNT
 } settings_item_t;
 
@@ -46,10 +51,11 @@ typedef struct {
     uint8_t sweep;     /* sweep_t */
     uint8_t ble;       /* ble_mode_t */
     uint8_t restore;   /* restore_mode_t */
+    uint8_t view;      /* view_mode_t */
 } settings_t;
 
 #define SETTINGS_DEFAULTS \
-    { GAIN_AUTO, NOTCH_AUTO, RLD_BOTH, LED_LIMIT_15MA, SWEEP_3S, BLE_ON, RESTORE_OFF }
+    { GAIN_AUTO, NOTCH_AUTO, RLD_BOTH, LED_LIMIT_15MA, SWEEP_3S, BLE_ON, RESTORE_OFF, VIEW_TRACE }
 
 /* Milliseconds for one full sweep across the trace area. */
 static inline uint16_t sweep_ms(uint8_t sweep)

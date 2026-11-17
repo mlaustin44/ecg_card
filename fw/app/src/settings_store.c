@@ -2,7 +2,9 @@
 
 #include "stream.h" /* crc16_ccitt_false */
 
-#define PAYLOAD_LEN    7u
+#define PAYLOAD_LEN    8u
+#define V4_PAYLOAD_LEN 7u
+#define V4_BLOB_LEN    13u
 #define V3_PAYLOAD_LEN 6u
 #define V3_BLOB_LEN    12u
 #define V2_PAYLOAD_LEN 5u
@@ -19,7 +21,7 @@ static uint8_t item_count(uint8_t item)
 {
     static const uint8_t n[SET_ITEM_COUNT] = {GAIN_MODE_COUNT, NOTCH_MODE_COUNT, RLD_MODE_COUNT,
                                               LED_LIMIT_COUNT, SWEEP_COUNT, BLE_MODE_COUNT,
-                                              RESTORE_MODE_COUNT};
+                                              RESTORE_MODE_COUNT, VIEW_MODE_COUNT};
     return item < SET_ITEM_COUNT ? n[item] : 0u;
 }
 
@@ -33,6 +35,7 @@ static uint8_t *item_ref(settings_t *s, uint8_t item)
     case SET_ITEM_SWEEP: return &s->sweep;
     case SET_ITEM_BLE: return &s->ble;
     case SET_ITEM_RESTORE: return &s->restore;
+    case SET_ITEM_VIEW: return &s->view;
     default: return 0;
     }
 }
@@ -41,7 +44,7 @@ bool settings_valid(const settings_t *s)
 {
     return s->gain < GAIN_MODE_COUNT && s->notch < NOTCH_MODE_COUNT && s->rld < RLD_MODE_COUNT &&
            s->led_limit < LED_LIMIT_COUNT && s->sweep < SWEEP_COUNT && s->ble < BLE_MODE_COUNT &&
-           s->restore < RESTORE_MODE_COUNT;
+           s->restore < RESTORE_MODE_COUNT && s->view < VIEW_MODE_COUNT;
 }
 
 void settings_encode(const settings_t *s, uint8_t b[SETTINGS_BLOB_LEN])
@@ -57,9 +60,10 @@ void settings_encode(const settings_t *s, uint8_t b[SETTINGS_BLOB_LEN])
     b[8] = s->sweep;
     b[9] = s->ble;
     b[10] = s->restore;
-    uint16_t crc = crc16_ccitt_false(b, 11u, 0xFFFFu);
-    b[11] = (uint8_t)crc;
-    b[12] = (uint8_t)(crc >> 8);
+    b[11] = s->view;
+    uint16_t crc = crc16_ccitt_false(b, 12u, 0xFFFFu);
+    b[12] = (uint8_t)crc;
+    b[13] = (uint8_t)(crc >> 8);
 }
 
 static bool crc_ok(const uint8_t *b, unsigned n)
@@ -80,14 +84,17 @@ settings_load_t settings_decode(const uint8_t *b, settings_t *out)
     if (magic != SETTINGS_MAGIC)
         return SETTINGS_CORRUPT;
     settings_t s;
-    if (b[2] == SETTINGS_VERSION && b[3] == PAYLOAD_LEN && crc_ok(b, 11u)) {
-        s = (settings_t){b[4], b[5], b[6], b[7], b[8], b[9], b[10]};
+    if (b[2] == SETTINGS_VERSION && b[3] == PAYLOAD_LEN && crc_ok(b, 12u)) {
+        s = (settings_t){b[4], b[5], b[6], b[7], b[8], b[9], b[10], b[11]};
+    } else if (b[2] == 4u && b[3] == V4_PAYLOAD_LEN && crc_ok(b, V4_BLOB_LEN - 2u)) {
+        /* version 4 (before view): keep the values, view default */
+        s = (settings_t){b[4], b[5], b[6], b[7], b[8], b[9], b[10], VIEW_TRACE};
     } else if (b[2] == 3u && b[3] == V3_PAYLOAD_LEN && crc_ok(b, V3_BLOB_LEN - 2u)) {
         /* version 3 (before restore): keep the values, restore default */
-        s = (settings_t){b[4], b[5], b[6], b[7], b[8], b[9], RESTORE_OFF};
+        s = (settings_t){b[4], b[5], b[6], b[7], b[8], b[9], RESTORE_OFF, VIEW_TRACE};
     } else if (b[2] == 2u && b[3] == V2_PAYLOAD_LEN && crc_ok(b, V2_BLOB_LEN - 2u)) {
         /* version 2 (before Bluetooth): keep the values, Bluetooth default */
-        s = (settings_t){b[4], b[5], b[6], b[7], b[8], BLE_ON, RESTORE_OFF};
+        s = (settings_t){b[4], b[5], b[6], b[7], b[8], BLE_ON, RESTORE_OFF, VIEW_TRACE};
     } else {
         return SETTINGS_CORRUPT;
     }

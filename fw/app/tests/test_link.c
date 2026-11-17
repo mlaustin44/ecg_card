@@ -175,7 +175,7 @@ TEST(command_validation)
     /* SET: every item / value against the Settings rules */
     static const uint8_t counts[SET_ITEM_COUNT] = {GAIN_MODE_COUNT, NOTCH_MODE_COUNT, RLD_MODE_COUNT,
                                                    LED_LIMIT_COUNT, SWEEP_COUNT, BLE_MODE_COUNT,
-                                                   RESTORE_MODE_COUNT};
+                                                   RESTORE_MODE_COUNT, VIEW_MODE_COUNT};
     for (unsigned item = 0; item <= SET_ITEM_COUNT; item++)
         for (unsigned v = 0; v < 6; v++) {
             uint8_t set[] = {LINK_CMD_SET, (uint8_t)item, (uint8_t)v};

@@ -2,12 +2,14 @@
  *
  * Blob layout (little-endian), SETTINGS_BLOB_LEN bytes:
  *   u16 magic 0x4345 ("EC"), u8 version, u8 payload length,
- *   payload: gain, notch, rld, led_limit, sweep, ble, restore (settings_t order),
+ *   payload: gain, notch, rld, led_limit, sweep, ble, restore, view (settings_t order),
  *   u16 CRC-16/CCITT-FALSE over everything before it.
  * Blank (0xFF), bad magic/version/length/CRC or any out-of-range field ->
  * defaults. A version-2 blob (11 bytes, no ble) is still read: its values
  * are kept and Bluetooth gets the default (On); a version-3 blob (12 bytes,
- * no restore) keeps its values with restore = Off (the default). The next save writes v4. Never written during acquisition (the caller's job: hal_nv_write
+ * no restore) keeps its values with restore = Off (the default); a version-4
+ * blob (13 bytes, no view) keeps its values with view = Trace. The next save
+ * writes v5. Never written during acquisition (the caller's job: hal_nv_write
  * stalls the CPU for tens of ms). */
 #ifndef APP_SETTINGS_STORE_H
 #define APP_SETTINGS_STORE_H
@@ -19,8 +21,8 @@
 #include "settings.h"
 
 #define SETTINGS_MAGIC     0x4345u
-#define SETTINGS_VERSION   4u     /* 2: LED limit 20 mA option removed; 3: ble; 4: restore */
-#define SETTINGS_BLOB_LEN  13u
+#define SETTINGS_VERSION   5u     /* 2: LED limit 20 mA option removed; 3: ble; 4: restore; 5: view */
+#define SETTINGS_BLOB_LEN  14u
 
 typedef enum { SETTINGS_LOADED, SETTINGS_BLANK, SETTINGS_CORRUPT } settings_load_t;
 

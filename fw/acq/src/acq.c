@@ -81,6 +81,10 @@ static struct {
     uint8_t gw_beats;
     bool gw_rail;            /* a rail sample in the window */
     bool gain_locked;        /* stepped down: stays low */
+    /* fast heart rate (acq.h ACQ_FAST_*) */
+    uint16_t fast_rr[ACQ_FAST_N];
+    uint8_t fast_n, fast_i, fast_rej;
+    uint32_t fast_ms;        /* last accepted interval */
     /* mains hum warning */
     bool hum_hi, hum_lo;
     uint32_t hum_hi_ms, hum_lo_ms;
@@ -119,6 +123,7 @@ static struct {
 } A;
 
 static void gain_window_reset(void);
+static void fast_clear(void);
 
 /* Scratch buffers (static: keeps the main-loop stack shallow). */
 static uint16_t s_raw[ECG_CHUNK];
@@ -398,6 +403,7 @@ static void ecg_on_lead_off(acq_ecg_state_t s, acq_why_t why, uint32_t now)
     ecg_state_to(s, why);
     set_settled(false);
     A.st.hr_bpm = 0;
+    fast_clear();
     A.st.quality = 0;
     set_contact(false, now);
 }
@@ -406,6 +412,44 @@ static void ecg_on_lead_off(acq_ecg_state_t s, acq_why_t why, uint32_t now)
 static uint32_t min_qrs_amp(void)
 {
     return ACQ_ECG_MIN_QRS_UV * (uint32_t)A.gain * 8u * 10u / ADC_UV_PER_CODE_X10;
+}
+
+static void fast_clear(void)
+{
+    A.fast_n = A.fast_i = A.fast_rej = 0;
+    A.st.fast_bpm = 0;
+}
+
+/* One beat interval (ms; 0 = none: first beat, or after a gap). */
+static void fast_add(uint16_t ms, uint32_t now)
+{
+    if (ms < 300u || ms > 2000u) /* 30..200 bpm */
+        return;
+    if (A.fast_n) {
+        uint32_t sum = 0;
+        for (uint8_t i = 0; i < A.fast_n; i++)
+            sum += A.fast_rr[i];
+        uint32_t mean = sum / A.fast_n;
+        uint32_t lo = mean * (100u - ACQ_FAST_REJECT_PCT), hi = mean * (100u + ACQ_FAST_REJECT_PCT);
+        if ((uint32_t)ms * 100u < lo || (uint32_t)ms * 100u > hi) {
+            if (++A.fast_rej < ACQ_FAST_REJECT_MAX)
+                return;
+            fast_clear(); /* consistently different: a real change */
+        }
+    }
+    A.fast_rej = 0;
+    A.fast_rr[A.fast_i] = ms;
+    A.fast_i = (uint8_t)((A.fast_i + 1u) % ACQ_FAST_N);
+    if (A.fast_n < ACQ_FAST_N)
+        A.fast_n++;
+    A.fast_ms = now;
+    A.st.fast_seq++;
+    if (A.fast_n >= 2u) {
+        uint32_t sum = 0;
+        for (uint8_t i = 0; i < A.fast_n; i++)
+            sum += A.fast_rr[i];
+        A.st.fast_bpm = (uint16_t)((60000u * A.fast_n + sum / 2u) / sum);
+    }
 }
 
 /* QRS peak-to-peak as drawn: the display-path samples within +-50 ms of the
@@ -470,6 +514,7 @@ static void ecg_beat(const dsp_qrs_beat_t *b, uint32_t now)
     count16(&A.st.ecg_beats);
     if (b->hr_bpm) /* 0 while the detector has fewer than 6 beats (after a gain switch) */
         A.st.hr_bpm = b->hr_bpm;
+    fast_add(b->rr_ms, now);
     if (A.st.settled) {
         dsp_hrv_add_beat(&A.hrv, b->rr_ms);
         dsp_gain_beat(&A.gadv, b->amp);
@@ -928,6 +973,7 @@ static void ppg_on_finger(bool present, uint32_t now)
         if (!present) {
             set_settled(false);
             A.st.hr_bpm = 0;
+            fast_clear();
             A.st.quality = 0;
         }
         set_contact(present, now);
@@ -955,6 +1001,8 @@ static void ppg_pulse(const dsp_ppg_pulse_t *p)
     } else {
         A.st.beat_seq++;
         A.st.hr_bpm = p->pulse_bpm;
+        if (A.st.finger)
+            fast_add(p->ibi_ms, hal_millis()); /* Pulse mode: pulse-to-pulse intervals */
     }
     if (settled) {
         if (A.pulses < UINT16_MAX)
@@ -1206,6 +1254,8 @@ void acq_poll(uint32_t now)
         ppg_control(now);
         ppg_timers(now);
     }
+    if (A.st.fast_bpm && now - A.fast_ms >= ACQ_FAST_TIMEOUT_MS)
+        fast_clear(); /* no beat for a while: no rate rather than a stale one */
     if (A.st.settled && !A.st.blip) /* a blip is not measured time */
         A.st.running_ms += now - A.last_ms;
     A.last_ms = now;

@@ -362,6 +362,7 @@ TEST(both_pat)
     CHECK_NEAR(pat, truth, 10);
     CHECK_NEAR(acq_status()->pulse_bpm, tc.hr_bpm, 2);
     CHECK_NEAR(acq_status()->hr_bpm, tc.hr_bpm, 2);
+    CHECK_NEAR(acq_status()->fast_bpm, tc.hr_bpm, 6); /* Pulse mode: pulse-to-pulse */
     acq_stop();
     CHECK(acq_summary()->pat_n > 10);
 }
@@ -476,6 +477,44 @@ TEST(timeline_exact_after_stalls)
     sim_acq_set_missed(0, 0);
 }
 
+/* The fast 2-beat rate follows respiratory sinus arrhythmia (15 breaths/min,
+ * +-8 % RR: about 11 bpm peak to peak); the 5-beat median of hr_bpm much less. */
+TEST(fast_rate_follows_rsa)
+{
+    boot();
+    testsrc_cfg_t tc = testsrc_defaults();
+    tc.hr_bpm = 70;
+    tc.rr_sd = 0.005;
+    tc.rsa = 0.08;
+    testsrc_install(&tc);
+    acq_cfg_t c = cfg(true, false);
+    CHECK(acq_start(&c));
+    sim_set_thumbs(true);
+    run_until(14000);
+    CHECK(acq_status()->settled);
+    unsigned fmin = 999, fmax = 0, hmin = 999, hmax = 0, n = 0;
+    double fsum = 0;
+    for (uint64_t t = 14000; t < 30000; t += 100) {
+        run_until(t);
+        const acq_status_t *st = acq_status();
+        if (!st->fast_bpm || !st->hr_bpm)
+            continue;
+        n++;
+        fsum += st->fast_bpm;
+        if (st->fast_bpm < fmin) fmin = st->fast_bpm;
+        if (st->fast_bpm > fmax) fmax = st->fast_bpm;
+        if (st->hr_bpm < hmin) hmin = st->hr_bpm;
+        if (st->hr_bpm > hmax) hmax = st->hr_bpm;
+    }
+    printf("  RSA +-8 %%: fast %u..%u bpm, median-of-5 %u..%u bpm\n", fmin, fmax, hmin, hmax);
+    CHECK(n > 100);
+    CHECK_NEAR(fsum / n, 70, 3);
+    CHECK(fmax - fmin >= 8);
+    CHECK((fmax - fmin) * 2 >= 3 * (hmax - hmin));
+    acq_stop();
+    sim_set_thumbs(false);
+}
+
 /* Strong mains pickup (a debugger tying the card to mains ground on the
  * bench): the hum warning after ACQ_HUM_ON_MS, gone again ACQ_HUM_OFF_MS
  * after it drops; ordinary hum never raises it. */
@@ -513,6 +552,7 @@ int main(void)
     RUN(fast_restore_policy);
     RUN(restore_slow_off);
     RUN(mains_hum_warning);
+    RUN(fast_rate_follows_rsa);
     RUN(ppg_session);
     RUN(ppg_pulse_timeout);
     RUN(both_pat);

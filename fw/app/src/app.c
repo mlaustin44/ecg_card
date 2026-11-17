@@ -139,6 +139,7 @@ static struct {
     bool have_session;
     acq_summary_t last;
     uint8_t log_gain_sw;    /* acq gain_switches already logged */
+    uint32_t hrg_ms;        /* last HR graph point */
     bool log_hum;           /* acq hum already logged */
 
     /* battery */
@@ -693,6 +694,8 @@ static uint8_t start_session(ui_mode_t mode)
         log_s(" auto");
     S.log_gain_sw = 0;
     S.log_hum = false;
+    ui_hrgraph_reset();
+    S.hrg_ms = S.now;
     if (c.ecg) {
         static const char *const rld_names[] = {"both", "left", "right", "off"};
         static const char *const restore_names[] = {"fast", "slow", "off"};
@@ -937,6 +940,13 @@ static void do_action(const nav_result_t *r)
         break;
     case NAV_SET_NEXT:
         S.cursor++;
+        redraw();
+        break;
+    case NAV_VIEW_TOGGLE:
+        /* saved like a Settings change, after the measurement */
+        S.settings.view = S.settings.view == VIEW_TRACE ? VIEW_HR_GRAPH : VIEW_TRACE;
+        S.dirty = true;
+        S.dirty_ms = S.now;
         redraw();
         break;
     case NAV_MEAS_END:
@@ -1408,6 +1418,13 @@ static void build_model(void)
         l->elapsed_s = secs_u16(st->running_ms);
         l->settle_pct = st->settle_pct;
         l->hum = mode_has_ecg(S.mode) && st->hum;
+        l->fast_bpm = st->fast_bpm;
+        /* HR graph: one point per UI_HRG_STEP_MS from the first RUNNING on
+         * (0 while not running: a gap) */
+        if (S.ever_running && S.now - S.hrg_ms >= UI_HRG_STEP_MS) {
+            S.hrg_ms = S.now - (S.now - S.hrg_ms) % UI_HRG_STEP_MS;
+            ui_hrgraph_push(st->settled ? st->fast_bpm : 0u);
+        }
         /* ECG trace scale: the median QRS (0 until the first beats) */
         ui_trace_ecg_ref(mode_has_ecg(S.mode) ? st->qrs_uv : 0u, st->qrs_neg);
     }

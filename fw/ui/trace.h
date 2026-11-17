@@ -57,6 +57,12 @@ extern const uint16_t trace_ecg_steps_uv[ECG_STEPS];
 uint16_t trace_bar_uv(void);
 int trace_bar_px(int h);
 
+/* Heart-rate graph (ui_hrgraph_push): rows y0 .. y0+h-1, the range labels
+ * at the right edge. Returns the range drawn (lo, hi bpm; 0 / 0 = empty). */
+void hrgraph_draw(int y0, int h, uint16_t *lo, uint16_t *hi);
+/* Points currently held (tests). */
+uint16_t hrgraph_count(void);
+
 /* Draw trace t into rows y0 .. y0+h-1 across the full width, 2 x 2 pen. */
 void trace_draw(ui_trace_t t, int y0, int h);
 

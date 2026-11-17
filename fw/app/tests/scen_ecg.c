@@ -3,6 +3,7 @@
 
 #include "acq.h"
 #include "scen.h"
+#include "trace.h"
 
 static void to_ecg_card(void)
 {
@@ -186,6 +187,33 @@ TEST(no_contact_timeout_and_abort)
     CHECK_EQ(scen.body_en_outside_session, 0);
 }
 
+/* BUTTON2 on the live ECG screen: trace <-> trace + HR graph (the fast
+ * rate); the choice is a setting, saved after the measurement. */
+TEST(live_view_toggle)
+{
+    scen_boot(false);
+    testsrc_cfg_t tc = testsrc_defaults();
+    testsrc_install(&tc);
+    to_ecg_card();
+    arm_and_run();
+    CHECK_EQ(app_settings()->view, VIEW_TRACE);
+    scen_tap(2);
+    CHECK_EQ(scen_screen(), UI_SCREEN_ECG); /* still measuring */
+    CHECK_EQ(app_settings()->view, VIEW_HR_GRAPH);
+    CHECK_EQ(scen_m()->settings.view, VIEW_HR_GRAPH);
+    scen_run_ms(8000);
+    CHECK_NEAR(scen_m()->live.fast_bpm, tc.hr_bpm, 8);
+    CHECK(hrgraph_count() >= 8000 / UI_HRG_STEP_MS - 2);
+    scen_shot("ecg_running_hr_graph");
+    scen_tap(1); /* end: summary */
+    CHECK_EQ(scen_screen(), UI_SCREEN_SUMMARY);
+    sim_set_thumbs(false);
+    scen_run_ms(4000); /* idle: the setting is saved */
+    scen_reboot();
+    scen_run_ms(3000);
+    CHECK_EQ(app_settings()->view, VIEW_HR_GRAPH);
+}
+
 static bool is_gain_hi(void) { return sim_pin(PIN_GAIN_HI); }
 
 TEST(auto_gain_and_notch)
@@ -249,6 +277,7 @@ int main(void)
     RUN(no_contact_timeout_and_abort);
     RUN(auto_gain_and_notch);
     RUN(auto_gain_stays_low_for_large_qrs);
+    RUN(live_view_toggle);
     printf("watchdog resets %u, violations %zu\n", (unsigned)sim_facts()->wdt_resets,
            sim_violation_count());
     return TEST_RESULT();

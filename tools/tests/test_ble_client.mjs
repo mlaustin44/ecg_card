@@ -198,8 +198,8 @@ test("command encoders (LINK_CMD payloads)", () => {
   assert.equal(C.describeCommand(C.cmdStart(2)), "START PPG");
   for (const b of [C.cmdStart(1), C.cmdStop(), C.cmdSet(0, 0), C.cmdSetTime(0, 0), C.cmdGetStatus()]) assert.ok(b.length >= 1 && b.length <= C.CMD_MAX_LEN);
   // settings.h enum sizes, item numbers and the items refused (BUSY) during a session
-  assert.deepEqual(C.SETTINGS.map((s) => s.options.length), [3, 3, 4, 3, 3, 2, 3]);
-  assert.deepEqual(C.SETTINGS.map((s) => s.item), [0, 1, 2, 3, 4, 5, 6]);
+  assert.deepEqual(C.SETTINGS.map((s) => s.options.length), [3, 3, 4, 3, 3, 2, 3, 2]);
+  assert.deepEqual(C.SETTINGS.map((s) => s.item), [0, 1, 2, 3, 4, 5, 6, 7]);
   assert.deepEqual(C.SETTINGS.filter((s) => s.lockedInSession).map((s) => s.key), ["gain", "notch", "rld", "led_limit", "restore"]);
   assert.equal(C.SET_ITEM_BLE, 5);
   assert.deepEqual(Array.from(C.cmdSet(C.SET_ITEM_BLE, C.BLE_OFF)), [3, 5, 0]);

@@ -70,6 +70,7 @@ nav_result_t nav_on_button(ui_screen_t screen, uint8_t cursor, ui_mode_t live_mo
         return cursor + 1u >= SET_ITEM_COUNT ? r_goto(nav_next_page(screen)) : r_act(NAV_SET_NEXT);
     case UI_SCREEN_ECG:
     case UI_SCREEN_PPG:
+        return b1 ? r_act(NAV_MEAS_END) : r_act(NAV_VIEW_TOGGLE);
     case UI_SCREEN_BOTH:
         return b1 ? r_act(NAV_MEAS_END) : r_act(NAV_NONE);
     case UI_SCREEN_SUMMARY:

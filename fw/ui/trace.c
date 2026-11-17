@@ -306,3 +306,96 @@ void trace_draw(ui_trace_t t, int y0, int h)
         gfx_vline(x + 1, yt, yb + 1, GFX_SET);
     }
 }
+
+/* ---- heart-rate graph ----------------------------------------------------- */
+
+static uint8_t hrg_[UI_HRG_N]; /* bpm, 0 = none; ring */
+static uint16_t hrg_head, hrg_cnt;
+
+void ui_hrgraph_reset(void)
+{
+    memset(hrg_, 0, sizeof hrg_);
+    hrg_head = 0;
+    hrg_cnt = 0;
+}
+
+void ui_hrgraph_push(uint16_t bpm)
+{
+    hrg_[hrg_head] = (uint8_t)(bpm > 250u ? 250u : bpm);
+    hrg_head = (uint16_t)((hrg_head + 1u) % UI_HRG_N);
+    if (hrg_cnt < UI_HRG_N)
+        hrg_cnt++;
+}
+
+uint16_t hrgraph_count(void) { return hrg_cnt; }
+
+static void u_str(char *b, unsigned v)
+{
+    char t[4];
+    int n = 0;
+    do {
+        t[n++] = (char)('0' + v % 10u);
+        v /= 10u;
+    } while (v && n < 3);
+    while (n)
+        *b++ = t[--n];
+    *b = 0;
+}
+
+void hrgraph_draw(int y0, int h, uint16_t *lo_out, uint16_t *hi_out)
+{
+    unsigned mn = 255, mx = 0;
+    for (uint16_t k = 0; k < hrg_cnt; k++) {
+        unsigned v = hrg_[(hrg_head + UI_HRG_N - hrg_cnt + k) % UI_HRG_N];
+        if (!v)
+            continue;
+        if (v < mn)
+            mn = v;
+        if (v > mx)
+            mx = v;
+    }
+    if (lo_out)
+        *lo_out = 0;
+    if (hi_out)
+        *hi_out = 0;
+    if (h < 4)
+        return;
+    if (mx == 0) {
+        gfx_dotted_hline(0, (int)UI_HRG_N - 1, y0 + h / 2, 4);
+        return;
+    }
+    /* range: 5-bpm steps around the data, at least 10 bpm */
+    unsigned lo = mn >= 1u ? (mn - 1u) / 5u * 5u : 0u;
+    unsigned hi = (mx + 5u) / 5u * 5u;
+    while (hi - lo < 10u) {
+        if (lo >= 5u)
+            lo -= 5u;
+        hi += 5u;
+    }
+    int x0 = (int)UI_HRG_N - (int)hrg_cnt; /* newest at the right */
+    int px = -1, py = 0;
+    for (uint16_t k = 0; k < hrg_cnt; k++) {
+        unsigned v = hrg_[(hrg_head + UI_HRG_N - hrg_cnt + k) % UI_HRG_N];
+        int x = x0 + k;
+        if (!v) {
+            px = -1; /* a gap */
+            continue;
+        }
+        int y = y0 + (h - 1) - (int)((v - lo) * (unsigned)(h - 1) / (hi - lo));
+        if (px >= 0)
+            gfx_line(px, py, x, y, GFX_SET);
+        else
+            gfx_pixel(x, y, GFX_SET);
+        px = x;
+        py = y;
+    }
+    char b[4];
+    u_str(b, hi);
+    gfx_text(OLED_W, y0, b, TXT_RIGHT);
+    u_str(b, lo);
+    gfx_text(OLED_W, y0 + h - FONT5_H, b, TXT_RIGHT);
+    if (lo_out)
+        *lo_out = (uint16_t)lo;
+    if (hi_out)
+        *hi_out = (uint16_t)hi;
+}

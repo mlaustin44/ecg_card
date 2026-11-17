@@ -5,7 +5,8 @@
  * Buttons (handled by the app, shown here so the UI can draw hints):
  *   BUTTON1 short  enter / start the shown page; in Settings: change value;
  *                  during a measurement: end it and show the summary
- *   BUTTON2 short  next page; in Settings: next item
+ *   BUTTON2 short  next page; in Settings: next item; on the ECG and Pulse
+ *                  live screens: Live view trace <-> trace + HR graph
  *   BUTTON2 long   back to Home
  *   BUTTON1 long   power off (2 s)
  *   both, on About: Diagnostics
@@ -86,6 +87,7 @@ typedef struct {
     uint16_t elapsed_s;      /* time in UI_MEAS_RUNNING */
     uint8_t  settle_pct;     /* 0..100 during UI_MEAS_SETTLING */
     bool     hum;            /* ECG: strong mains pickup, "unplug cables" */
+    uint16_t fast_bpm;       /* 2-beat rate for the HR-graph view, 0 = n/a */
 } ui_live_t;
 
 typedef struct {
@@ -168,5 +170,14 @@ void ui_trace_gap(ui_trace_t trace, uint16_t n);
  * whether the R waves point down. Applied from the next sweep; kept by
  * ui_trace_reset() (set 0 at the start of a measurement). */
 void ui_trace_ecg_ref(uint16_t qrs_uv, bool r_down);
+
+/* Heart-rate graph (Live view "+HR graph"): the app pushes the fast rate
+ * (acq fast_bpm; 0 = none: a gap) every UI_HRG_STEP_MS while measuring; the
+ * graph shows the last UI_HRG_N points (about 32 s), newest on the right,
+ * scaled to their range (at least 10 bpm). */
+#define UI_HRG_STEP_MS 300u
+#define UI_HRG_N       108u
+void ui_hrgraph_reset(void);
+void ui_hrgraph_push(uint16_t bpm);
 
 #endif

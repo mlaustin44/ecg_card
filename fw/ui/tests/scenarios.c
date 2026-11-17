@@ -224,6 +224,7 @@ SC(settings_4) { settings_at(m, 4); }
 SC(settings_5) { settings_at(m, 5); m->ble_state = UI_BLE_ADVERTISING; }
 SC(settings_5_off) { settings_at(m, 5); m->settings.ble = BLE_OFF; }
 SC(settings_6) { settings_at(m, 6); m->settings.restore = RESTORE_SLOW; }
+SC(settings_7) { settings_at(m, 7); m->settings.view = VIEW_HR_GRAPH; }
 SC(settings_alt)
 {
     settings_at(m, 2);
@@ -293,6 +294,16 @@ SC(ecg_run_205)
     m->live.gain_hi = true;
     m->live.quality = 3;
 }
+/* Live view "+HR graph": 32 s of a 70 +- 6 bpm rate breathing every 5 s (RSA) */
+static void rsa_graph(void)
+{
+    ui_hrgraph_reset();
+    for (unsigned k = 0; k < UI_HRG_N; k++)
+        ui_hrgraph_push((uint16_t)lrint(70.0 + 6.0 * sin(2.0 * PI_ * k * UI_HRG_STEP_MS / 5000.0)));
+}
+SC(ecg_run_hr) { scen_defaults(m); m->settings.view = VIEW_HR_GRAPH; run_live(m, UI_SCREEN_ECG, &SIG_NORMAL, 7300); rsa_graph(); m->live.fast_bpm = 74; }
+SC(ppg_run_hr) { scen_defaults(m); m->settings.view = VIEW_HR_GRAPH; run_live(m, UI_SCREEN_PPG, &SIG_NORMAL, 7300); rsa_graph(); m->live.fast_bpm = 66; }
+SC(ecg_run_hr_start) { scen_defaults(m); m->settings.view = VIEW_HR_GRAPH; run_live(m, UI_SCREEN_ECG, &SIG_NORMAL, 7300); ui_hrgraph_reset(); for (int k = 0; k < 20; k++) ui_hrgraph_push(k < 6 ? 0 : 72); m->live.fast_bpm = 0; }
 SC(ecg_run_big) { scen_defaults(m); run_live(m, UI_SCREEN_ECG, &SIG_BIG, 9500); m->usb_present = false; }
 SC(ecg_run_tiny)
 {
@@ -415,12 +426,12 @@ const scenario_t scenarios[] = {
     E(card_ecg), E(card_ecg_usb), E(card_ecg_low), E(card_ppg), E(card_ppg_usb), E(card_both),
     E(card_ecg_ble_conn), E(card_ppg_ble_fault_usb),
     E(settings_0), E(settings_1), E(settings_2), E(settings_3), E(settings_4), E(settings_5),
-    E(settings_5_off), E(settings_6), E(settings_alt),
+    E(settings_5_off), E(settings_6), E(settings_7), E(settings_alt),
     E(about), E(about_radio), E(diag), E(diag_full),
     E(ecg_wait_a), E(ecg_wait_b), E(ecg_wait_c), E(ppg_wait), E(both_wait),
     E(ecg_settling), E(ecg_settling_0), E(ecg_wait_hum), E(ecg_settling_hum), E(ppg_settling),
     E(ecg_usb), E(both_usb), E(ecg_fault), E(ecg_fault_null),
-    E(ecg_run), E(ecg_run_205), E(ecg_run_big), E(ecg_run_tiny), E(ecg_run_start),
+    E(ecg_run), E(ecg_run_hr), E(ppg_run_hr), E(ecg_run_hr_start), E(ecg_run_205), E(ecg_run_big), E(ecg_run_tiny), E(ecg_run_start),
     E(ecg_run_1s5), E(ecg_run_6s),
     E(ppg_run), E(ppg_run_start), E(both_run), E(both_run_205), E(both_run_start),
     E(sum_ecg), E(sum_ecg_usb), E(sum_ppg), E(sum_both), E(sum_both_max), E(sum_both_na),

@@ -378,6 +378,17 @@ application tests the display itself in stage 5.
   `ECG_REPLAY=<file> build/host/fw/app/app_scen_replay` (state changes, blips, auto-gain, the
   OLED scale, screenshots in `build/app_shots/replay_*.png`). Keep recordings out of git.
 
+- **Live view** (Settings, or BUTTON2 short on the ECG / Pulse live screen): `Trace`, or
+  `+HR graph`: the waveform over a 32 s heart-rate graph with the fast rate (mean of the last 2
+  beat intervals; pulse-to-pulse in Pulse mode). Breathing shows as waves (respiratory sinus
+  arrhythmia); slow breathing (about 6/min) gives the largest swing.
+- **One LED glows dimly in ECG mode: expected on this board.** ANA_EN powers the LED sink
+  op-amps (U11, TLV9002) and the disabled TPS61040 still passes the battery to VLED, so with
+  the setpoint at 0 V (LED_BLANK high, DAC off) a channel with a positive input offset
+  (0.4 mV typ, 1.6 mV max) sinks offset / 8.2 ohm = 50-200 uA. Check: TP12 / TP13 read that
+  offset. Harmless; to remove it, about 680k from `+3V3_SW` to each sink's feedback node
+  (R82 / C71 and R83 / C72 junctions) biases both sinks ~5 mV off.
+
 ### ECG gain rework (R35 / R68)
 
 As built the second stage gives 558x / 1098x (input windows +-2.9 / +-1.5 mV): too narrow for

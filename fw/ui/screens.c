@@ -357,7 +357,7 @@ static void screen_card(const ui_model_t *m)
 }
 
 static const char *const set_names[SET_ITEM_COUNT] = {
-    "Gain", "Mains notch", "RLD", "LED limit", "Sweep", "Bluetooth", "Restore",
+    "Gain", "Mains notch", "RLD", "LED limit", "Sweep", "Bluetooth", "Restore", "Live view",
 };
 static const char *const gain_vals[] = {"Auto", ECG_GAIN_LO_TXT, ECG_GAIN_HI_TXT};
 static const char *const notch_vals[] = {"Auto", "50Hz", "60Hz"};
@@ -366,6 +366,7 @@ static const char *const led_vals[LED_LIMIT_COUNT] = {"5mA", "10mA", "15mA"};
 static const char *const sweep_vals[] = {"1.5s", "3s", "6s"};
 static const char *const ble_vals[] = {"Off", "On"};
 static const char *const restore_vals[] = {"Fast", "Slow", "Off"};
+static const char *const view_vals[] = {"Trace", "+HR graph"};
 
 static const char *setting_value(const settings_t *s, unsigned item)
 {
@@ -377,6 +378,7 @@ static const char *setting_value(const settings_t *s, unsigned item)
     case SET_ITEM_SWEEP: return s->sweep < 3 ? sweep_vals[s->sweep] : "?";
     case SET_ITEM_BLE: return s->ble < 2 ? ble_vals[s->ble] : "?";
     case SET_ITEM_RESTORE: return s->restore < 3 ? restore_vals[s->restore] : "?";
+    case SET_ITEM_VIEW: return s->view < 2 ? view_vals[s->view] : "?";
     default: return "?";
     }
 }
@@ -571,9 +573,37 @@ static void scale_bar(int y0, int h)
     gfx_hline(OLED_W - 3, OLED_W - 1, y0 + len - 1, GFX_SET);
 }
 
+/* Live view "+HR graph" (ECG, Pulse): the fast 2-beat rate, the waveform in
+ * the upper half and the scrolling heart-rate graph below (breathing shows
+ * as waves: respiratory sinus arrhythmia). */
+static void live_running_hr(const ui_model_t *m)
+{
+    char b[12];
+    bool ecg = m->screen == UI_SCREEN_ECG;
+    live_icons(m, ecg);
+    int x = live_rate(m, m->live.fast_bpm);
+    gfx_text(x + 2, 8, "bpm", TXT_LEFT);
+    const int h1 = 23;
+    if (ecg) {
+        scale_label(b, trace_bar_uv());
+        gfx_text(OLED_W, 8, b, TXT_RIGHT);
+        trace_draw(UI_TRACE_ECG, TRACE_Y, h1);
+        scale_bar(TRACE_Y, h1);
+    } else {
+        trace_draw(UI_TRACE_PPG, TRACE_Y, h1);
+    }
+    gfx_dotted_hline(0, OLED_W - 1, TRACE_Y + h1, 4);
+    hrgraph_draw(TRACE_Y + h1 + 2, OLED_H - TRACE_Y - h1 - 2, NULL, NULL);
+}
+
 static void live_running(const ui_model_t *m)
 {
     char b[12];
+    if (m->settings.view == VIEW_HR_GRAPH &&
+        (m->screen == UI_SCREEN_ECG || m->screen == UI_SCREEN_PPG)) {
+        live_running_hr(m);
+        return;
+    }
     int icons_x = live_icons(m, m->screen == UI_SCREEN_ECG);
     if (m->screen == UI_SCREEN_ECG) {
         int x = live_rate(m, m->live.hr_bpm);

@@ -23,7 +23,7 @@ TEST(roundtrip_nv)
     settings_t s, o;
     CHECK(settings_load(&o) == SETTINGS_BLANK);
     CHECK(memcmp(&o, &D, sizeof o) == 0);
-    s = (settings_t){GAIN_HI, NOTCH_50, RLD_RIGHT, LED_LIMIT_5MA, SWEEP_6S, BLE_OFF, RESTORE_OFF};
+    s = (settings_t){GAIN_HI, NOTCH_50, RLD_RIGHT, LED_LIMIT_5MA, SWEEP_6S, BLE_OFF, RESTORE_OFF, VIEW_HR_GRAPH};
     CHECK(settings_save(&s) == HAL_OK);
     CHECK(settings_load(&o) == SETTINGS_LOADED);
     CHECK(memcmp(&o, &s, sizeof o) == 0);
@@ -31,7 +31,7 @@ TEST(roundtrip_nv)
 
 TEST(corruption)
 {
-    settings_t s = {GAIN_LO, NOTCH_60, RLD_OFF, LED_LIMIT_10MA, SWEEP_1S5, BLE_ON, RESTORE_SLOW}, o;
+    settings_t s = {GAIN_LO, NOTCH_60, RLD_OFF, LED_LIMIT_10MA, SWEEP_1S5, BLE_ON, RESTORE_SLOW, VIEW_HR_GRAPH}, o;
     uint8_t b[SETTINGS_BLOB_LEN];
     settings_encode(&s, b);
     CHECK(settings_decode(b, &o) == SETTINGS_LOADED);
@@ -108,7 +108,33 @@ TEST(v3_migration)
     CHECK_EQ(o.sweep, SWEEP_1S5);
     CHECK_EQ(o.ble, BLE_OFF);
     CHECK_EQ(o.restore, RESTORE_OFF);
+    CHECK_EQ(o.view, VIEW_TRACE);
     b[6] = RLD_LEFT; /* v3 with a bad CRC */
+    CHECK(settings_decode(b, &o) == SETTINGS_CORRUPT);
+}
+
+/* A blob written by the previous build (v4, no view item) keeps its values;
+ * the live view comes up as Trace. */
+TEST(v4_migration)
+{
+    uint8_t b[SETTINGS_BLOB_LEN];
+    memset(b, 0xFF, sizeof b);
+    b[0] = (uint8_t)SETTINGS_MAGIC;
+    b[1] = (uint8_t)(SETTINGS_MAGIC >> 8);
+    b[2] = 4;
+    b[3] = 7;
+    b[4] = GAIN_HI; b[5] = NOTCH_50; b[6] = RLD_LEFT; b[7] = LED_LIMIT_10MA; b[8] = SWEEP_6S;
+    b[9] = BLE_ON; b[10] = RESTORE_SLOW;
+    uint16_t c = crc16_ccitt_false(b, 11, 0xFFFF);
+    b[11] = (uint8_t)c;
+    b[12] = (uint8_t)(c >> 8);
+    settings_t o;
+    CHECK(settings_decode(b, &o) == SETTINGS_LOADED);
+    CHECK_EQ(o.gain, GAIN_HI);
+    CHECK_EQ(o.rld, RLD_LEFT);
+    CHECK_EQ(o.restore, RESTORE_SLOW);
+    CHECK_EQ(o.view, VIEW_TRACE);
+    b[10] = RESTORE_OFF; /* v4 with a bad CRC */
     CHECK(settings_decode(b, &o) == SETTINGS_CORRUPT);
 }
 
@@ -162,6 +188,7 @@ int main(void)
     RUN(cycle);
     RUN(v2_migration);
     RUN(v3_migration);
+    RUN(v4_migration);
     RUN(set_validation);
     return TEST_RESULT();
 }

@@ -26,6 +26,7 @@ typedef enum {
     NAV_SET_CHANGE,    /* cycle the selected setting */
     NAV_SET_NEXT,      /* next settings item (stays on Settings) */
     NAV_MEAS_END,      /* end the measurement: summary or card */
+    NAV_VIEW_TOGGLE,   /* ECG / Pulse live screen: trace <-> trace + HR graph */
     NAV_HOME_ABORT,    /* to Home; a measurement ends without summary */
     NAV_POWER_OFF,
     NAV_DIAG_ENTER,
