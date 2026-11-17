@@ -3,20 +3,22 @@ static const golden_t golden[] = {
     {"home", 0xB283D73Au},
     {"card_ecg", 0xA97519D0u},
     {"card_both", 0xA81F321Eu},
-    {"settings_2", 0xD60729B9u}, /* scroll arrow: Settings has 8 rows */
+    {"settings_2", 0x422050B9u}, /* scroll arrow: Settings has 8 rows */
     {"about", 0x4AE6F624u},
     {"about_radio", 0x28B7B439u},
-    {"settings_5", 0x4C8A0141u}, /* down arrow: Restore below */
-    {"settings_6", 0xC404DAFFu}, /* down arrow: Live view below */
-    {"settings_7", 0x5158E6CEu},
+    {"settings_5", 0x46981B81u}, /* down arrow: Restore below */
+    {"settings_6", 0xC9F6C0BFu}, /* down arrow: Live view below */
+    {"settings_7", 0x1DADADEAu},
+    {"settings_exit", 0xB3CF4A72u},
+    {"settings_closed", 0x0246485Du},
     {"ecg_run_hr", 0xE2A855B7u},
     {"ppg_run_hr", 0xF96DD051u},
     {"home_ble_adv", 0xD5BF89BAu},
     {"home_ble_conn", 0x025A0DD4u},
     {"card_ppg_ble_fault_usb", 0x67FBCD68u},
     {"diag", 0xD759853Bu},
-    {"ecg_wait_c", 0x2C75A2A4u},
-    {"ecg_settling", 0xDEAA1BA5u},
+    {"ecg_wait_c", 0x0E76A85Au},
+    {"ecg_settling", 0x2CE9BD66u},
     {"ecg_run", 0x8326C9F3u},
     {"ecg_run_205", 0x92C4AE7Au},
     {"ppg_run", 0xA263A677u},

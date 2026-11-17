@@ -65,9 +65,11 @@ nav_result_t nav_on_button(ui_screen_t screen, uint8_t cursor, ui_mode_t live_mo
     case UI_SCREEN_BOTH_CARD:
         return b1 ? r_start(UI_MODE_BOTH) : r_goto(nav_next_page(screen));
     case UI_SCREEN_SETTINGS:
-        if (b1)
-            return r_act(NAV_SET_CHANGE);
-        return cursor + 1u >= SET_ITEM_COUNT ? r_goto(nav_next_page(screen)) : r_act(NAV_SET_NEXT);
+        if (cursor > UI_SET_EXIT) /* closed */
+            return b1 ? r_act(NAV_SET_OPEN) : r_goto(nav_next_page(screen));
+        if (b2)
+            return r_act(NAV_SET_NEXT);
+        return cursor == UI_SET_EXIT ? r_act(NAV_SET_CLOSE) : r_act(NAV_SET_CHANGE);
     case UI_SCREEN_ECG:
     case UI_SCREEN_PPG:
         return b1 ? r_act(NAV_MEAS_END) : r_act(NAV_VIEW_TOGGLE);

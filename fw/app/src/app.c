@@ -239,8 +239,7 @@ static void go_screen(ui_screen_t s)
     if (S.screen == UI_SCREEN_DIAG && s != UI_SCREEN_DIAG)
         diag_exit();
     S.screen = s;
-    if (s != UI_SCREEN_SETTINGS)
-        S.cursor = 0;
+    S.cursor = UI_SET_CLOSED; /* Settings: shown closed */
     redraw();
 }
 
@@ -939,7 +938,17 @@ static void do_action(const nav_result_t *r)
         redraw();
         break;
     case NAV_SET_NEXT:
-        S.cursor++;
+        S.cursor = S.cursor >= UI_SET_EXIT ? 0u : (uint8_t)(S.cursor + 1u);
+        redraw();
+        break;
+    case NAV_SET_OPEN:
+        S.cursor = 0;
+        redraw();
+        break;
+    case NAV_SET_CLOSE:
+        if (S.dirty)
+            S.dirty_ms = S.now - SETTINGS_SAVE_IDLE_MS; /* save soon */
+        S.cursor = UI_SET_CLOSED;
         redraw();
         break;
     case NAV_VIEW_TOGGLE:
@@ -1025,8 +1034,12 @@ static void handle_buttons(void)
         nav_result_t r = nav_on_button(S.screen, S.cursor, S.mode, e);
         do_action(&r);
     }
-    if (buttons_any_down())
+    if (buttons_any_down()) {
         S.last_input_ms = S.now;
+        /* a thumb comes off a pad to press: ride through it (Live view) */
+        if (nav_is_live(S.screen) && acq_active())
+            acq_user_input(S.now);
+    }
     if (buttons_fault() && !S.btn_fault_shown && !splash_on()) { /* after the boot screen */
         S.btn_fault_shown = true;
         S.overlay_text = !hal_pin_read(PIN_BUTTON1) ? "Button 1 stuck down: it is ignored"
@@ -1144,7 +1157,7 @@ static void wake_up(uint32_t cause)
     bool usb = (cause & (HAL_EV_USB_PLUGGED | HAL_EV_USB_REMOVED)) != 0;
     S.screen = (cause & HAL_EV_BUTTON) && !usb ? UI_SCREEN_BOOT : UI_SCREEN_HOME;
     S.splash_ms = S.now;
-    S.cursor = 0;
+    S.cursor = UI_SET_CLOSED;
     S.overlay = UI_OVERLAY_NONE;
     S.last_input_ms = S.now;
     S.prev_step_ms = S.now;

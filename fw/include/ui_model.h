@@ -46,6 +46,12 @@ typedef enum {
 
 #define UI_CAROUSEL_PAGES 6 /* HOME .. ABOUT */
 
+/* Settings page cursor: UI_SET_CLOSED as the carousel shows the page (values
+ * listed, BUTTON1 opens it); open, an item 0 .. SET_ITEM_COUNT - 1 or the
+ * "Exit" row after the last one (BUTTON2 cycles round, BUTTON1 closes). */
+#define UI_SET_EXIT   ((uint8_t)SET_ITEM_COUNT)
+#define UI_SET_CLOSED 0xFFu
+
 typedef enum {
     UI_MEAS_WAIT_CONTACT, /* armed, "place thumbs" */
     UI_MEAS_SETTLING,     /* contact made, front end settling */
@@ -132,7 +138,7 @@ typedef struct {
 
     /* UI_SCREEN_SETTINGS */
     settings_t settings;
-    uint8_t settings_cursor; /* settings_item_t */
+    uint8_t settings_cursor; /* settings_item_t, UI_SET_EXIT or UI_SET_CLOSED */
 
     /* UI_SCREEN_ABOUT, UI_SCREEN_BOOT */
     const char *fw_version;  /* e.g. "0.1.0" */

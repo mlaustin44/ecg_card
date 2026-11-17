@@ -16,13 +16,28 @@ TEST(carousel)
         CHECK_EQ(r.act, NAV_GOTO);
         CHECK_EQ(r.screen, order[(i + 1) % 6]);
     }
-    /* Settings: next item until the last, then the next page */
-    for (uint8_t c = 0; c + 1 < SET_ITEM_COUNT; c++)
-        CHECK_EQ(nav_on_button(UI_SCREEN_SETTINGS, c, UI_MODE_ECG, BTN_EV_BTN2_SHORT).act, NAV_SET_NEXT);
-    nav_result_t r = nav_on_button(UI_SCREEN_SETTINGS, SET_ITEM_COUNT - 1, UI_MODE_ECG, BTN_EV_BTN2_SHORT);
+}
+
+/* Settings: closed as the carousel shows it (BUTTON2 next page, BUTTON1
+ * opens); open, BUTTON2 goes round the items and "Exit", BUTTON1 changes the
+ * value or, on "Exit", closes. */
+TEST(settings_open_close)
+{
+    nav_result_t r = nav_on_button(UI_SCREEN_SETTINGS, UI_SET_CLOSED, UI_MODE_ECG, BTN_EV_BTN2_SHORT);
     CHECK_EQ(r.act, NAV_GOTO);
     CHECK_EQ(r.screen, UI_SCREEN_ABOUT);
-    CHECK_EQ(on(UI_SCREEN_SETTINGS, BTN_EV_BTN1_SHORT).act, NAV_SET_CHANGE);
+    CHECK_EQ(nav_on_button(UI_SCREEN_SETTINGS, UI_SET_CLOSED, UI_MODE_ECG, BTN_EV_BTN1_SHORT).act,
+             NAV_SET_OPEN);
+    for (uint8_t c = 0; c <= UI_SET_EXIT; c++)
+        CHECK_EQ(nav_on_button(UI_SCREEN_SETTINGS, c, UI_MODE_ECG, BTN_EV_BTN2_SHORT).act, NAV_SET_NEXT);
+    for (uint8_t c = 0; c < SET_ITEM_COUNT; c++)
+        CHECK_EQ(nav_on_button(UI_SCREEN_SETTINGS, c, UI_MODE_ECG, BTN_EV_BTN1_SHORT).act, NAV_SET_CHANGE);
+    CHECK_EQ(nav_on_button(UI_SCREEN_SETTINGS, UI_SET_EXIT, UI_MODE_ECG, BTN_EV_BTN1_SHORT).act,
+             NAV_SET_CLOSE);
+    /* Home from inside, as from anywhere */
+    r = nav_on_button(UI_SCREEN_SETTINGS, 2, UI_MODE_ECG, BTN_EV_BTN2_LONG);
+    CHECK_EQ(r.act, NAV_GOTO);
+    CHECK_EQ(r.screen, UI_SCREEN_HOME);
 }
 
 TEST(start_and_end)
@@ -61,6 +76,7 @@ TEST(global)
 int main(void)
 {
     RUN(carousel);
+    RUN(settings_open_close);
     RUN(start_and_end);
     RUN(global);
     return TEST_RESULT();

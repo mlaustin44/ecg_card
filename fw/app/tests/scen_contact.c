@@ -413,6 +413,129 @@ TEST(both_mode_log)
     sim_set_finger(false);
 }
 
+/* A thumb comes off its pad to press BUTTON2 (Live view) and goes back
+ * 2.5 s later with a new 150 mV offset step (~2 s on a rail): with the press
+ * no "Hold still" and no end. The same lift without a press is about 5 s
+ * without a stable signal: the session ends (what made the toggle unusable). */
+TEST(button_grace_running)
+{
+    for (int press = 1; press >= 0; press--) {
+        scen_boot(false);
+        hw_world();
+        sim_ecg_set_float_model(SIM_FLOAT_EXCURSIONS);
+        to_ecg_card();
+        watch_reset();
+        arm();
+        sim_set_thumbs(true);
+        W.stop_at = ACQ_ECG_RUN;
+        CHECK(run_watch(8000));
+        W.stop_at = (acq_ecg_state_t)255;
+        run_watch(5000);
+        uint32_t beats0 = acq_status()->ecg_beats;
+        sim_ecg_set_float_excursions(1.0, 20, 300, 5);
+        sim_set_thumbs(false);
+        run_watch(400);
+        if (press)
+            scen_tap(2);
+        else
+            run_watch(160);
+        run_watch(2000);
+        sim_set_thumbs(true);
+        uint64_t t_back = sim_now_ms();
+        uint32_t clean_ms = 0;
+        while (clean_ms < 500 && sim_now_ms() - t_back < 8000) {
+            run_watch(10);
+            const acq_status_t *q = acq_status();
+            clean_ms = q->ecg_state == ACQ_ECG_RUN && !q->blip ? clean_ms + 10 : 0;
+        }
+        printf("  thumb off 2.5 s %s: %s %llu ms after it is back, %u hold\n",
+               press ? "to press BUTTON2" : "(no press)",
+               clean_ms >= 500 ? "clean again" : "not running",
+               (unsigned long long)(sim_now_ms() - t_back - clean_ms), (unsigned)W.to_hold);
+        if (!press) {
+            CHECK(W.t_end != 0 || W.to_hold >= 1); /* the grace is what kept it */
+            sim_set_thumbs(false);
+            break;
+        }
+        CHECK_EQ(app_settings()->view, VIEW_HR_GRAPH);
+        CHECK_EQ(W.to_hold, 0);
+        CHECK(W.t_end == 0);
+        CHECK_EQ(acq_status()->ecg_state, ACQ_ECG_RUN);
+        CHECK(sim_now_ms() - t_back < 4000);
+        run_watch(8000);
+        CHECK(acq_status()->ecg_beats > beats0 + 8);
+        CHECK_EQ(scen_screen(), UI_SCREEN_ECG);
+        scen_tap(1);
+        CHECK(scen_m()->summary.valid);
+        sim_set_thumbs(false);
+    }
+}
+
+/* The same while settling: the settling pauses and goes on instead of
+ * starting over; the Live view is shown on the screen. */
+TEST(button_grace_settling)
+{
+    scen_boot(false);
+    hw_world();
+    sim_ecg_set_float_model(SIM_FLOAT_EXCURSIONS);
+    to_ecg_card();
+    watch_reset();
+    arm();
+    sim_set_thumbs(true);
+    W.stop_at = ACQ_ECG_SETTLE;
+    CHECK(run_watch(5000));
+    W.stop_at = (acq_ecg_state_t)255;
+    while (acq_status()->settle_pct < 30 && acq_status()->ecg_state == ACQ_ECG_SETTLE)
+        run_watch(10);
+    uint8_t pct = acq_status()->settle_pct;
+    sim_set_thumbs(false);
+    run_watch(400);
+    scen_tap(2);
+    CHECK_EQ(scen_m()->settings.view, VIEW_HR_GRAPH);
+    scen_shot("ecg_settling_view_hr");
+    run_watch(2000);
+    sim_set_thumbs(true);
+    run_watch(1000);
+    CHECK_EQ(acq_status()->ecg_state, ACQ_ECG_SETTLE);
+    CHECK(acq_status()->settle_pct >= pct); /* paused, not started over */
+    W.stop_at = ACQ_ECG_RUN;
+    CHECK(run_watch(6000));
+    CHECK_EQ(W.wait_after_settle, 0);
+    CHECK_EQ(W.to_settle, 1);
+    scen_tap(1);
+    sim_set_thumbs(false);
+}
+
+/* Thumb off to press, and not back: the session still ends, at most
+ * ACQ_ECG_GRACE_MS + ACQ_ECG_LOST_END_MS after the press. */
+TEST(button_grace_then_gone)
+{
+    scen_boot(false);
+    hw_world();
+    sim_ecg_set_float_model(SIM_FLOAT_EXCURSIONS);
+    to_ecg_card();
+    watch_reset();
+    arm();
+    sim_set_thumbs(true);
+    W.stop_at = ACQ_ECG_RUN;
+    CHECK(run_watch(8000));
+    W.stop_at = (acq_ecg_state_t)255;
+    run_watch(12000);
+    sim_ecg_set_float_excursions(1.0, 20, 300, 5);
+    sim_set_thumbs(false);
+    run_watch(400);
+    scen_tap(2);
+    uint64_t t_rel = sim_now_ms() - 60;
+    W.stop_on_summary = true;
+    CHECK(run_watch(ACQ_ECG_GRACE_MS + ACQ_ECG_LOST_END_MS + 1000));
+    uint64_t dt = sim_now_ms() - t_rel;
+    printf("  thumb off to press, not back: summary %llu ms after the press\n",
+           (unsigned long long)dt);
+    CHECK(dt >= ACQ_ECG_GRACE_MS);
+    CHECK(dt <= ACQ_ECG_GRACE_MS + ACQ_ECG_LOST_END_MS + 500);
+    CHECK(scen_m()->summary.valid);
+}
+
 int main(void)
 {
     RUN(touch_150mv);
@@ -422,6 +545,9 @@ int main(void)
     RUN(floating_only);
     RUN(struggle_then_hold);
     RUN(both_mode_log);
+    RUN(button_grace_running);
+    RUN(button_grace_settling);
+    RUN(button_grace_then_gone);
     printf("watchdog resets %u, violations %zu\n", (unsigned)sim_facts()->wdt_resets,
            sim_violation_count());
     return TEST_RESULT();

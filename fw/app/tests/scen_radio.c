@@ -126,7 +126,7 @@ TEST(power_up_hello_advertise)
     CHECK_EQ(scen_m()->ble_state, UI_BLE_ADVERTISING);
     scen_shot("radio_home_adv");
     /* About: radio firmware and the device name */
-    for (int i = 0; i < 4 + SET_ITEM_COUNT; i++)
+    for (int i = 0; i < 5; i++) /* past Settings (closed) */
         scen_tap(2);
     CHECK_EQ(scen_screen(), UI_SCREEN_ABOUT);
     CHECK(scen_m()->radio_fw && strcmp(scen_m()->radio_fw, "1.2.3") == 0);
@@ -472,7 +472,7 @@ TEST(refusals)
     CHECK_EQ(scen_screen(), UI_SCREEN_PPG_CARD);
     /* Diagnostics shown: BUSY */
     scen_press(2, 2100);
-    for (int i = 0; i < 4 + SET_ITEM_COUNT; i++)
+    for (int i = 0; i < 5; i++) /* past Settings (closed) */
         scen_tap(2);
     scen_press_both(2300);
     scen_run_ms(300);
@@ -559,6 +559,7 @@ TEST(ble_off_setting)
     for (int i = 0; i < 4; i++)
         scen_tap(2);
     CHECK_EQ(scen_screen(), UI_SCREEN_SETTINGS);
+    scen_tap(1); /* open */
     for (int i = 0; i < SET_ITEM_BLE; i++)
         scen_tap(2);
     CHECK_EQ(scen_m()->settings_cursor, SET_ITEM_BLE);
@@ -570,7 +571,8 @@ TEST(ble_off_setting)
     CHECK_EQ(sim_radio_info()->clean_offs, 1);
     CHECK(scen_radio_off());
     for (int i = SET_ITEM_BLE; i < SET_ITEM_COUNT; i++)
-        scen_tap(2); /* past the last item: leave Settings, saved */
+        scen_tap(2); /* to "Exit settings" */
+    scen_tap(1);    /* closed: saved */
     scen_run_ms(500);
     scen_reboot();
     scen_run_ms(3000);
@@ -581,6 +583,7 @@ TEST(ble_off_setting)
     /* the phone can turn it off as well (and the ACK goes out first) */
     for (int i = 0; i < 4; i++)
         scen_tap(2);
+    scen_tap(1); /* open */
     for (int i = 0; i < SET_ITEM_BLE; i++)
         scen_tap(2);
     scen_tap(1);
@@ -741,7 +744,7 @@ static bool on_radio_page(void)
 
 static void to_radio_page(void)
 {
-    for (int i = 0; i < 4 + SET_ITEM_COUNT; i++)
+    for (int i = 0; i < 5; i++) /* past Settings (closed) */
         scen_tap(2);
     CHECK_EQ(scen_screen(), UI_SCREEN_ABOUT);
     scen_press_both(2300);

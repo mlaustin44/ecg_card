@@ -138,12 +138,27 @@ TEST(carousel)
         CHECK_EQ(scen_screen(), order[i]);
     }
     scen_shot("settings");
-    /* Settings: BUTTON2 walks the items, then moves on to About */
-    for (int i = 0; i < SET_ITEM_COUNT - 1; i++) {
+    /* Settings, closed: BUTTON2 moves on, BUTTON1 opens; open, BUTTON2 goes
+     * round the items and "Exit settings", BUTTON1 there closes it */
+    CHECK_EQ(scen_m()->settings_cursor, UI_SET_CLOSED);
+    scen_tap(1);
+    CHECK_EQ(scen_m()->settings_cursor, 0);
+    scen_shot("settings_open");
+    for (int i = 0; i < SET_ITEM_COUNT; i++) {
         scen_tap(2);
         CHECK_EQ(scen_screen(), UI_SCREEN_SETTINGS);
     }
-    CHECK_EQ(scen_m()->settings_cursor, SET_ITEM_COUNT - 1);
+    CHECK_EQ(scen_m()->settings_cursor, UI_SET_EXIT);
+    scen_shot("settings_exit");
+    scen_tap(2); /* round to the first item */
+    CHECK_EQ(scen_m()->settings_cursor, 0);
+    for (int i = 0; i < SET_ITEM_COUNT; i++)
+        scen_tap(2);
+    const settings_t before = *app_settings();
+    scen_tap(1); /* Exit: closed, nothing changed */
+    CHECK_EQ(scen_screen(), UI_SCREEN_SETTINGS);
+    CHECK_EQ(scen_m()->settings_cursor, UI_SET_CLOSED);
+    CHECK(memcmp(&before, app_settings(), sizeof before) == 0);
     scen_tap(2);
     scen_run_ms(100);
     CHECK_EQ(scen_screen(), UI_SCREEN_ABOUT);
@@ -167,6 +182,8 @@ static void goto_settings(void)
     for (int i = 0; i < 4; i++)
         scen_tap(2);
     CHECK_EQ(scen_screen(), UI_SCREEN_SETTINGS);
+    scen_tap(1); /* open */
+    CHECK_EQ(scen_m()->settings_cursor, 0);
 }
 
 TEST(settings_persist)
@@ -227,7 +244,7 @@ TEST(diagnostics)
 {
     scen_boot(false);
     scen_run_ms(300);
-    for (int i = 0; i < 4 + SET_ITEM_COUNT; i++) /* through the Settings items */
+    for (int i = 0; i < 5; i++) /* past Settings (closed) */
         scen_tap(2);
     CHECK_EQ(scen_screen(), UI_SCREEN_ABOUT);
     scen_press_both(2300);

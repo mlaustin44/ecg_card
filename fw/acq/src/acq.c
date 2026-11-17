@@ -72,6 +72,8 @@ static struct {
     uint32_t beat_ms;        /* ... the last one */
     uint32_t nobeat_ms;      /* in-range time since the last accepted beat (or since
                               * settling completed): rail time does not count */
+    bool grace_any;          /* acq_user_input() this session */
+    uint32_t grace_until;    /* ... grace ends (ACQ_ECG_GRACE_MS after it) */
     uint16_t qrs_amp[5];     /* uV on the display path, last accepted beats */
     uint8_t qrs_n, qrs_i;
     int16_t duv[256];        /* display-path uV by stream index (QRS heights as drawn) */
@@ -233,6 +235,7 @@ bool acq_start(const acq_cfg_t *cfg)
      * replaces it (dcc_init). */
     A.dac = dsp_ppg_dcc_code(DSP_AGC_TGT_LO);
     A.ecg_state = ACQ_ECG_WAIT;
+    A.grace_any = false;
     diag_clear();
 
     /* ECG start step 2 / PPG start steps 1-3 */
@@ -678,6 +681,19 @@ static void ecg_to_run(void)
     set_settled(true);
 }
 
+void acq_user_input(uint32_t now_ms)
+{
+    A.grace_any = true;
+    A.grace_until = now_ms + ACQ_ECG_GRACE_MS;
+}
+
+/* A timestamp, moved to the end of the last button grace if that is later:
+ * contact-loss timeouts count from then. */
+static uint32_t after_grace(uint32_t t)
+{
+    return A.grace_any && (int32_t)(A.grace_until - t) > 0 ? A.grace_until : t;
+}
+
 /* The contact state machine (acq.h), once per poll on the detector state;
  * dt = ms since the previous poll. */
 static void ecg_contact_update(uint32_t now, uint8_t ev, uint32_t dt)
@@ -696,8 +712,9 @@ static void ecg_contact_update(uint32_t now, uint8_t ev, uint32_t dt)
     uint32_t rail_ms = dsp_lead_rail_samples(&A.lead) / (ECG_RAW_HZ / 1000u);
     /* floating inputs make short in-range excursions that restart a rail
      * run, so loss of contact is judged on the time without a stable signal */
-    uint32_t unstable_ms = now - A.last_stable_ms;
-    if (!railed)
+    bool grace = A.grace_any && (int32_t)(now - A.grace_until) < 0;
+    uint32_t unstable_ms = grace ? 0u : now - after_grace(A.last_stable_ms);
+    if (!railed && !grace)
         A.nobeat_ms += dt; /* a signal is there: beats should be in it */
     A.st.blip = false;
     switch (A.ecg_state) {
@@ -716,12 +733,14 @@ static void ecg_contact_update(uint32_t now, uint8_t ev, uint32_t dt)
             break;
         }
         if (railed) {
-            if (rail_ms >= ACQ_ECG_BLIP_MS) {
+            if (rail_ms >= ACQ_ECG_BLIP_MS && !grace) {
                 A.settle_acc_ms = 0; /* a long excursion: settle again */
                 A.settle_done = false;
             }
             break; /* a short one only pauses the settling */
         }
+        if (grace && !stable)
+            break; /* a thumb off for the button: pause */
         A.settle_acc_ms += dt;
         if (A.settle_acc_ms < ECG_SETTLE_MS)
             break;
@@ -740,8 +759,8 @@ static void ecg_contact_update(uint32_t now, uint8_t ev, uint32_t dt)
         }
         break;
     case ACQ_ECG_RUN:
-        if (rail_ms >= ACQ_ECG_BLIP_MS ||
-            (!stable && unstable_ms >= ACQ_ECG_BLIP_MS + DSP_LEAD_STABLE_MS)) {
+        if (!grace && (rail_ms >= ACQ_ECG_BLIP_MS ||
+                       (!stable && unstable_ms >= ACQ_ECG_BLIP_MS + DSP_LEAD_STABLE_MS))) {
             ecg_state_to(ACQ_ECG_HOLD, ACQ_WHY_RAIL);
             set_settled(false);
             A.st.hr_bpm = 0;
@@ -766,7 +785,7 @@ static void ecg_contact_update(uint32_t now, uint8_t ev, uint32_t dt)
         }
         if (railed)
             break;
-        if (now - A.beat_ms >= ACQ_ECG_HOLD_END_MS)
+        if (!grace && now - after_grace(A.beat_ms) >= ACQ_ECG_HOLD_END_MS)
             ecg_on_lead_off(ACQ_ECG_END, ACQ_WHY_NO_BEAT, now);
         else if (now - A.inrange_ms >= ACQ_ECG_RESUME_MS && (int32_t)(A.beat_ms - A.inrange_ms) >= 0)
             ecg_to_run();

@@ -2,12 +2,15 @@
  * executes the action (it owns sessions, settings and power).
  *
  *   carousel  HOME -> ECG_CARD -> PPG_CARD -> BOTH_CARD -> SETTINGS -> ABOUT -> HOME
- *   BUTTON1 short  card: start that mode; Settings: change the selected value;
+ *   BUTTON1 short  card: start that mode; Settings: open it, then change the
+ *                  selected value, on "Exit" close it again;
  *                  live screen: end the measurement; Summary: back to the card;
  *                  Diagnostics: leave (About); on the RADIO page the app turns
  *                  NAV_DIAG_LEAVE into "toggle program mode" (app.c)
- *   BUTTON2 short  next page; Settings: next item, after the last the next
- *                  page; Summary: back to the card; Diagnostics: next page
+ *   BUTTON2 short  next page; Settings (open): next item, round through
+ *                  "Exit"; ECG / Pulse live screen (also while waiting and
+ *                  settling): Live view toggle; Summary: back to the card;
+ *                  Diagnostics: next page
  *   BUTTON2 long   Home from anywhere (a measurement ends without summary)
  *   BUTTON1 long   power off (standby) from anywhere
  *   both long      on About: Diagnostics */
@@ -24,7 +27,9 @@ typedef enum {
     NAV_GOTO,          /* show .screen */
     NAV_START,         /* start .mode (from its launcher card) */
     NAV_SET_CHANGE,    /* cycle the selected setting */
-    NAV_SET_NEXT,      /* next settings item (stays on Settings) */
+    NAV_SET_NEXT,      /* next settings item, round through "Exit" */
+    NAV_SET_OPEN,      /* Settings page: open (cursor on the first item) */
+    NAV_SET_CLOSE,     /* "Exit": close (the page as the carousel shows it) */
     NAV_MEAS_END,      /* end the measurement: summary or card */
     NAV_VIEW_TOGGLE,   /* ECG / Pulse live screen: trace <-> trace + HR graph */
     NAV_HOME_ABORT,    /* to Home; a measurement ends without summary */

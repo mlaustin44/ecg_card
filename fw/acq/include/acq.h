@@ -44,6 +44,7 @@
  *           in ACQ_ECG_NO_BEAT_MS of in-range signal (RUN) /
  *           ACQ_ECG_HOLD_END_MS of wall time (HOLD). The app
  *           shows the summary.
+ * A button press suspends the contact-loss rules for ACQ_ECG_GRACE_MS.
  * Brief excursions while waiting, or floating inputs, therefore never reach
  * SETTLE, and a thumb movement while RUNNING costs a gap in the trace, or
  * about a second of HOLD after a longer one. The QRS detector learns from
@@ -108,6 +109,12 @@
  * "beats" in the quantisation steps of open inputs sitting at mid-scale. */
 #define ACQ_ECG_NO_BEAT_MS   5000u
 #define ACQ_ECG_MIN_QRS_UV   100u
+/* Button grace (acq_user_input): while a button is held and this long after,
+ * loss of contact ends nothing. A thumb comes off the pad to press BUTTON2
+ * (Live view) and the front end needs ~2 s after it is back. Until then RUN
+ * stays RUN (the trace has gaps), HOLD and SETTLE wait, settling pauses
+ * instead of starting over; the contact-loss timeouts count from its end. */
+#define ACQ_ECG_GRACE_MS     8000u
 /* Mains hum warning (acq_status_t.hum): the 50/60 Hz residual at or above
  * ACQ_HUM_UVPP for ACQ_HUM_ON_MS; cleared below ACQ_HUM_OFF_UVPP for
  * ACQ_HUM_OFF_MS. On the bench a J-Link on the card read 5000-6600 uVpp
@@ -295,6 +302,9 @@ void acq_poll(uint32_t now_ms);
 void acq_stop(void);
 /* True from acq_start() until acq_stop() (STARTING or ON). */
 bool acq_active(void);
+/* A button is down (call every poll while it is): ECG contact loss is
+ * expected, see ACQ_ECG_GRACE_MS. */
+void acq_user_input(uint32_t now_ms);
 
 const acq_status_t *acq_status(void);
 /* Copy and restart the diagnostics accumulators. */

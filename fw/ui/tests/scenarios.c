@@ -146,6 +146,7 @@ void scen_defaults(ui_model_t *m)
     m->batt_valid = true;
     m->batt_mv = 3912;
     m->settings = defs;
+    m->settings_cursor = UI_SET_CLOSED;
     m->fw_version = "0.1.0";
     m->live.notch_hz = 50;
 }
@@ -225,6 +226,8 @@ SC(settings_5) { settings_at(m, 5); m->ble_state = UI_BLE_ADVERTISING; }
 SC(settings_5_off) { settings_at(m, 5); m->settings.ble = BLE_OFF; }
 SC(settings_6) { settings_at(m, 6); m->settings.restore = RESTORE_SLOW; }
 SC(settings_7) { settings_at(m, 7); m->settings.view = VIEW_HR_GRAPH; }
+SC(settings_exit) { settings_at(m, UI_SET_EXIT); }
+SC(settings_closed) { settings_at(m, UI_SET_CLOSED); }
 SC(settings_alt)
 {
     settings_at(m, 2);
@@ -426,7 +429,7 @@ const scenario_t scenarios[] = {
     E(card_ecg), E(card_ecg_usb), E(card_ecg_low), E(card_ppg), E(card_ppg_usb), E(card_both),
     E(card_ecg_ble_conn), E(card_ppg_ble_fault_usb),
     E(settings_0), E(settings_1), E(settings_2), E(settings_3), E(settings_4), E(settings_5),
-    E(settings_5_off), E(settings_6), E(settings_7), E(settings_alt),
+    E(settings_5_off), E(settings_6), E(settings_7), E(settings_exit), E(settings_closed), E(settings_alt),
     E(about), E(about_radio), E(diag), E(diag_full),
     E(ecg_wait_a), E(ecg_wait_b), E(ecg_wait_c), E(ppg_wait), E(both_wait),
     E(ecg_settling), E(ecg_settling_0), E(ecg_wait_hum), E(ecg_settling_hum), E(ppg_settling),

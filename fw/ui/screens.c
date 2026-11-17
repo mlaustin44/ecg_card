@@ -384,10 +384,15 @@ static const char *setting_value(const settings_t *s, unsigned item)
 }
 
 #define SET_ROWS 5
+/* Closed (as the carousel shows it): the first values, BUTTON1 opens. Open:
+ * the selected row highlighted, BUTTON2 round the items and "Exit settings",
+ * BUTTON1 changes the value (or closes, on "Exit settings"). */
 static void screen_settings(const ui_model_t *m)
 {
     title_row_status("Settings", m);
-    unsigned cur = m->settings_cursor < SET_ITEM_COUNT ? m->settings_cursor : 0;
+    bool open = m->settings_cursor <= UI_SET_EXIT;
+    unsigned rows = open ? SET_ITEM_COUNT + 1u : SET_ITEM_COUNT;
+    unsigned cur = open ? m->settings_cursor : 0;
     unsigned first = 0;
     if (cur >= SET_ROWS)
         first = cur - SET_ROWS + 1;
@@ -395,20 +400,29 @@ static void screen_settings(const ui_model_t *m)
     int ax = gfx_text_width("Settings", TXT_BOLD) + 4;
     if (first > 0)
         gfx_text(ax, 0, G_UP, TXT_LEFT);
-    if (first + SET_ROWS < SET_ITEM_COUNT)
+    if (first + SET_ROWS < rows)
         gfx_text(ax + 6, 0, G_DOWN, TXT_LEFT);
-    for (unsigned r = 0; r < SET_ROWS && first + r < SET_ITEM_COUNT; r++) {
+    for (unsigned r = 0; r < SET_ROWS && first + r < rows; r++) {
         unsigned it = first + r;
         int y = 10 + (int)r * LINE_H;
         uint8_t f = 0;
-        if (it == cur) {
+        if (open && it == cur) {
             gfx_rrect_fill(0, y - 1, OLED_W, LINE_H, GFX_SET);
             f = TXT_CLR;
+        }
+        if (it == UI_SET_EXIT) {
+            gfx_text(3, y, "Exit settings", f);
+            continue;
         }
         gfx_text(3, y, set_names[it], f);
         gfx_text(OLED_W - 3, y, setting_value(&m->settings, it), f | TXT_RIGHT);
     }
-    hint_row("Change", "Next", UI_SCREEN_SETTINGS);
+    if (!open)
+        hint_row("Open", NULL, UI_SCREEN_SETTINGS);
+    else if (cur == UI_SET_EXIT)
+        hint_row("Exit", "Next", -1);
+    else
+        hint_row("Change", "Next", -1);
 }
 
 /* Hardware designer credit: boot and power-down screens, About page. */
@@ -474,6 +488,24 @@ static const char *mode_title(ui_screen_t s)
     return s == UI_SCREEN_ECG ? "ECG" : s == UI_SCREEN_PPG ? "Pulse" : "ECG + Pulse";
 }
 
+/* ECG / Pulse before RUNNING: BUTTON2 picks the Live view now, so the thumb
+ * stays put once the trace runs. Wait screen: under the text column (the
+ * contact picture takes the left half down to the bottom). */
+static void view_hint(const ui_model_t *m, bool right)
+{
+    if (m->screen == UI_SCREEN_BOTH)
+        return;
+    bool hr = m->settings.view == VIEW_HR_GRAPH;
+    if (!right) {
+        hint_row(NULL, hr ? "View: +HR graph" : "View: Trace", -1);
+        return;
+    }
+    const char *v = hr ? "+HR graph" : "Trace";
+    int x = OLED_W - gfx_text_width(v, 0);
+    gfx_text(x, ROW_HINT, v, TXT_LEFT);
+    gfx_text(x - 2, ROW_HINT, G_NEXT, TXT_RIGHT);
+}
+
 static void live_wait(const ui_model_t *m)
 {
     bool ppg = m->screen == UI_SCREEN_PPG;
@@ -499,6 +531,7 @@ static void live_wait(const ui_model_t *m)
         gfx_text(cx, 32, "the pads", TXT_CENTER);
         gfx_text(cx, 45, "Hold still", TXT_CENTER | TXT_BOLD);
     }
+    view_hint(m, true);
 }
 
 static void live_settling(const ui_model_t *m)
@@ -509,6 +542,7 @@ static void live_settling(const ui_model_t *m)
     gfx_progress(14, 29, 100, 9, clamp_u(m->live.settle_pct, 100));
     gfx_text(OLED_W / 2, 44, m->live.hum ? "Hum: unplug cables" : "Keep thumbs relaxed",
              TXT_CENTER);
+    view_hint(m, false);
 }
 
 static void live_usb(const ui_model_t *m)

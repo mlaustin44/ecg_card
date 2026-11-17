@@ -80,6 +80,7 @@ TEST(usb_dim_finger_limit)
     /* Settings: LED limit 15 -> 5 -> 10 mA */
     for (int i = 0; i < 4; i++)
         scen_tap(2);
+    scen_tap(1); /* open */
     for (int i = 0; i < SET_ITEM_LED_LIMIT; i++)
         scen_tap(2);
     scen_tap(1);
