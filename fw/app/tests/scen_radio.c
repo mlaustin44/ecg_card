@@ -569,7 +569,8 @@ TEST(ble_off_setting)
     CHECK(scen_run_cond(radio_off, 200));
     CHECK_EQ(sim_radio_info()->clean_offs, 1);
     CHECK(scen_radio_off());
-    scen_tap(2); /* leave Settings: saved */
+    for (int i = SET_ITEM_BLE; i < SET_ITEM_COUNT; i++)
+        scen_tap(2); /* past the last item: leave Settings, saved */
     scen_run_ms(500);
     scen_reboot();
     scen_run_ms(3000);

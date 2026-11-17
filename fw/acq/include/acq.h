@@ -47,6 +47,11 @@
  *   still > 25 % of full scale from mid (brief start step 7). Never before
  *   the electrodes are connected (start step 4): acquisition starts after
  *   MEASURE_REQ.
+ *   That is acq_cfg_t.restore = RESTORE_FAST. RESTORE_SLOW pulses only after
+ *   ACQ_FR_SLOW_RAIL_MS continuously railed, at most every
+ *   ACQ_FR_SLOW_REPEAT_MS, and skips the in-range recheck; RESTORE_OFF never
+ *   pulses (settings.h; bench A/B: on the first board each release may leave
+ *   a random-sign step at the high-pass node).
  * PPG: contact = the finger detector; settled ACQ_PPG_SETTLE_MS later.
  * BOTH: the session follows ECG contact; PPG values are reported while
  *   the finger is detected.
@@ -74,6 +79,8 @@
  * most 250 ms (a 40 % decay of U5's tail) after it could be. */
 #define ACQ_FR_RAIL_MS     50u
 #define ACQ_FR_REPEAT_MS   250u
+#define ACQ_FR_SLOW_RAIL_MS   2000u /* RESTORE_SLOW: 4 tau1, U5's tail mostly gone */
+#define ACQ_FR_SLOW_REPEAT_MS 2000u
 /* Contact timing, multiples of U5's tau1 = 0.5 s: a 150 mV offset step
  * needs ~1.5 s (3 tau1) before a pulse leaves the output in range, + 0.5 s
  * to be stable. */
@@ -99,6 +106,7 @@ typedef struct {
     uint8_t rld;          /* rld_mode_t */
     uint8_t notch;        /* notch_mode_t (AUTO: 60 Hz until the detector decides) */
     uint8_t led_limit_ma; /* per-LED limit for the AGC */
+    uint8_t restore;      /* restore_mode_t (ECG FAST_RESTORE policy) */
 } acq_cfg_t;
 
 typedef enum {
@@ -185,6 +193,11 @@ typedef struct {
     bool gain_hi;
     uint8_t notch_hz;
     uint16_t mid_code, led_code, dac12;
+    /* ECG front end over the whole session (dsp_lead_totals_t: samples not
+     * blanked by FAST_RESTORE) */
+    uint32_t ecg_raw_n, ecg_rail_n;
+    uint32_t ecg_run_max_ms;  /* longest in-range run */
+    uint32_t fr_pulses;       /* FAST_RESTORE pulses */
 } acq_summary_t;
 
 typedef struct {

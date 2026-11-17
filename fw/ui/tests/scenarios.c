@@ -223,6 +223,7 @@ SC(settings_3) { settings_at(m, 3); }
 SC(settings_4) { settings_at(m, 4); }
 SC(settings_5) { settings_at(m, 5); m->ble_state = UI_BLE_ADVERTISING; }
 SC(settings_5_off) { settings_at(m, 5); m->settings.ble = BLE_OFF; }
+SC(settings_6) { settings_at(m, 6); m->settings.restore = RESTORE_SLOW; }
 SC(settings_alt)
 {
     settings_at(m, 2);
@@ -412,7 +413,7 @@ const scenario_t scenarios[] = {
     E(card_ecg), E(card_ecg_usb), E(card_ecg_low), E(card_ppg), E(card_ppg_usb), E(card_both),
     E(card_ecg_ble_conn), E(card_ppg_ble_fault_usb),
     E(settings_0), E(settings_1), E(settings_2), E(settings_3), E(settings_4), E(settings_5),
-    E(settings_5_off), E(settings_alt),
+    E(settings_5_off), E(settings_6), E(settings_alt),
     E(about), E(about_radio), E(diag), E(diag_full),
     E(ecg_wait_a), E(ecg_wait_b), E(ecg_wait_c), E(ppg_wait), E(both_wait),
     E(ecg_settling), E(ecg_settling_0), E(ppg_settling),

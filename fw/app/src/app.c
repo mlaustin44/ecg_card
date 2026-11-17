@@ -443,6 +443,22 @@ static void log_session_end(end_t why)
         log_u((uint32_t)a->ecg_resyncs + a->ppg_resyncs + hal_acq_resyncs());
     }
     log_end();
+    if (mode_has_ecg(S.mode)) {
+        /* bench A/B: the front end over the whole session, samples blanked
+         * by FAST_RESTORE excluded */
+        log_begin("session");
+        log_s(" front-end rail=");
+        log_u(a->ecg_raw_n ? (uint32_t)(((uint64_t)a->ecg_rail_n * 1000u + a->ecg_raw_n / 2u) /
+                                        a->ecg_raw_n)
+                           : 0u);
+        log_s("/1000 of ");
+        log_u(a->ecg_raw_n / ECG_RAW_HZ);
+        log_s(" s, inr_max=");
+        log_u(a->ecg_run_max_ms);
+        log_s(" ms, fr=");
+        log_u(a->fr_pulses);
+        log_end();
+    }
 }
 
 /* Every way out of a measurement comes through here (rails_off() inside
@@ -549,6 +565,8 @@ static void log_evidence(const acq_status_t *st)
             log_s(" max=");
             log_u(d.ecg.max);
             log_mean(" avg=", d.ecg.sum, d.ecg.n);
+            log_s(" inr=");
+            log_u(d.ecg.run_max / (ECG_RAW_HZ / 1000u));
         } else {
             log_s(" no samples");
         }
@@ -642,6 +660,7 @@ static uint8_t start_session(ui_mode_t mode)
     c.rld = S.settings.rld;
     c.notch = S.settings.notch;
     c.led_limit_ma = led_limit_ma(S.settings.led_limit);
+    c.restore = S.settings.restore;
     if (!acq_start(&c)) {
         S.ses = SES_FAULT;
         S.fault_text = "Could not start acquisition";
@@ -655,6 +674,14 @@ static uint8_t start_session(ui_mode_t mode)
     log_s(" start mode=");
     log_u((uint32_t)mode);
     log_s(c.gain_hi ? " gain=1098" : " gain=558");
+    if (c.ecg) {
+        static const char *const rld_names[] = {"both", "left", "right", "off"};
+        static const char *const restore_names[] = {"fast", "slow", "off"};
+        log_s(" rld=");
+        log_s(c.rld < RLD_MODE_COUNT ? rld_names[c.rld] : "?");
+        log_s(" restore=");
+        log_s(c.restore < RESTORE_MODE_COUNT ? restore_names[c.restore] : "?");
+    }
     log_end();
     return LINK_RES_OK;
 }
@@ -1182,7 +1209,7 @@ static uint8_t phone_set(uint8_t item, uint8_t value)
     if (radio_program_mode())
         return LINK_RES_BUSY;
     bool measuring_item = item == SET_ITEM_GAIN || item == SET_ITEM_NOTCH || item == SET_ITEM_RLD ||
-                          item == SET_ITEM_LED_LIMIT;
+                          item == SET_ITEM_LED_LIMIT || item == SET_ITEM_RESTORE;
     if (measuring_item && S.ses == SES_ACTIVE)
         return LINK_RES_BUSY; /* applied at the start of a session */
     settings_t n = S.settings;

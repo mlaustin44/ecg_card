@@ -344,6 +344,7 @@ static void fast_restore_pulse(uint32_t now)
         A.fr_last_ms = now;
         A.blank_hold = true; /* every sample from now on, until the release */
         count16(&A.diag.fr_pulses);
+        A.sum.fr_pulses++;
     }
 }
 
@@ -604,11 +605,16 @@ static void ecg_fast_restore(uint32_t now)
 {
     if (A.fr_on || A.ecg_state == ACQ_ECG_END)
         return;
+    if (A.cfg.restore == RESTORE_OFF)
+        return;
+    bool slow = A.cfg.restore == RESTORE_SLOW;
+    uint32_t rail_min = slow ? ACQ_FR_SLOW_RAIL_MS : ACQ_FR_RAIL_MS;
+    uint32_t repeat = slow ? ACQ_FR_SLOW_REPEAT_MS : ACQ_FR_REPEAT_MS;
     uint32_t rail_ms = dsp_lead_rail_samples(&A.lead) / (ECG_RAW_HZ / 1000u);
     if (dsp_lead_railed(&A.lead)) {
-        if (rail_ms >= ACQ_FR_RAIL_MS && (!A.fr_any || now - A.fr_last_ms >= ACQ_FR_REPEAT_MS))
+        if (rail_ms >= rail_min && (!A.fr_any || now - A.fr_last_ms >= repeat))
             fast_restore_pulse(now);
-    } else if (A.fr_recheck && now - A.stable_ms >= ACQ_FR_RECHECK_MS) {
+    } else if (!slow && A.fr_recheck && now - A.stable_ms >= ACQ_FR_RECHECK_MS) {
         A.fr_recheck = false;
         if (dsp_lead_far_from_mid(&A.lead))
             fast_restore_pulse(now);
@@ -964,6 +970,10 @@ static void make_summary(void)
 {
     acq_summary_t *s = &A.sum;
     if (A.cfg.ecg) {
+        const dsp_lead_totals_t *t = dsp_lead_totals(&A.lead);
+        s->ecg_raw_n = t->n;
+        s->ecg_rail_n = t->rail;
+        s->ecg_run_max_ms = t->run_max / (ECG_RAW_HZ / 1000u);
         dsp_hrv_summary(&A.hrv, &s->hrv);
         s->gain_advice = A.gadv.advice == DSP_GAIN_UP ? 1 : A.gadv.advice == DSP_GAIN_DOWN ? -1 : 0;
     } else {

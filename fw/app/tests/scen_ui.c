@@ -207,7 +207,7 @@ TEST(settings_persist)
 TEST(corrupt_nv)
 {
     scen_boot(false);
-    settings_t s = {GAIN_HI, NOTCH_50, RLD_OFF, LED_LIMIT_10MA, SWEEP_6S, BLE_ON};
+    settings_t s = {GAIN_HI, NOTCH_50, RLD_OFF, LED_LIMIT_10MA, SWEEP_6S, BLE_ON, RESTORE_FAST};
     uint8_t b[SETTINGS_BLOB_LEN];
     settings_encode(&s, b);
     sim_nv_set(b, sizeof b);

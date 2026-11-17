@@ -357,7 +357,7 @@ static void screen_card(const ui_model_t *m)
 }
 
 static const char *const set_names[SET_ITEM_COUNT] = {
-    "Gain", "Mains notch", "RLD", "LED limit", "Sweep", "Bluetooth",
+    "Gain", "Mains notch", "RLD", "LED limit", "Sweep", "Bluetooth", "Restore",
 };
 static const char *const gain_vals[] = {"Auto", "558x", "1098x"};
 static const char *const notch_vals[] = {"Auto", "50Hz", "60Hz"};
@@ -365,6 +365,7 @@ static const char *const rld_vals[] = {"Both", "Left", "Right", "Off"};
 static const char *const led_vals[LED_LIMIT_COUNT] = {"5mA", "10mA", "15mA"};
 static const char *const sweep_vals[] = {"1.5s", "3s", "6s"};
 static const char *const ble_vals[] = {"Off", "On"};
+static const char *const restore_vals[] = {"Fast", "Slow", "Off"};
 
 static const char *setting_value(const settings_t *s, unsigned item)
 {
@@ -375,6 +376,7 @@ static const char *setting_value(const settings_t *s, unsigned item)
     case SET_ITEM_LED_LIMIT: return s->led_limit < LED_LIMIT_COUNT ? led_vals[s->led_limit] : "?";
     case SET_ITEM_SWEEP: return s->sweep < 3 ? sweep_vals[s->sweep] : "?";
     case SET_ITEM_BLE: return s->ble < 2 ? ble_vals[s->ble] : "?";
+    case SET_ITEM_RESTORE: return s->restore < 3 ? restore_vals[s->restore] : "?";
     default: return "?";
     }
 }

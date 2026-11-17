@@ -41,8 +41,17 @@
 
 typedef struct {
     uint32_t n, rail, sum;
+    uint32_t run_max;  /* longest in-range run of unblanked samples (a run
+                        * still going at the take counts so far) */
     uint16_t min, max;
 } dsp_lead_stats_t;   /* raw codes since the last dsp_lead_take_stats() */
+
+/* Whole-run totals since dsp_lead_init(), unblanked samples only (bench A/B
+ * of the FAST_RESTORE policies: blanked samples are forced to mid-scale). */
+typedef struct {
+    uint32_t n, rail;
+    uint32_t run_max;  /* longest in-range run, samples */
+} dsp_lead_totals_t;
 
 typedef struct {
     int32_t base_q9;   /* EMA of (code - mid), 9 fractional bits */
@@ -53,10 +62,12 @@ typedef struct {
     uint16_t sec_n;    /* samples into the current second */
     uint16_t sec_rail; /* rail samples in the current second */
     uint16_t last_s;   /* rail samples in the last complete second */
+    uint32_t run_cur;  /* current in-range run of unblanked samples */
     int16_t mid;
     uint8_t railed, stable;
     dsp_lead_stats_t st;
-} dsp_lead_t;          /* 52 bytes */
+    dsp_lead_totals_t tot;
+} dsp_lead_t;
 
 void dsp_lead_init(dsp_lead_t *l, uint16_t mid_code);
 
@@ -87,6 +98,7 @@ uint16_t dsp_lead_rail_last_s(const dsp_lead_t *l);
  * count, rail samples, sum, min, max (min > max when n = 0). Counting
  * stops after 2^20 samples (262 s) if nobody takes them. */
 void dsp_lead_take_stats(dsp_lead_t *l, dsp_lead_stats_t *out);
+const dsp_lead_totals_t *dsp_lead_totals(const dsp_lead_t *l);
 
 /* ---- Baseline wander (500 Hz stream) --------------------------------------
  * Mean of each 0.5 s block; wander = max - min of the last 4 block means

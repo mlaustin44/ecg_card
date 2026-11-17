@@ -15,6 +15,13 @@ typedef enum { SWEEP_1S5, SWEEP_3S, SWEEP_6S, SWEEP_COUNT } sweep_t;
 /* Bluetooth: Off, or On = radio powered and advertising while the card is
  * awake (fw/app/src/radio.h has the full policy). */
 typedef enum { BLE_OFF, BLE_ON, BLE_MODE_COUNT } ble_mode_t;
+/* ECG FAST_RESTORE policy (bench A/B, fw/acq/include/acq.h):
+ *   FAST  pulse after 50 ms on a rail, repeat every 250 ms, plus one in-range
+ *         recheck (the original behaviour);
+ *   SLOW  pulse only after 2 s continuously on a rail, at most every 2 s, no
+ *         in-range recheck;
+ *   OFF   never pulse: the high-pass recovers on its own. */
+typedef enum { RESTORE_FAST, RESTORE_SLOW, RESTORE_OFF, RESTORE_MODE_COUNT } restore_mode_t;
 
 /* Order of items on the Settings page. The index is also the item number of
  * LINK_CMD_SET (link_fmt.h): append only. */
@@ -25,6 +32,7 @@ typedef enum {
     SET_ITEM_LED_LIMIT,
     SET_ITEM_SWEEP,
     SET_ITEM_BLE,
+    SET_ITEM_RESTORE,
     SET_ITEM_COUNT
 } settings_item_t;
 
@@ -35,10 +43,11 @@ typedef struct {
     uint8_t led_limit; /* led_limit_t */
     uint8_t sweep;     /* sweep_t */
     uint8_t ble;       /* ble_mode_t */
+    uint8_t restore;   /* restore_mode_t */
 } settings_t;
 
 #define SETTINGS_DEFAULTS \
-    { GAIN_AUTO, NOTCH_AUTO, RLD_BOTH, LED_LIMIT_15MA, SWEEP_3S, BLE_ON }
+    { GAIN_AUTO, NOTCH_AUTO, RLD_BOTH, LED_LIMIT_15MA, SWEEP_3S, BLE_ON, RESTORE_FAST }
 
 /* Milliseconds for one full sweep across the trace area. */
 static inline uint16_t sweep_ms(uint8_t sweep)

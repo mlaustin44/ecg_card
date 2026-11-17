@@ -11,6 +11,7 @@ static void stats_clear(dsp_lead_stats_t *s)
     s->n = 0;
     s->rail = 0;
     s->sum = 0;
+    s->run_max = 0;
     s->min = UINT16_MAX;
     s->max = 0;
 }
@@ -25,6 +26,10 @@ void dsp_lead_init(dsp_lead_t *l, uint16_t mid_code)
     l->sec_n = 0;
     l->sec_rail = 0;
     l->last_s = 0;
+    l->run_cur = 0;
+    l->tot.n = 0;
+    l->tot.rail = 0;
+    l->tot.run_max = 0;
     l->mid = (int16_t)mid_code;
     l->railed = 1;
     l->stable = 0;
@@ -52,8 +57,23 @@ uint8_t dsp_lead_push(dsp_lead_t *l, const uint16_t *raw, size_t n, size_t n_bla
             l->sec_rail = 0;
             l->sec_n = 0;
         }
-        if (i < n_blank)
+        if (i < n_blank) {
+            l->run_cur = 0;
             continue; /* FAST_RESTORE: no evidence either way */
+        }
+        if (l->tot.n < UINT32_MAX) {
+            l->tot.n++;
+            l->tot.rail += rail;
+        }
+        if (rail) {
+            l->run_cur = 0;
+        } else if (l->run_cur < UINT32_MAX) {
+            l->run_cur++;
+            if (l->run_cur > l->st.run_max)
+                l->st.run_max = l->run_cur;
+            if (l->run_cur > l->tot.run_max)
+                l->tot.run_max = l->run_cur;
+        }
 
         int32_t x = (int32_t)c - l->mid;
         l->base_q9 += (x * 512 - l->base_q9) >> 9;
@@ -123,6 +143,8 @@ uint16_t dsp_lead_rail_last_s(const dsp_lead_t *l)
 {
     return l->last_s;
 }
+
+const dsp_lead_totals_t *dsp_lead_totals(const dsp_lead_t *l) { return &l->tot; }
 
 void dsp_lead_take_stats(dsp_lead_t *l, dsp_lead_stats_t *out)
 {

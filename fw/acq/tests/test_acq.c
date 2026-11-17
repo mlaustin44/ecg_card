@@ -117,7 +117,7 @@ static void run_until(uint64_t t_ms)
 
 static acq_cfg_t cfg(bool ecg, bool ppg)
 {
-    acq_cfg_t c = {ecg, ppg, false, RLD_BOTH, NOTCH_AUTO, 15};
+    acq_cfg_t c = {ecg, ppg, false, RLD_BOTH, NOTCH_AUTO, 15, RESTORE_FAST};
     return c;
 }
 
@@ -183,6 +183,12 @@ TEST(ecg_session)
     CHECK(acq_summary()->ecg_lost > 0);
     CHECK(acq_summary()->hrv.beats >= 15);
     CHECK_NEAR(acq_summary()->hrv.hr_avg, tc.hr_bpm, 3);
+    /* bench A/B totals: a long clean contact, mostly in range */
+    printf("  ecg_rail %u/%u inr_max %u ms fr %u\n", (unsigned)acq_summary()->ecg_rail_n,
+           (unsigned)acq_summary()->ecg_raw_n, (unsigned)acq_summary()->ecg_run_max_ms,
+           (unsigned)acq_summary()->fr_pulses);
+    CHECK(acq_summary()->ecg_run_max_ms >= 5000u);
+    CHECK(acq_summary()->ecg_rail_n < acq_summary()->ecg_raw_n / 2u);
     CHECK(!sim_pin(PIN_ANA_EN) && !sim_rail(SIM_RAIL_BODY_EN));
 }
 
@@ -190,7 +196,7 @@ TEST(ecg_session)
  * the output has been railed for ACQ_FR_RAIL_MS, then every ACQ_FR_REPEAT_MS;
  * the mid-scale samples the pulse forces (and DSP_LEAD_BLANK_MS after it)
  * are no evidence: the detector stays railed, nothing starts. */
-static void floating_rail_run(unsigned mid_after_ms)
+static void floating_rail_run_mode(unsigned mid_after_ms, uint8_t restore)
 {
     boot();
     testsrc_cfg_t tc = testsrc_defaults();
@@ -198,10 +204,16 @@ static void floating_rail_run(unsigned mid_after_ms)
     sim_ecg_set_float_model(SIM_FLOAT_RAIL);
     C.mid_after_fr_ms = mid_after_ms;
     acq_cfg_t c = cfg(true, false);
+    c.restore = restore;
     CHECK(acq_start(&c));
     run_until(11000);
     CHECK_EQ(C.fr_before_electrodes, 0);
     acq_stop();
+}
+
+static void floating_rail_run(unsigned mid_after_ms)
+{
+    floating_rail_run_mode(mid_after_ms, RESTORE_FAST);
 }
 
 TEST(fast_restore_policy)
@@ -215,6 +227,13 @@ TEST(fast_restore_policy)
     CHECK_EQ(C.fr_bad, 0);
     CHECK_EQ(C.polls_in_range, 0); /* the pulses' mid-scale samples: no evidence */
     CHECK(!acq_status()->contact);
+    /* session totals: every pulse counted; blanked samples excluded, so a
+     * railed run reads fully railed */
+    const acq_summary_t *a = acq_summary();
+    CHECK_EQ(a->fr_pulses, C.fr_pulses);
+    CHECK(a->ecg_raw_n > 30000u && a->ecg_raw_n < 42400u);
+    CHECK_EQ(a->ecg_rail_n, a->ecg_raw_n);
+    CHECK_EQ(a->ecg_run_max_ms, 0u);
     /* in range for 25 ms right after each release: inside the 10 ms blanking
      * + 20 ms in-range test, still nothing */
     floating_rail_run(25);
@@ -226,6 +245,27 @@ TEST(fast_restore_policy)
     floating_rail_run(45);
     CHECK(C.polls_in_range > 0);
     CHECK_EQ(acq_status()->ecg_state, ACQ_ECG_WAIT);
+    sim_ecg_set_float_model(SIM_FLOAT_EXCURSIONS);
+}
+
+/* RESTORE_SLOW: pulses only after ACQ_FR_SLOW_RAIL_MS on the rail, at most
+ * every ACQ_FR_SLOW_REPEAT_MS. RESTORE_OFF: never. */
+TEST(restore_slow_off)
+{
+    floating_rail_run_mode(0, RESTORE_SLOW);
+    printf("  slow, 10.6 s on the rail: %u pulses, closest %.1f ms apart\n", C.fr_pulses,
+           C.fr_min_gap_us / 1000.0);
+    CHECK(C.fr_pulses >= 4 && C.fr_pulses <= 6);
+    CHECK(C.fr_min_gap_us >= ACQ_FR_SLOW_REPEAT_MS * 1000u);
+    CHECK_EQ(C.fr_bad, 0);
+    CHECK_EQ(acq_summary()->fr_pulses, C.fr_pulses);
+    CHECK_EQ(acq_status()->ecg_state, ACQ_ECG_WAIT);
+
+    floating_rail_run_mode(0, RESTORE_OFF);
+    CHECK_EQ(C.fr_pulses, 0);
+    CHECK_EQ(acq_summary()->fr_pulses, 0u);
+    CHECK(acq_summary()->ecg_raw_n > 40000u);
+    CHECK_EQ(acq_summary()->ecg_rail_n, acq_summary()->ecg_raw_n);
     sim_ecg_set_float_model(SIM_FLOAT_EXCURSIONS);
 }
 
@@ -432,6 +472,7 @@ int main(void)
     RUN(vmid_fault);
     RUN(ecg_session);
     RUN(fast_restore_policy);
+    RUN(restore_slow_off);
     RUN(ppg_session);
     RUN(ppg_pulse_timeout);
     RUN(both_pat);
