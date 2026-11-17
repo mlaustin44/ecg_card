@@ -23,7 +23,7 @@
 #define DSP_QRS_BP_DELAY 17
 
 /* Display path group delay at 10 Hz (HP + notch + LP), 1/256 samples. */
-#define DSP_DISP_DELAY_Q8 865
+#define DSP_DISP_DELAY_Q8 958
 
 /* PPG: linear-phase FIR delay and centred dark-mean delay in frames (both
  * removed from reported foot times), analog TIA + second stage delay

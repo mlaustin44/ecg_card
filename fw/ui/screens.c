@@ -359,7 +359,7 @@ static void screen_card(const ui_model_t *m)
 static const char *const set_names[SET_ITEM_COUNT] = {
     "Gain", "Mains notch", "RLD", "LED limit", "Sweep", "Bluetooth", "Restore",
 };
-static const char *const gain_vals[] = {"Auto", "558x", "1098x"};
+static const char *const gain_vals[] = {"Auto", ECG_GAIN_LO_TXT, ECG_GAIN_HI_TXT};
 static const char *const notch_vals[] = {"Auto", "50Hz", "60Hz"};
 static const char *const rld_vals[] = {"Both", "Left", "Right", "Off"};
 static const char *const led_vals[LED_LIMIT_COUNT] = {"5mA", "10mA", "15mA"};
@@ -535,7 +535,7 @@ static int live_icons(const ui_model_t *m, bool gain)
     int x = power_icons(OLED_W, 0, m) - 15;
     quality_bars(x, 0, m->live.quality);
     if (gain)
-        x -= 4 + gfx_text(x - 4, 0, m->live.gain_hi ? "1098x" : "558x", TXT_RIGHT);
+        x -= 4 + gfx_text(x - 4, 0, m->live.gain_hi ? ECG_GAIN_HI_TXT : ECG_GAIN_LO_TXT, TXT_RIGHT);
     return x;
 }
 

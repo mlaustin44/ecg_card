@@ -673,7 +673,8 @@ static uint8_t start_session(ui_mode_t mode)
     log_begin("session");
     log_s(" start mode=");
     log_u((uint32_t)mode);
-    log_s(c.gain_hi ? " gain=1098" : " gain=558");
+    log_s(" gain=");
+    log_u(c.gain_hi ? (uint32_t)ECG_GAIN_HI : (uint32_t)ECG_GAIN_LO);
     if (c.ecg) {
         static const char *const rld_names[] = {"both", "left", "right", "off"};
         static const char *const restore_names[] = {"fast", "slow", "off"};

@@ -111,8 +111,17 @@ class Recording:
         return len(self.ppg_coarse)
 
     @property
+    def front_end_gains(self) -> tuple[int, int]:
+        """(lo, hi) from the last EV_STATE that carried them, else as built."""
+        for st in reversed(self.states):
+            if st.get("gain_lo") and st.get("gain_hi"):
+                return int(st["gain_lo"]), int(st["gain_hi"])
+        return GAIN_LO, GAIN_HI
+
+    @property
     def ecg_gain(self) -> np.ndarray:
-        return np.where(self.ecg_flags & ECG_FLAG_GAIN_HI, GAIN_HI, GAIN_LO)
+        lo, hi = self.front_end_gains
+        return np.where(self.ecg_flags & ECG_FLAG_GAIN_HI, hi, lo)
 
     @property
     def ecg_uv(self) -> np.ndarray:
@@ -310,7 +319,8 @@ class RecordingBuilder:
             self.events["leads"].append({"time_s": self._now, "contact": m.contact})
         elif isinstance(m, StateEvent):
             self.events["states"].append({"time_s": self._now, "mode": m.mode, "notch_hz": m.notch_hz,
-                                          "mid_code": m.mid_code, "batt_pct": m.batt_pct, "flags": m.flags})
+                                          "mid_code": m.mid_code, "batt_pct": m.batt_pct, "flags": m.flags,
+                                          "gain_lo": m.gain_lo, "gain_hi": m.gain_hi})
         elif isinstance(m, ButtonEvent):
             self.events["buttons"].append({"time_s": self._now, "button": m.button, "kind": m.kind})
         else:  # Log

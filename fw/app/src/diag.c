@@ -122,7 +122,7 @@ void diag_format(uint8_t page, const diag_info_t *d, char out[UI_DIAG_LINES][UI_
         l = L(out[2]); s(&l, "drop "); u(&l, d->stream_drops); s(&l, "/"); u(&l, d->stream_frames);
         l = L(out[3]); s(&l, "loop "); u(&l, d->loop_acq_max_ms); s(&l, "ms i2c err "); u(&l, d->acq_i2c_errors);
         l = L(out[4]); s(&l, "LED "); u(&l, d->led_code); s(&l, " DAC12 "); u(&l, d->dac12);
-        l = L(out[5]); s(&l, "mid "); u(&l, d->mid_code); s(&l, d->gain_hi ? " 1098x " : " 558x ");
+        l = L(out[5]); s(&l, "mid "); u(&l, d->mid_code); s(&l, d->gain_hi ? " " ECG_GAIN_HI_TXT " " : " " ECG_GAIN_LO_TXT " ");
         u(&l, d->notch_hz); s(&l, "Hz");
         break;
     case DIAG_PAGE_RADIO:

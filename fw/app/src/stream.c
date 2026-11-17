@@ -1,5 +1,6 @@
 #include "stream.h"
 
+#include "board.h"
 #include "hal.h"
 #include "link_fmt.h" /* stream_fmt.h + STREAM_EV_CMD_RESULT */
 
@@ -172,13 +173,15 @@ void stream_ev_lead(bool contact)
 void stream_ev_state(uint8_t mode, uint8_t notch_hz, uint16_t mid_code, uint8_t batt_pct,
                      uint8_t flags)
 {
-    uint8_t b[7], *p = b;
+    uint8_t b[11], *p = b;
     *p++ = STREAM_EV_STATE;
     *p++ = mode;
     *p++ = notch_hz;
     p = put16(p, mid_code);
     *p++ = batt_pct;
-    *p = flags;
+    *p++ = flags;
+    p = put16(p, (uint16_t)ECG_GAIN_LO); /* front-end gains of this build */
+    put16(p, (uint16_t)ECG_GAIN_HI);
     stream_send(STREAM_EVENT, b, sizeof b);
 }
 

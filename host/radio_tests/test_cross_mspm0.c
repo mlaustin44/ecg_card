@@ -104,7 +104,7 @@ TEST(mspm0_frames_into_radio_parser)
     CHECK_EQ(bpm, 65);
     CHECK_EQ(F[4].len, 2);
     CHECK(!rl_msg_event_bpm(F[4].payload, F[4].len, &kind, &bpm));
-    CHECK_EQ(F[5].len, 7);
+    CHECK_EQ(F[5].len, 11); /* EV_STATE with the front-end gains */
     CHECK_EQ(F[6].len, 3);
 }
 

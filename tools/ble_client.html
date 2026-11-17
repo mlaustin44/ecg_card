@@ -532,14 +532,25 @@ const Codec = (() => {
   const ECG_LEN = 25, PPG_LEN = 15, STATUS_LEN = 20, CMD_MAX_LEN = 16;
   const ECG_F = { GAIN_HI: 0x01, SETTLING: 0x02, LEAD_OFF: 0x04 };
   const PPG_F = { DIST0: 0x01, DIST1: 0x02, NO_FINGER: 0x04 };
+  // GAIN_LO / GAIN_HI: the as-built front end. A card reports its own gains in
+  // EV_STATE (11-byte form); setGains() then switches every conversion to them.
   const UV_PER_CODE = 805.7, GAIN_LO = 558, GAIN_HI = 1098, ECG_SCALE = 8;
   const NA_PER_COARSE = 0.8057, NA_PER_FINE = 0.08057, LED_UA_PER_CODE = 3.718;
-  const ecgGain = (flags) => (flags & ECG_F.GAIN_HI ? GAIN_HI : GAIN_LO);
+  const gains = { lo: GAIN_LO, hi: GAIN_HI };
+  /** Front-end gains from EV_STATE; returns true if they changed. */
+  function setGains(lo, hi) {
+    if (!(lo > 0 && hi > lo) || (lo === gains.lo && hi === gains.hi)) return false;
+    gains.lo = lo; gains.hi = hi;
+    SETTINGS[0].options[1] = `${lo}x (lo)`; SETTINGS[0].options[2] = `${hi}x (hi)`;
+    return true;
+  }
+  const ecgGain = (flags) => (flags & ECG_F.GAIN_HI ? gains.hi : gains.lo);
   /** microvolts per stream unit for a block's flags: 805.7 / (8 * gain) */
   const ecgUvPerUnit = (flags) => UV_PER_CODE / (ECG_SCALE * ecgGain(flags));
 
   const EV = { R_PEAK: 1, PULSE: 2, LEAD: 3, STATE: 4, BUTTON: 5, CMD_RESULT: 6 };
-  const EV_LEN = { 1: 7, 2: 11, 3: 2, 4: 7, 5: 3, 6: 3 };
+  const EV_LEN = { 1: 7, 2: 11, 3: 2, 4: 11, 5: 3, 6: 3 };
+  const EV_STATE_LEN_OLD = 7;   // firmware before the gains were added: gains 558 / 1098
   const EV_NAME = { 1: "r_peak", 2: "pulse", 3: "lead", 4: "state", 5: "button", 6: "cmd_result" };
 
   // ---- link_fmt.h ----
@@ -565,6 +576,7 @@ const Codec = (() => {
     { item: 3, key: "led_limit", label: "LED limit", options: ["5 mA", "10 mA", "15 mA"], lockedInSession: true },
     { item: 4, key: "sweep", label: "Sweep", options: ["1.5 s", "3 s", "6 s"], lockedInSession: false },
     { item: 5, key: "ble", label: "Bluetooth", options: ["off", "on"], lockedInSession: false },
+    { item: 6, key: "restore", label: "Restore", options: ["fast", "slow", "off"], lockedInSession: true },
   ];
   const SET_ITEM_BLE = 5, BLE_OFF = 0;
   // SET_TIME limits (link_fmt.h clarifications): refused with BAD_ARG outside these
@@ -620,7 +632,7 @@ const Codec = (() => {
   /** Event: out gets kind plus the kind's fields. Unknown kinds set out.known = false and are not an error. */
   function newEvent() {
     return { kind: 0, known: false, index: 0, hr: 0, pulse: 0, pat: 0, pi: 0, contact: 0, mode: 0, notchHz: 0,
-      midCode: 0, batt: 0, flags: 0, button: 0, press: 0, cmd: 0, result: 0 };
+      midCode: 0, batt: 0, flags: 0, gainLo: 0, gainHi: 0, button: 0, press: 0, cmd: 0, result: 0 };
   }
   function parseEvent(dv, out) {
     const n = dv.byteLength;
@@ -629,7 +641,8 @@ const Codec = (() => {
     out.kind = kind;
     const want = EV_LEN[kind];
     if (want === undefined) { out.known = false; return null; }
-    if (n !== want) return `event kind ${kind} (${EV_NAME[kind]}) is ${n} B, expected ${want}`;
+    if (n !== want && !(kind === EV.STATE && n === EV_STATE_LEN_OLD))
+      return `event kind ${kind} (${EV_NAME[kind]}) is ${n} B, expected ${want}`;
     out.known = true;
     switch (kind) {
       case EV.R_PEAK: out.index = dv.getUint32(1, true); out.hr = dv.getUint16(5, true); break;
@@ -637,7 +650,8 @@ const Codec = (() => {
         out.pat = dv.getUint16(7, true); out.pi = dv.getUint16(9, true); break;
       case EV.LEAD: out.contact = dv.getUint8(1); break;
       case EV.STATE: out.mode = dv.getUint8(1); out.notchHz = dv.getUint8(2); out.midCode = dv.getUint16(3, true);
-        out.batt = dv.getUint8(5); out.flags = dv.getUint8(6); break;
+        out.batt = dv.getUint8(5); out.flags = dv.getUint8(6);
+        out.gainLo = n >= 11 ? dv.getUint16(7, true) : GAIN_LO; out.gainHi = n >= 11 ? dv.getUint16(9, true) : GAIN_HI; break;
       case EV.BUTTON: out.button = dv.getUint8(1); out.press = dv.getUint8(2); break;
       case EV.CMD_RESULT: out.cmd = dv.getUint8(1); out.result = dv.getUint8(2); break;
     }
@@ -649,7 +663,7 @@ const Codec = (() => {
       case EV.R_PEAK: return { sample: e.index, hr_bpm: e.hr };
       case EV.PULSE: return { foot_sample: e.index, pulse_bpm: e.pulse, pat_ms: e.pat, pi_permille: e.pi };
       case EV.LEAD: return { contact: e.contact };
-      case EV.STATE: return { mode: e.mode, notch_hz: e.notchHz, mid_code: e.midCode, batt_pct: e.batt, flags: e.flags };
+      case EV.STATE: return { mode: e.mode, notch_hz: e.notchHz, mid_code: e.midCode, batt_pct: e.batt, flags: e.flags, gain_lo: e.gainLo, gain_hi: e.gainHi };
       case EV.BUTTON: return { button: e.button, kind: e.press };
       case EV.CMD_RESULT: return { cmd: e.cmd, result: e.result };
       default: return {};
@@ -660,7 +674,7 @@ const Codec = (() => {
       case EV.R_PEAK: return `R-peak @${e.index} (t=${ecgTime(e.index).toFixed(3)} s) HR ${e.hr} bpm`;
       case EV.PULSE: return `pulse foot @${e.index} (t=${ecgTime(e.index).toFixed(3)} s) ${e.pulse} bpm, PAT ${e.pat ? e.pat + " ms" : "n/a"}, PI ${(e.pi / 10).toFixed(1)} %`;
       case EV.LEAD: return `lead contact ${e.contact === 1 ? "ON" : e.contact === 0 ? "OFF" : "?" + e.contact}`;
-      case EV.STATE: return `state mode=${MODE_NAME[e.mode] ?? "?" + e.mode} notch=${e.notchHz} Hz mid_code=${e.midCode} batt=${e.batt === 255 ? "?" : e.batt + " %"}${e.flags & 1 ? " USB" : ""}${e.flags & 2 ? " charging" : ""}`;
+      case EV.STATE: return `state mode=${MODE_NAME[e.mode] ?? "?" + e.mode} notch=${e.notchHz} Hz mid_code=${e.midCode} gains=${e.gainLo}/${e.gainHi} batt=${e.batt === 255 ? "?" : e.batt + " %"}${e.flags & 1 ? " USB" : ""}${e.flags & 2 ? " charging" : ""}`;
       case EV.BUTTON: return `button ${e.button} ${e.press === 0 ? "short" : e.press === 1 ? "long" : "?" + e.press}`;
       case EV.CMD_RESULT: return `result ${CMD_NAME[e.cmd] ?? "cmd " + e.cmd}: ${RES_NAME[e.result] ?? "?" + e.result}${e.result ? " (" + (RES_TEXT[e.result] ?? "unknown result code") + ")" : ""}`;
       default: return `unknown event kind ${e.kind}`;
@@ -749,7 +763,8 @@ const Codec = (() => {
       case EV.R_PEAK: dv.setUint32(1, f.index >>> 0, true); dv.setUint16(5, f.hr, true); break;
       case EV.PULSE: dv.setUint32(1, f.index >>> 0, true); dv.setUint16(5, f.pulse, true); dv.setUint16(7, f.pat, true); dv.setUint16(9, f.pi, true); break;
       case EV.LEAD: b[1] = f.contact; break;
-      case EV.STATE: b[1] = f.mode; b[2] = f.notchHz; dv.setUint16(3, f.midCode, true); b[5] = f.batt; b[6] = f.flags; break;
+      case EV.STATE: b[1] = f.mode; b[2] = f.notchHz; dv.setUint16(3, f.midCode, true); b[5] = f.batt; b[6] = f.flags;
+        dv.setUint16(7, f.gainLo ?? GAIN_LO, true); dv.setUint16(9, f.gainHi ?? GAIN_HI, true); break;
       case EV.BUTTON: b[1] = f.button; b[2] = f.press; break;
       case EV.CMD_RESULT: b[1] = f.cmd; b[2] = f.result; break;
       default: if (f.extra) b.set(f.extra, 1);
@@ -1043,7 +1058,7 @@ const Codec = (() => {
     uuid, SERVICE_UUID, CHAR, CHAR_UUID, CHAR_NAME, DEVICE_NAME_PREFIX,
     ECG_HZ, PPG_HZ, ECG_T0_S, ECG_ANALOG_DELAY_S, PPG_ON_SAMPLE_S, ecgTime, ecgIndexAt, ppgTime, ppgIndexAt,
     ECG_SAMPLES, PPG_FRAMES, ECG_LEN, PPG_LEN, STATUS_LEN, CMD_MAX_LEN, ECG_F, PPG_F,
-    UV_PER_CODE, GAIN_LO, GAIN_HI, NA_PER_COARSE, NA_PER_FINE, LED_UA_PER_CODE, ecgGain, ecgUvPerUnit,
+    UV_PER_CODE, GAIN_LO, GAIN_HI, gains, setGains, EV_STATE_LEN_OLD, NA_PER_COARSE, NA_PER_FINE, LED_UA_PER_CODE, ecgGain, ecgUvPerUnit,
     EV, EV_LEN, EV_NAME, PROTO_VERSION, ST, CMD, CMD_NAME, RES_NAME, RES_TEXT, MODE_NAME, MEAS_NAME, SETTINGS, settingText,
     SET_ITEM_BLE, BLE_OFF, TIME_MIN_UNIX, UTC_OFF_MIN, UTC_OFF_MAX, NOTIFY_MAX_LEN, setTimeProblem, nameSuffixOfAddress,
     eachBlock, STREAM_MAX_LEN, newEcgBlock, parseEcg, newPpgBlock, parsePpg, newEvent, parseEvent, eventFields, describeEvent,
@@ -1293,7 +1308,7 @@ class DemoDevice {
     return v;
   }
   _ecgBlock() {
-    const s0 = this.ecgNext, hi = this.gainHi(), gain = hi ? Codec.GAIN_HI : Codec.GAIN_LO;
+    const s0 = this.ecgNext, hi = this.gainHi(), gain = hi ? Codec.gains.hi : Codec.gains.lo;
     const k = 8 * gain / Codec.UV_PER_CODE;   // stream units per uV
     let flags = hi ? Codec.ECG_F.GAIN_HI : 0;
     const t0 = Codec.ecgTime(s0);
@@ -1707,7 +1722,13 @@ function ingestEvent(e, dv, tRx) {
     case E.R_PEAK: S.lastR = { index: e.index, hr: e.hr }; S.lastRRx = tRx; S.rMarks.push(C.ecgTime(e.index), e.hr, 0); Log.add("beat", C.describeEvent(e), C.ecgTime(e.index)); break;
     case E.PULSE: S.lastPulse = { index: e.index, pulse: e.pulse, pat: e.pat, pi: e.pi }; S.lastPulseRx = tRx; S.pMarks.push(C.ecgTime(e.index), e.pat, e.pulse); Log.add("pulse", C.describeEvent(e), C.ecgTime(e.index)); break;
     case E.LEAD: S.lead = e.contact; Log.add("lead", C.describeEvent(e)); break;
-    case E.STATE: S.lastState = C.eventFields(e); Log.add("state", C.describeEvent(e)); break;
+    case E.STATE:
+      S.lastState = C.eventFields(e); Log.add("state", C.describeEvent(e));
+      if (C.setGains(e.gainLo, e.gainHi)) {
+        Log.add("info", `front-end gains ${e.gainLo}x / ${e.gainHi}x (from the card)`);
+        refreshGainLabels(); refilterEcg();
+      }
+      break;
     case E.BUTTON: Log.add("button", C.describeEvent(e)); break;
     case E.CMD_RESULT: Log.add("cmd", C.describeEvent(e)); if (hooks.onCmdResult) hooks.onCmdResult(e.cmd, e.result); break;
   }
@@ -2520,6 +2541,11 @@ document.querySelectorAll("#cardCtl [data-cmd]").forEach((b) => b.addEventListen
   }
 }));
 const setSelects = [];
+/** Gain option labels follow the card's front-end gains (EV_STATE). */
+function refreshGainLabels() {
+  const sel = setSelects[0]; if (!sel) return;
+  C.SETTINGS[0].options.forEach((o, i) => { if (sel.options[i]) sel.options[i].text = o; });
+}
 (function buildSettings() {
   const g = $("setGrid");
   for (const it of C.SETTINGS) {
@@ -2537,9 +2563,10 @@ const setSelects = [];
   }
 })();
 hooks.onStatus = (s) => {
-  // LINK_STATUS has no Bluetooth field: while connected it is necessarily on
+  // LINK_STATUS has no Bluetooth field: while connected it is necessarily on.
+  // It has no Restore field either: that select shows what was last set here.
   const vals = [s.gain, s.notch, s.rld, s.ledLimit, s.sweep, 1];
-  setSelects.forEach((sel, i) => { if (!sel.dataset.pending && document.activeElement !== sel && String(vals[i]) !== sel.value) sel.value = String(vals[i]); });
+  setSelects.forEach((sel, i) => { if (vals[i] !== undefined && !sel.dataset.pending && document.activeElement !== sel && String(vals[i]) !== sel.value) sel.value = String(vals[i]); });
   applySessionLocks();
 };
 Cmd.onChange = () => { setText($("queueInfo"), Cmd.cur || Cmd.q.length ? `in flight ${Cmd.cur ? 1 : 0}, queued ${Cmd.q.length}` : ""); applySessionLocks(); };
@@ -2804,7 +2831,7 @@ function updateNumbers() {
   if (st) {
     setText($("kvMode"), `${C.MODE_NAME[st.mode] ?? st.mode} / ${C.MEAS_NAME[st.meas] ?? st.meas}`);
     setText($("kvBatt"), `${st.battPct === 255 ? "?" : st.battPct + " %"}${st.battMv ? ", " + (st.battMv / 1000).toFixed(2) + " V" : ""}` + (S.batterySvc !== null ? `; 2A19 ${S.batterySvc} %` : ""));
-    const inUse = S.ecgFlags >= 0 ? C.ecgGain(S.ecgFlags) : st.flags & C.ST.GAIN_HI ? C.GAIN_HI : C.GAIN_LO;
+    const inUse = S.ecgFlags >= 0 ? C.ecgGain(S.ecgFlags) : st.flags & C.ST.GAIN_HI ? C.gains.hi : C.gains.lo;
     setText($("kvGain"), `${C.settingText(0, st.gain)}, in use ${inUse}x`);
     setText($("kvNotch"), `${C.settingText(1, st.notch)}, in use ${st.notchHz} Hz`);
     setText($("kvMisc"), `${C.settingText(2, st.rld)} / ${C.settingText(3, st.ledLimit)} / ${C.settingText(4, st.sweep)}`);

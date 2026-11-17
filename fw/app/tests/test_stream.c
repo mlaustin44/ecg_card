@@ -113,7 +113,7 @@ TEST(emitters_and_seq)
     const uint8_t *d = sim_stream_data(&n);
     uint8_t f[64];
     size_t i = 0, k = 0;
-    const size_t want_len[] = {25, 15, 7, 11, 7, 3};
+    const size_t want_len[] = {25, 15, 7, 11, 11, 3};
     while (i < n) {
         size_t j = i;
         while (d[j]) j++;

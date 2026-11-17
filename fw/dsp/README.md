@@ -22,7 +22,7 @@ the quantised coefficients. Its outputs are checked in:
 | Header | Purpose |
 |---|---|
 | `dsp_decim.h` | 4 kHz ADC0 codes → 500 Hz stream: 95-tap FIR, 8:1 transposed polyphase |
-| `dsp_ecg_disp.h` | Display path: 0.5 Hz HP → 50/60 Hz notch (Q 30) → 40 Hz LP → µV |
+| `dsp_ecg_disp.h` | Display path: 0.67 Hz Butterworth-2 HP → 50/60 Hz notch (Q 30) → 40 Hz LP → µV |
 | `dsp_mains.h` | Goertzel bins at 50 and 60 Hz: pickup in µVpp, automatic notch choice |
 | `dsp_qrs.h` | Pan–Tompkins R-peaks with sub-sample refinement, median-of-5 HR |
 | `dsp_hrv.h` | Session statistics: beats, HR avg/min/max, SDNN, RMSSD |
@@ -205,7 +205,7 @@ about 25 cycles for each `__aeabi_lmul` call.
   DC exact. Saturates without wrap. Bit-identical for block sizes 1, 3, 7,
   8, 13, 64 and random.
 - **Display:**
-  - Gain at 10 Hz 0.997. −2.98 dB at 0.5 Hz and at 40 Hz. −29 dB at 150 Hz.
+  - Gain at 10 Hz 0.998. −2.99 dB at 0.67 Hz and at 40 Hz; −14 dB at 0.3 Hz (breathing wander). −29 dB at 150 Hz.
   - Notch depth at 50 and 60 Hz > 200 dB (exact zeros). −0.04 dB at the
     other mains frequency.
   - Off-centre rejection: 18.5 dB at 50.1 Hz and 12.7 dB at 50.2 Hz.

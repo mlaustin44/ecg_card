@@ -5,9 +5,19 @@
 
 int32_t dsp_uv_q20(int gain);
 
+/* Microvolts per stream unit in Q20 for any front-end gain:
+ * 805.7 / (8 * gain) * 2^20, rounded. */
 int32_t dsp_uv_q20(int gain)
 {
-    return gain >= 1000 ? DSP_UV_Q20_G1098 : DSP_UV_Q20_G558;
+    uint64_t den = 10u * DSP_STREAM_SCALE * (uint64_t)(gain > 0 ? gain : 1);
+    return (int32_t)((((uint64_t)DSP_ADC_UV_PER_CODE_X10 << 20) + den / 2u) / den);
+}
+
+/* Mains uVpp per Goertzel |X| (= 4 * uV per unit / N) in Q28. */
+static int32_t mains_pp_q28(int gain)
+{
+    uint64_t den = 10u * DSP_STREAM_SCALE * (uint64_t)(gain > 0 ? gain : 1) * DSP_MAINS_N;
+    return (int32_t)((((uint64_t)DSP_ADC_UV_PER_CODE_X10 << 30) + den / 2u) / den);
 }
 
 static const int32_t coef[2] = { DSP_MAINS_C50, DSP_MAINS_C60 };
@@ -15,7 +25,7 @@ static const int32_t coef[2] = { DSP_MAINS_C50, DSP_MAINS_C60 };
 void dsp_mains_init(dsp_mains_t *m, int gain)
 {
     m->s1[0] = m->s1[1] = m->s2[0] = m->s2[1] = 0;
-    m->pp_q28 = gain >= 1000 ? DSP_MAINS_PP_Q28_G1098 : DSP_MAINS_PP_Q28_G558;
+    m->pp_q28 = mains_pp_q28(gain);
     m->n = 0;
     m->uvpp[0] = m->uvpp[1] = 0;
     m->sel_hz = 0;

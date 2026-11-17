@@ -37,12 +37,14 @@ static double gain_at(double f, uint8_t notch, double settle_s)
 TEST(corners)
 {
     double g10 = gain_at(10, 0, 2);
-    double g05 = gain_at(0.5, 0, 8) / g10;
+    double g067 = gain_at(0.67, 0, 8) / g10;
+    double g03 = gain_at(0.3, 0, 8) / g10;
     double g40 = gain_at(40, 0, 1) / g10;
-    printf("  gain 10 Hz %.4f; -3 dB checks: 0.5 Hz %.2f dB, 40 Hz %.2f dB\n", g10,
-           20 * log10(g05), 20 * log10(g40));
+    printf("  gain 10 Hz %.4f; -3 dB checks: 0.67 Hz %.2f dB, 40 Hz %.2f dB; 0.3 Hz %.1f dB\n",
+           g10, 20 * log10(g067), 20 * log10(g40), 20 * log10(g03));
     CHECK_NEAR(g10, 1.0, 0.02);
-    CHECK_NEAR(20 * log10(g05), -3.01, 0.3);
+    CHECK_NEAR(20 * log10(g067), -3.01, 0.3);
+    CHECK(20 * log10(g03) < -12); /* breathing-rate baseline wander */
     CHECK_NEAR(20 * log10(g40), -3.01, 0.3);
     double g150 = gain_at(150, 0, 1);
     printf("  150 Hz %.1f dB\n", 20 * log10(g150));

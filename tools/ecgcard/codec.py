@@ -210,6 +210,8 @@ class StateEvent:
     batt_pct: int
     flags: int  # bit0 usb, bit1 charging
     seq: int = 0
+    gain_lo: int = 558    # ECG front-end gains (absent in the 7-byte form: as built)
+    gain_hi: int = 1098
 
 
 @dataclass
@@ -247,7 +249,8 @@ def message_payload(msg: Message) -> tuple[int, bytes]:
     if isinstance(msg, LeadEvent):
         return STREAM_EVENT, struct.pack("<BB", EV_LEAD, msg.contact)
     if isinstance(msg, StateEvent):
-        return STREAM_EVENT, struct.pack("<BBBHBB", EV_STATE, msg.mode, msg.notch_hz, msg.mid_code, msg.batt_pct, msg.flags)
+        return STREAM_EVENT, struct.pack("<BBBHBBHH", EV_STATE, msg.mode, msg.notch_hz, msg.mid_code, msg.batt_pct,
+                                         msg.flags, msg.gain_lo, msg.gain_hi)
     if isinstance(msg, ButtonEvent):
         return STREAM_EVENT, struct.pack("<BBB", EV_BUTTON, msg.button, msg.kind)
     if isinstance(msg, Log):
@@ -273,10 +276,10 @@ def parse_payload(ftype: int, seq: int, payload: bytes) -> Message | None:
         if n < 1:
             raise FrameError("length", "empty event")
         kind = payload[0]
-        sizes = {EV_R_PEAK: 7, EV_PULSE: 11, EV_LEAD: 2, EV_STATE: 7, EV_BUTTON: 3}
+        sizes = {EV_R_PEAK: 7, EV_PULSE: 11, EV_LEAD: 2, EV_STATE: 11, EV_BUTTON: 3}
         if kind not in sizes:
             return None
-        if n != sizes[kind]:
+        if n != sizes[kind] and not (kind == EV_STATE and n == 7):  # 7: firmware before the gains
             raise FrameError("length", "event size")
         if kind == EV_R_PEAK:
             return RPeakEvent(*struct.unpack_from("<IH", payload, 1), seq=seq)
@@ -286,6 +289,9 @@ def parse_payload(ftype: int, seq: int, payload: bytes) -> Message | None:
             return LeadEvent(payload[1], seq)
         if kind == EV_STATE:
             mode, notch, mid, batt, flags = struct.unpack_from("<BBHBB", payload, 1)
+            if n == 11:
+                g_lo, g_hi = struct.unpack_from("<HH", payload, 7)
+                return StateEvent(mode, notch, mid, batt, flags, seq, g_lo, g_hi)
             return StateEvent(mode, notch, mid, batt, flags, seq)
         return ButtonEvent(payload[1], payload[2], seq)
     if ftype == STREAM_LOG:

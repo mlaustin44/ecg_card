@@ -49,6 +49,15 @@ test("ECG block: layout and uV scaling at both gains", () => {
   }
   // 1 mV at gain 1098: 1000 uV * 8 * 1098 / 805.7 stream units
   close(Math.round(1000 * 8 * 1098 / 805.7) * C.ecgUvPerUnit(1), 1000, 1e-3);
+  // a reworked card reports its gains in EV_STATE: conversions and labels follow
+  assert.equal(C.setGains(252, 561), true);
+  assert.equal(C.setGains(252, 561), false);       // unchanged
+  assert.equal(C.setGains(600, 500), false);       // nonsense is ignored
+  assert.equal(C.ecgGain(0), 252); assert.equal(C.ecgGain(1), 561);
+  close(1000 * C.ecgUvPerUnit(0), 1000 * 805.7 / (8 * 252));
+  assert.equal(C.settingText(0, 1), "252x (lo)");
+  assert.equal(C.setGains(558, 1098), true);       // back to as built for the other tests
+  assert.equal(C.settingText(0, 2), "1098x (hi)");
   const start = C.newEcgBlock();
   assert.equal(C.parseEcg(dv(bytes(le32(0xffffffff), 0, new Array(20).fill(0))), start), null);
   assert.equal(start.start, 0xffffffff);
@@ -144,7 +153,10 @@ test("events: every kind from hand-built bytes", () => {
   assert.deepEqual(P(bytes(1, le32(123456), le16(72))), { sample: 123456, hr_bpm: 72 });
   assert.deepEqual(P(bytes(2, le32(0x89abcdef), le16(71), le16(212), le16(13))), { foot_sample: 0x89abcdef, pulse_bpm: 71, pat_ms: 212, pi_permille: 13 });
   assert.deepEqual(P(bytes(3, 1)), { contact: 1 });
-  assert.deepEqual(P(bytes(4, 3, 60, le16(2048), 77, 3)), { mode: 3, notch_hz: 60, mid_code: 2048, batt_pct: 77, flags: 3 });
+  // 7-byte form (older firmware): the as-built gains; 11-byte form carries the card's gains
+  assert.deepEqual(P(bytes(4, 3, 60, le16(2048), 77, 3)), { mode: 3, notch_hz: 60, mid_code: 2048, batt_pct: 77, flags: 3, gain_lo: 558, gain_hi: 1098 });
+  assert.deepEqual(P(bytes(4, 1, 50, le16(2030), 90, 0, le16(252), le16(561))), { mode: 1, notch_hz: 50, mid_code: 2030, batt_pct: 90, flags: 0, gain_lo: 252, gain_hi: 561 });
+  assert.notEqual(C.parseEvent(dv(bytes(4, 1, 50, le16(2030), 90, 0, 1)), e), null); // 8 bytes: neither form
   assert.deepEqual(P(bytes(5, 2, 1)), { button: 2, kind: 1 });
   assert.deepEqual(P(bytes(6, 3, 2)), { cmd: 3, result: 2 });
   assert.match(C.describeEvent(e), /SET: BAD_ARG/);
@@ -186,9 +198,9 @@ test("command encoders (LINK_CMD payloads)", () => {
   assert.equal(C.describeCommand(C.cmdStart(2)), "START PPG");
   for (const b of [C.cmdStart(1), C.cmdStop(), C.cmdSet(0, 0), C.cmdSetTime(0, 0), C.cmdGetStatus()]) assert.ok(b.length >= 1 && b.length <= C.CMD_MAX_LEN);
   // settings.h enum sizes, item numbers and the items refused (BUSY) during a session
-  assert.deepEqual(C.SETTINGS.map((s) => s.options.length), [3, 3, 4, 3, 3, 2]);
-  assert.deepEqual(C.SETTINGS.map((s) => s.item), [0, 1, 2, 3, 4, 5]);
-  assert.deepEqual(C.SETTINGS.filter((s) => s.lockedInSession).map((s) => s.key), ["gain", "notch", "rld", "led_limit"]);
+  assert.deepEqual(C.SETTINGS.map((s) => s.options.length), [3, 3, 4, 3, 3, 2, 3]);
+  assert.deepEqual(C.SETTINGS.map((s) => s.item), [0, 1, 2, 3, 4, 5, 6]);
+  assert.deepEqual(C.SETTINGS.filter((s) => s.lockedInSession).map((s) => s.key), ["gain", "notch", "rld", "led_limit", "restore"]);
   assert.equal(C.SET_ITEM_BLE, 5);
   assert.deepEqual(Array.from(C.cmdSet(C.SET_ITEM_BLE, C.BLE_OFF)), [3, 5, 0]);
   assert.equal(C.describeCommand(C.cmdSet(5, 1)), "SET ble = on");
@@ -461,7 +473,7 @@ print(json.dumps(out))
   assert.deepEqual(Array.from(p.fine), [C.wrapI16(-33000), C.wrapI16(40000)]);
   const ev = C.newEvent();
   const want = [{ sample: 123456, hr_bpm: 72 }, { foot_sample: 2 ** 32 - 1, pulse_bpm: 66, pat_ms: 215, pi_permille: 11 }, { contact: 0 },
-    { mode: 3, notch_hz: 50, mid_code: 2047, batt_pct: 91, flags: 3 }, { button: 1, kind: 1 }];
+    { mode: 3, notch_hz: 50, mid_code: 2047, batt_pct: 91, flags: 3, gain_lo: 558, gain_hi: 1098 }, { button: 1, kind: 1 }];
   V.events.forEach((hx, i) => {
     assert.equal(C.parseEvent(dv(fromHex(hx)), ev), null);
     assert.deepEqual(C.eventFields(ev), want[i]);

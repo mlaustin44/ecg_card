@@ -26,7 +26,7 @@
 #define DSP_DECIM_TAIL_INIT { 32455, 33196, 32071, 32844, 34301, 14754, -2266, 447, 417, -335, 313, 0 }
 
 /* Display path, 500 Hz */
-#define DSP_DISP_HP_INIT { 1070379118, -1070379118, 0, -1067016412, 0 } /* 1st-order HP, -3 dB 0.500 Hz */
+#define DSP_DISP_HP_INIT { 1067368332, -2134736664, 1067368332, -2134698833, 1061032673 } /* 2nd-order Butterworth HP, -3 dB 0.670 Hz */
 #define DSP_DISP_NOTCH50_INIT { 1062613752, -1719345168, 1062613752, -1719345168, 1051485680 } /* Q 30, BW 1.67 Hz */
 #define DSP_DISP_NOTCH60_INIT { 1060415548, -1546019333, 1060415548, -1546019333, 1047089271 } /* Q 30, BW 2.00 Hz */
 #define DSP_DISP_LP_INIT { 49533645, 99067291, 49533645, -1403686611, 528079369 } /* 2nd-order Butterworth, -3 dB 40.00 Hz */
@@ -57,11 +57,9 @@
 #define DSP_MAINS_C50 1737350766
 #define DSP_MAINS_C60 1565448207
 
-/* Microvolts per stream unit = 805.7 / (8 * gain): Q20. Mains uVpp per
- * Goertzel |X| = 4 * uV / N: Q28. */
-#define DSP_UV_Q20_G558 189256 /* 0.180488 uV */
-#define DSP_MAINS_PP_Q28_G558 775192
-#define DSP_UV_Q20_G1098 96179 /* 0.091724 uV */
-#define DSP_MAINS_PP_Q28_G1098 393950
+/* Microvolts per stream unit = ADC uV per code / (STREAM_SCALE * gain),
+ * computed at init for any front-end gain (mains.c dsp_uv_q20()). */
+#define DSP_ADC_UV_PER_CODE_X10 8057
+#define DSP_STREAM_SCALE 8
 
 #endif

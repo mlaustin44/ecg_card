@@ -12,9 +12,10 @@
  *
  * STREAM_ECG_BLOCK (0x10), 25 bytes, every 20 ms:
  *   u32 start      index of the first sample (500 Hz, from acquisition start)
- *   u8  flags      bit0 gain_hi (1098x), bit1 settling, bit2 lead_off
+ *   u8  flags      bit0 gain_hi, bit1 settling, bit2 lead_off
  *   i16 s[10]      decimated ADC codes relative to mid-scale, times 8:
- *                  microvolts = s * 805.7 / (8 * gain), gain = 558 or 1098
+ *                  microvolts = s * 805.7 / (8 * gain), gain = gain_hi / gain_lo
+ *                  of the last EV_STATE (558 / 1098 as built)
  *
  * STREAM_PPG_BLOCK (0x11), 15 bytes, every 20 ms:
  *   u32 start      index of the first frame (100 Hz, from acquisition start)
@@ -34,7 +35,10 @@
  *                     u16 pat_ms (0 = n/a), u16 pi_permille
  *   EV_LEAD      (3): u8 contact (0 off, 1 on)
  *   EV_STATE     (4): u8 mode (0 idle, 1 ECG, 2 PPG, 3 both), u8 notch_hz,
- *                     u16 mid_code, u8 batt_pct, u8 flags (bit0 usb, bit1 charging)
+ *                     u16 mid_code, u8 batt_pct, u8 flags (bit0 usb, bit1 charging),
+ *                     u16 gain_lo, u16 gain_hi (ECG front-end gains, board.h).
+ *                     Older firmware sends the first 7 bytes only: then the
+ *                     gains are 558 / 1098.
  *   EV_BUTTON    (5): u8 button (1 or 2), u8 kind (0 short, 1 long)
  *
  * STREAM_LOG (0x30): UTF-8 text, no terminator. */

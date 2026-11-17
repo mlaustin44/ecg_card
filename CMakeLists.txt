@@ -8,6 +8,19 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 add_compile_options(-Wall -Wextra -Werror -Wshadow -Wdouble-promotion -Wundef)
 
+# ECG front-end gains (board.h): set both to match R35 / R68 on a reworked
+# board, e.g. -DECG_GAIN_LO=252 -DECG_GAIN_HI=561. Empty = as built (558 / 1098).
+set(ECG_GAIN_LO "" CACHE STRING "ECG gain with GAIN_HI low (empty: board.h default)")
+set(ECG_GAIN_HI "" CACHE STRING "ECG gain with GAIN_HI high (empty: board.h default)")
+if(NOT ECG_GAIN_LO STREQUAL "" OR NOT ECG_GAIN_HI STREQUAL "")
+  if(NOT ECG_GAIN_LO MATCHES "^[0-9]+$" OR NOT ECG_GAIN_HI MATCHES "^[0-9]+$"
+     OR NOT ECG_GAIN_LO LESS ECG_GAIN_HI)
+    message(FATAL_ERROR "ECG_GAIN_LO and ECG_GAIN_HI must both be set, integers, LO < HI")
+  endif()
+  add_compile_definitions(ECG_GAIN_LO=${ECG_GAIN_LO} ECG_GAIN_HI=${ECG_GAIN_HI})
+  message(STATUS "ECG front-end gains: ${ECG_GAIN_LO} / ${ECG_GAIN_HI}")
+endif()
+
 # Portable interface headers: board.h, hal.h, settings.h, ui_model.h, fw_config.h
 add_library(ecg_iface INTERFACE)
 target_include_directories(ecg_iface INTERFACE ${CMAKE_SOURCE_DIR}/fw/include)

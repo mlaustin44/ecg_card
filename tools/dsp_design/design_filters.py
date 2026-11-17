@@ -162,14 +162,20 @@ def design_decimator():
 
 
 # ---------------------------------------------------------------------------
-# 2. Display path at 500 Hz: 0.5 Hz HP (1st order), notch 50/60 (Q 30), 40 Hz LP
+# 2. Display path at 500 Hz: 0.67 Hz HP (Butterworth-2), notch 50/60 (Q 30), 40 Hz LP
 # ---------------------------------------------------------------------------
 NOTCH_Q = 30.0
 
 
+DISP_HP_HZ = 0.67   # monitor-mode lower corner (AHA): removes breathing wander
+
+
 def design_display():
-    b, a = ss.butter(1, 0.5, "high", fs=FS_ECG)
+    b, a = ss.butter(2, DISP_HP_HZ, "high", fs=FS_ECG)
     hp = biquad_q30(b, a)
+    hp[1] = -2 * hp[0]  # exact double zero at DC: no DC leak from rounding
+    hp[2] = hp[0]
+    check(hp[0] + hp[1] + hp[2] == 0, "display HP has an exact zero at DC")
     notch = {}
     for f0 in (50, 60):
         b, a = ss.iirnotch(f0, NOTCH_Q, fs=FS_ECG)
@@ -183,7 +189,7 @@ def design_display():
     sos_lp = sos_from_q30([lp])
     f_hp = find_3db(sos_hp, FS_ECG, 0.05, 5)
     f_lp = find_3db(sos_lp, FS_ECG, 10, 100)
-    check(abs(f_hp - 0.5) < 0.02, "display HP -3 dB at %.3f Hz (0.5)" % f_hp)
+    check(abs(f_hp - DISP_HP_HZ) < 0.02, "display HP -3 dB at %.3f Hz (%.2f)" % (f_hp, DISP_HP_HZ))
     check(abs(f_lp - 40) < 0.5, "display LP -3 dB at %.2f Hz (40)" % f_lp)
     for f0, c in notch.items():
         sos = sos_from_q30([c])
@@ -412,7 +418,7 @@ def gen_coefs(dec, disp, qrs, ppg, mains, uvk):
     o.append("#define DSP_DECIM_TAIL_INIT { %s }\n" % ", ".join("%d" % v for v in dec["tail"]))
 
     o.append("/* Display path, 500 Hz */")
-    o.append("#define DSP_DISP_HP_INIT %s /* 1st-order HP, -3 dB %.3f Hz */" % (bq_init(disp["hp"]), disp["f_hp"]))
+    o.append("#define DSP_DISP_HP_INIT %s /* 2nd-order Butterworth HP, -3 dB %.3f Hz */" % (bq_init(disp["hp"]), disp["f_hp"]))
     o.append("#define DSP_DISP_NOTCH50_INIT %s /* Q %.0f, BW %.2f Hz */" % (bq_init(disp["notch"][50]), NOTCH_Q, disp["notch_bw_50"]))
     o.append("#define DSP_DISP_NOTCH60_INIT %s /* Q %.0f, BW %.2f Hz */" % (bq_init(disp["notch"][60]), NOTCH_Q, disp["notch_bw_60"]))
     o.append("#define DSP_DISP_LP_INIT %s /* 2nd-order Butterworth, -3 dB %.2f Hz */\n" % (bq_init(disp["lp"]), disp["f_lp"]))
@@ -439,11 +445,10 @@ def gen_coefs(dec, disp, qrs, ppg, mains, uvk):
     o.append("#define DSP_MAINS_C50 %d" % mains[50])
     o.append("#define DSP_MAINS_C60 %d\n" % mains[60])
 
-    o.append("/* Microvolts per stream unit = 805.7 / (8 * gain): Q20. Mains uVpp per\n"
-             " * Goertzel |X| = 4 * uV / N: Q28. */")
-    for g in GAINS:
-        o.append("#define DSP_UV_Q20_G%d %d /* %.6f uV */" % (g, uvk[g]["uv_q20"], uvk[g]["uv"]))
-        o.append("#define DSP_MAINS_PP_Q28_G%d %d" % (g, uvk[g]["pp_q28"]))
+    o.append("/* Microvolts per stream unit = ADC uV per code / (STREAM_SCALE * gain),\n"
+             " * computed at init for any front-end gain (mains.c dsp_uv_q20()). */")
+    o.append("#define DSP_ADC_UV_PER_CODE_X10 %d" % int(round(ADC_UV_PER_CODE * 10)))
+    o.append("#define DSP_STREAM_SCALE %d" % STREAM_SCALE)
     o.append("\n#endif")
     return "\n".join(o) + "\n"
 

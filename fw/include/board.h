@@ -38,7 +38,7 @@ typedef enum {
     PIN_OLED_EN,      /* high = OLED_VCC on */
     PIN_VLED_EN,      /* high = 4.99 V LED boost on */
     PIN_ANA_EN,       /* high = +3V3_SW / +3V3A on */
-    PIN_GAIN_HI,      /* high = ECG gain 1098x, low = 558x */
+    PIN_GAIN_HI,      /* high = ECG_GAIN_HI, low = ECG_GAIN_LO */
     PIN_OLED_DC,
     PIN_OLED_CS,      /* active low */
     PIN_OLED_RESET,   /* active low */
@@ -70,8 +70,21 @@ typedef enum {
 #define ECG_RAW_HZ       4000u /* ADC0 trigger rate, HW average x4 per trigger */
 #define ECG_DECIM        8u
 #define ECG_HZ           500u  /* stream / processing rate */
+/* Front-end gain = 21 x (1 + R33 / R) with R33 = 1 M and R = R35 (GAIN_HI
+ * low) or R35 || R68 (GAIN_HI high). As built (R35 = R68 = 39 k): 558 / 1098.
+ * A board with other resistors is built with matching values, e.g.
+ * cmake --preset target -DECG_GAIN_LO=252 -DECG_GAIN_HI=561 (91 k / 68 k).
+ * The firmware reports both in EV_STATE (stream_fmt.h). */
+#ifndef ECG_GAIN_LO
 #define ECG_GAIN_LO      558
+#endif
+#ifndef ECG_GAIN_HI
 #define ECG_GAIN_HI      1098
+#endif
+#define ECG_GAIN_STR_(x) #x
+#define ECG_GAIN_STR(x)  ECG_GAIN_STR_(x)
+#define ECG_GAIN_LO_TXT  ECG_GAIN_STR(ECG_GAIN_LO) "x" /* e.g. "558x" */
+#define ECG_GAIN_HI_TXT  ECG_GAIN_STR(ECG_GAIN_HI) "x"
 #define ECG_VMID_SETTLE_MS       300u
 /* VMID is half of +3V3A (about 20 mV below +3V3 after R43) while the ADC
  * reference is +3V3, so a healthy board reads about 10 mV under 1650 mV.

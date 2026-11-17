@@ -1,12 +1,13 @@
 /* ECG display path at 500 Hz: stream units in, microvolts out.
  *
- *   1st-order 0.5 Hz high-pass  ->  mains notch (50 / 60 Hz, Q 30, or off)
+ *   Butterworth-2 0.67 Hz high-pass (monitor mode: breathing wander at
+ *   0.3 Hz is 14 dB down)  ->  mains notch (50 / 60 Hz, Q 30, or off)
  *   ->  2nd-order Butterworth 40 Hz low-pass  ->  x 805.7 / (8 * gain)
  *
  * Internal precision: stream units with 8 fractional bits, Q30 biquads with
  * fraction saving (dsp_biquad.h). Notch envelope time constant 190 ms (50 Hz)
- * / 160 ms (60 Hz); HP time constant 318 ms. Group delay at 10 Hz is
- * DSP_DISP_DELAY_Q8 / 256 samples (about 6.8 ms): for drawing only. */
+ * / 160 ms (60 Hz). Group delay at 10 Hz is DSP_DISP_DELAY_Q8 / 256 samples
+ * (about 7.5 ms): for drawing only. */
 #ifndef DSP_ECG_DISP_H
 #define DSP_ECG_DISP_H
 
@@ -22,7 +23,7 @@ typedef struct {
     uint8_t primed;
 } dsp_disp_t;         /* 68 bytes */
 
-/* gain: ECG_GAIN_LO (558) or ECG_GAIN_HI (1098). notch_hz: 50, 60 or 0 (off). */
+/* gain: ECG_GAIN_LO or ECG_GAIN_HI (any front-end gain). notch_hz: 50, 60 or 0 (off). */
 void dsp_disp_init(dsp_disp_t *s, int gain, uint8_t notch_hz);
 
 /* Change the notch (keeps the filter running; expect a ~0.5 s transient). */
